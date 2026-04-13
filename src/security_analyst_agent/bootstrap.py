@@ -1,0 +1,67 @@
+import argparse
+import json
+from pathlib import Path
+import sqlite3
+
+from security_analyst_agent.config import DEFAULT_DB_PATH, FIXTURE_DIR
+from security_analyst_agent.db import connect_db, create_schema
+
+
+def _read_fixture(fixture_dir: Path, filename: str) -> list[dict]:
+    return json.loads((fixture_dir / filename).read_text(encoding="utf-8"))
+
+
+def _reset_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        delete from intel_cache;
+        delete from evidence;
+        delete from timeline_events;
+        delete from alerts;
+        delete from cases;
+        delete from assets;
+        """
+    )
+
+
+def _insert_many(conn: sqlite3.Connection, table_name: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+    columns = list(rows[0].keys())
+    placeholders = ", ".join("?" for _ in columns)
+    sql = f"insert into {table_name} ({', '.join(columns)}) values ({placeholders})"
+    values = [tuple(row[column] for column in columns) for row in rows]
+    conn.executemany(sql, values)
+
+
+def bootstrap_spike_database(db_path: Path, fixture_dir: Path = FIXTURE_DIR) -> None:
+    conn = connect_db(db_path)
+    create_schema(conn)
+
+    timeline_rows = _read_fixture(fixture_dir, "timeline.json")
+    for row in timeline_rows:
+        row["related_alert_ids"] = json.dumps(row["related_alert_ids"], ensure_ascii=False)
+        row["related_evidence_ids"] = json.dumps(row["related_evidence_ids"], ensure_ascii=False)
+
+    _reset_tables(conn)
+    _insert_many(conn, "assets", _read_fixture(fixture_dir, "assets.json"))
+    _insert_many(conn, "cases", _read_fixture(fixture_dir, "cases.json"))
+    _insert_many(conn, "alerts", _read_fixture(fixture_dir, "alerts.json"))
+    _insert_many(conn, "timeline_events", timeline_rows)
+    _insert_many(conn, "evidence", _read_fixture(fixture_dir, "evidence.json"))
+    _insert_many(conn, "intel_cache", _read_fixture(fixture_dir, "intel_cache.json"))
+    conn.commit()
+    conn.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Bootstrap spike SQLite database")
+    parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
+    args = parser.parse_args()
+    bootstrap_spike_database(args.db_path)
+    print(f"bootstrapped: {args.db_path}")
+
+
+if __name__ == "__main__":
+    main()
+

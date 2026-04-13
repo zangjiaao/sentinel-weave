@@ -1,0 +1,39 @@
+[
+  {
+    "timeline_event_id": "tl_day1_recon",
+    "case_id": "case_demo_001",
+    "occurred_at": "2026-04-10T09:10:00+08:00",
+    "stage": "recon",
+    "title": "对公网入口进行打点",
+    "related_alert_ids": [
+      "alt_day1_scan_01"
+    ],
+    "related_evidence_ids": []
+  },
+  {
+    "timeline_event_id": "tl_day2_webshell",
+    "case_id": "case_demo_001",
+    "occurred_at": "2026-04-11T14:20:00+08:00",
+    "stage": "persistence",
+    "title": "利用漏洞写入 webshell",
+    "related_alert_ids": [
+      "alt_day2_webshell_01"
+    ],
+    "related_evidence_ids": [
+      "evi_webshell_01"
+    ]
+  },
+  {
+    "timeline_event_id": "tl_day3_shell",
+    "case_id": "case_demo_001",
+    "occurred_at": "2026-04-12T11:03:00+08:00",
+    "stage": "command_execution",
+    "title": "新源 IP 连接既有 webshell 并尝试命令执行",
+    "related_alert_ids": [
+      "alt_day3_shell_01"
+    ],
+    "related_evidence_ids": [
+      "evi_shell_conn_01"
+    ]
+  }
+]

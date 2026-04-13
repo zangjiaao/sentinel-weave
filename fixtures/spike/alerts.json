@@ -1,0 +1,38 @@
+[
+  {
+    "alert_id": "alt_day1_scan_01",
+    "case_id": "case_demo_001",
+    "occurred_at": "2026-04-10T09:10:00+08:00",
+    "title": "扫描多个公网 Web 入口",
+    "status": "open",
+    "severity": "medium",
+    "attack_stage": "recon",
+    "src_ip": "198.51.100.23",
+    "dst_ip": "203.0.113.10",
+    "asset_id": "asset_api_prod"
+  },
+  {
+    "alert_id": "alt_day2_webshell_01",
+    "case_id": "case_demo_001",
+    "occurred_at": "2026-04-11T14:20:00+08:00",
+    "title": "漏洞利用后写入 webshell",
+    "status": "open",
+    "severity": "high",
+    "attack_stage": "persistence",
+    "src_ip": "198.51.100.23",
+    "dst_ip": "203.0.113.10",
+    "asset_id": "asset_api_prod"
+  },
+  {
+    "alert_id": "alt_day3_shell_01",
+    "case_id": "case_demo_001",
+    "occurred_at": "2026-04-12T11:03:00+08:00",
+    "title": "新 IP 连接 webshell",
+    "status": "open",
+    "severity": "high",
+    "attack_stage": "command_execution",
+    "src_ip": "198.51.100.77",
+    "dst_ip": "203.0.113.10",
+    "asset_id": "asset_api_prod"
+  }
+]

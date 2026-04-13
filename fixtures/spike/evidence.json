@@ -1,0 +1,14 @@
+[
+  {
+    "evidence_id": "evi_webshell_01",
+    "case_id": "case_demo_001",
+    "evidence_type": "payload",
+    "summary": "上传行为包含 webshell 落地痕迹"
+  },
+  {
+    "evidence_id": "evi_shell_conn_01",
+    "case_id": "case_demo_001",
+    "evidence_type": "connection",
+    "summary": "新源 IP 连接已存在 webshell"
+  }
+]

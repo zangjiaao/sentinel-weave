@@ -1,0 +1,11 @@
+[
+  {
+    "asset_id": "asset_api_prod",
+    "asset_name": "api-prod",
+    "system_name": "统一认证 API",
+    "owner_team": "identity",
+    "internet_exposed": 1,
+    "public_ip": "203.0.113.10",
+    "domain": "api.example.com"
+  }
+]

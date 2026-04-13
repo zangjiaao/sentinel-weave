@@ -1,0 +1,9 @@
+[
+  {
+    "indicator": "198.51.100.23",
+    "indicator_type": "ip",
+    "verdict": "malicious",
+    "confidence": 0.92,
+    "queried_at": "2026-04-12T12:00:00+08:00"
+  }
+]

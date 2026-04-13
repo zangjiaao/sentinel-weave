@@ -1,0 +1,10 @@
+[
+  {
+    "case_id": "case_demo_001",
+    "title": "多阶段 Web 入侵与后续横向准备",
+    "status": "open",
+    "overall_severity": "high",
+    "current_stage": "lateral_prep",
+    "primary_actor_id": "actor_demo_001"
+  }
+]
