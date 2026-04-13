@@ -1,0 +1,4 @@
+interface:
+  display_name: "SecAgent Patrol"
+  short_description: "Guide Hermes to use secagent MCP correctly."
+  default_prompt: "Use $secagent-patrol to triage alerts through the secagent MCP tools and write an evidence-based patrol report."

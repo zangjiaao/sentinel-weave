@@ -41,13 +41,33 @@ PoC 阶段暂不追求以下能力：
 
 ## 3. 已确认设计决策
 
-- 主运行时采用 `Hermes`，优先验证工作流
+- 当前 Spike 使用 `Hermes` 验证长期巡检工作流，但核心能力必须保持 `runtime-neutral`
+- `Hermes` 的定位是可替换的 `Runner Adapter`，不是业务核心、事实源或唯一记忆系统
 - 采用“案件/攻击活动中心”而不是“单告警中心”的研判视角
 - 采用“确定性流水线 + 单主 Agent”的混合架构
 - Agent 主要负责研判、补证、总结，不负责全部数据处理
 - 工具层优先做只读 CLI，并统一输出 JSON
 - 结构化状态存数据库，不能只依赖聊天上下文记忆
 - 通知由规则和 Agent 共同决定，不能仅依赖单一 IP 风险分
+
+### 3.1 Runtime Neutral 原则
+
+PoC 可以使用 `Hermes`，但不能把系统能力写死在 `Hermes` 里。后续如果替换为 `OpenAI SDK Runner` 或自研轻量运行时，核心分析流程、数据状态和审计能力仍应可复现。
+
+必须满足：
+
+- 资产、告警、案件、证据、攻击者画像、评分、反馈等事实状态必须进入系统数据库
+- `Hermes memory` 只允许保存巡检摘要、关注点、临时假设、待补证问题等工作记忆
+- Tool 合约独立于 `Hermes`，同一套 Tool 应能被 CLI、MCP、`Hermes Runner` 或 `OpenAI SDK Runner` 调用
+- Skill、SOP、Prompt 模板必须以仓库文件作为真源，不能只存在于本机 `~/.hermes` 配置
+- 每轮 Agent 运行的输入、工具调用、输出、写入状态应进入系统可审计记录，不能只依赖 `Hermes session`
+
+判断是否过度依赖 `Hermes` 的红线：
+
+- 换掉 `Hermes` 后案件状态、用户反馈或评分历史丢失
+- 告警关联、噪音处理或报告模板只存在于 `Hermes` 私有配置
+- 历史分析无法通过数据库状态和 Tool 调用记录复现
+- `Hermes memory` 成为事实证据库或唯一审计来源
 
 ## 4. 总体架构
 
@@ -120,13 +140,28 @@ PoC 阶段输出两类结果：
 - 值守快报：用于第一时间通知
 - 分析报告草稿：用于复盘和正式上报
 
-### 4.7 Hermes 接入策略
+### 4.7 Runner Adapter 与 Hermes 接入策略
 
-PoC 阶段确认采用 `Hermes Agents` 作为主 Agent 运行时，但 Hermes 的定位应明确为：
+PoC 阶段确认先采用 `Hermes Agents` 作为巡检型 Agent 运行时，用于验证长期巡检、Skill 约束和工作记忆。但从架构上，`Hermes` 只属于 `Runner Adapter` 层。
+
+`Runner Adapter` 的职责是：
+
+- 接收后端触发的巡检、案件评估或报告生成任务
+- 组装任务所需的策略文件、上下文摘要和 Tool 能力
+- 调用模型并执行受控 Tool
+- 将结论、记忆摘要、工具调用和状态变更建议回写给系统
+
+当前可选 Runner 包括：
+
+- `Hermes Runner`：适合持续巡检、Skill 执行、跨轮次工作记忆
+- `OpenAI SDK Runner`：适合较轻的导入清洗、报告生成、单次分析或后续自研 runtime 过渡
+
+Hermes 的定位应明确为：
 
 - 编排层
 - 研判层
 - 记忆增强层
+- 可替换运行时适配层
 
 而不是：
 

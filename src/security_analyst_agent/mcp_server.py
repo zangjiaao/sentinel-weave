@@ -32,6 +32,34 @@ TOOL_DESCRIPTIONS = {
     "report.draft": "生成案件分析报告草稿。",
 }
 
+PROMPT_GUIDANCE = {
+    "case.explain-link": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"case_id": "<case_id>", "target_type": "alert", "target_id": "<alert_id>"}',
+            "仅支持 `target_type=alert`。",
+        ]
+    ),
+    "intel.lookup": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"indicator": "<ip_or_indicator>", "indicator_type": "ip"}',
+        ]
+    ),
+    "notify.preview": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"case_id": "<case_id>", "channel": "email", "template": "high_severity"}',
+        ]
+    ),
+    "report.draft": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"case_id": "<case_id>", "template": "standard", "tone": "analytical"}',
+        ]
+    ),
+}
+
 
 def resolve_db_path(db_path: Path | None = None) -> Path:
     if db_path is not None:
@@ -91,6 +119,12 @@ def create_mcp_server(db_path: Path | None = None) -> FastMCP:
             description=TOOL_DESCRIPTIONS[tool_name],
             structured_output=True,
         )
+
+    for prompt_name, prompt_text in PROMPT_GUIDANCE.items():
+        @server.prompt(name=prompt_name, description=f"{prompt_name} usage guidance")
+        def _prompt(text: str = prompt_text) -> str:
+            return text
+
     return server
 
 

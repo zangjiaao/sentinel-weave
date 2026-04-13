@@ -1,3 +1,5 @@
+import asyncio
+
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 
 
@@ -40,3 +42,47 @@ def test_mcp_tools_return_dict(tmp_path) -> None:
 
     assert body["ok"] is True
     assert body["data"]["case"]["case_id"] == "case_demo_001"
+
+
+def test_mcp_server_exposes_guidance_prompts() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+
+    prompts = asyncio.run(server.list_prompts())
+    names = {item.name for item in prompts}
+
+    assert "case.explain-link" in names
+    assert "intel.lookup" in names
+
+
+def test_mcp_prompt_case_explain_link_contains_usage_guidance() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+    result = asyncio.run(server.get_prompt("case.explain-link"))
+    text = "\n".join(
+        message.content.text
+        for message in result.messages
+        if getattr(message.content, "text", None)
+    )
+
+    assert '"target_type": "alert"' in text
+    assert '"target_id": "<alert_id>"' in text
+    assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
+
+
+def test_mcp_prompt_intel_lookup_contains_usage_guidance() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+    result = asyncio.run(server.get_prompt("intel.lookup"))
+    text = "\n".join(
+        message.content.text
+        for message in result.messages
+        if getattr(message.content, "text", None)
+    )
+
+    assert '"indicator": "<ip_or_indicator>"' in text
+    assert '"indicator_type": "ip"' in text
+    assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text

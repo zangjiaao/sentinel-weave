@@ -6,6 +6,8 @@
 - 默认模式：本地 CLI Tool 注册
 - 不包含真实设备接入
 - 不包含自动发送通知
+- Hermes 仅作为当前 Spike 的 `Runner Adapter`，不是业务核心或唯一状态源
+- 仓库文件是 Skill / Prompt / Tool 配置真源，`~/.hermes` 下的内容只视为本机运行态产物
 
 ## Prerequisites
 
@@ -14,6 +16,7 @@
 3. 已执行数据库引导：`uv run python -m security_analyst_agent.bootstrap --db-path ./spike.db`
 4. 已设置环境变量（建议绝对路径）：`export SPIKE_DB_PATH=/Users/zangjiaao/Codebase/ai-pentester/spike.db`
 5. 确认 CLI 可调用：`uv run python -m security_analyst_agent.cli alert.fetch --db-path ./spike.db --payload '{}'`
+6. 确认 Hermes 全局提示词文件存在：`/Users/zangjiaao/.hermes/SOUL.md`
 
 ## Register Tool Registry
 
@@ -45,6 +48,21 @@
 5. 在会话中刷新：
    - `/reload-mcp`
 
+## Configure SOUL + Skill
+
+1. 更新 Hermes 全局行为文件：`/Users/zangjiaao/.hermes/SOUL.md`
+   - 注意：该文件是本机运行态配置，不是项目真源
+   - 后续部署到其他机器时，应从仓库模板或 bootstrap 脚本生成
+2. 在 `SOUL.md` 中声明：
+   - 优先加载 `secagent-patrol`
+   - 巡检时不要自由试探 `case.explain-link`、`intel.lookup`、`notify.preview`、`report.draft` 参数
+   - MCP prompt 仅作为兜底说明
+3. 将仓库中的 Skill 同步到 Hermes：
+   - `rm -rf ~/.hermes/skills/secagent-patrol && cp -R skills/secagent-patrol ~/.hermes/skills/secagent-patrol`
+4. 确认 `secagent-patrol` 已出现在 Hermes 可用技能列表
+5. 将 Skill 绑定到 patrol cron：
+   - `hermes cron edit d27a82c0fa79 --add-skill secagent-patrol`
+
 ## Create Main Analyst Agent
 
 1. 新建单个 `main analyst agent`
@@ -64,13 +82,32 @@
    - `default_filters.status = [new, open]`
    - `max_alerts_per_run = 10`
    - `write_memory_on_finish = true`
+3. 优先依赖 `SOUL.md + secagent-patrol` 约束巡检行为
+4. 使用仓库中的 prompt 模板同步 cron 提示词：
+   - `hermes cron edit d27a82c0fa79 --prompt "$(cat hermes/patrol-prompt.md)"`
 
 ## Minimal Smoke Loop
 
 1. 手工触发一轮巡检
 2. Confirm `alert.fetch` is called first
-3. 选择一个告警并继续调用 `case.get` 与 `case.timeline`
-4. 若证据不足，再触发一次 `intel.lookup`
-5. 对高风险案件生成 `notify.preview`
-6. 最后生成 `report.draft`
-7. 确认本轮无任何通知发送动作，仅有草稿输出
+3. Confirm patrol run has `secagent-patrol` attached
+4. 选择一个告警并继续调用 `case.get` 与 `case.timeline`
+5. 若证据不足，再触发一次 `intel.lookup`
+6. 对高风险案件生成 `notify.preview`
+7. 最后生成 `report.draft`
+8. 确认本轮无任何通知发送动作，仅有草稿输出
+9. Confirm output includes `Tool Calls`
+10. Confirm output includes `Memory Summary`
+11. Confirm output includes `Remaining Uncertainty`
+12. Confirm all report timestamps use `Asia/Shanghai`
+13. Confirm assessment wording avoids unjustified absolute claims
+
+## Runtime Boundary Checks
+
+每次调整 Hermes 接入方式时，都要确认：
+
+1. 资产、告警、案件、证据、评分、用户反馈仍以数据库为事实源
+2. Hermes memory 只保存巡检摘要、关注点、临时假设和待补证项
+3. Tool 合约仍可被 CLI / MCP / Hermes / OpenAI SDK runner 复用
+4. Skill、SOP、Prompt 模板仍以仓库文件为真源
+5. Hermes session 不是唯一审计来源，关键输入、工具调用和输出需要能被系统记录或复现

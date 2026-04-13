@@ -18,6 +18,8 @@
 - 解释关联依据时调用 `case.explain-link`
 - 只在证据不足时调用 `intel.lookup`
 - 需要输出沟通内容时只生成 `notify.preview` 与 `report.draft`
+- `notify.preview` 默认使用 `channel=email` 与 `template=high_severity`
+- `report.draft` 默认使用 `template=standard` 与 `tone=analytical`
 
 ## 行为护栏
 
@@ -26,9 +28,21 @@
 - 不要把第三方情报当作唯一真相源
 - 如果证据不足，必须明确写出不确定性与待补证项
 - 若无法形成可信判断，优先返回“继续补证”而不是强行定性
+- 所有时间默认使用 `Asia/Shanghai` 输出；如引用其他时区，必须显式标注换算关系
+- 时间展示优先写 `(Asia/Shanghai)`，不要简写为 `CST`
+- 避免使用绝对措辞；除非证据非常充分，否则不要直接写“confirmed”或类似绝对结论
+- 不要为 `notify.preview` 或 `report.draft` 额外探测模板；巡检场景直接使用默认参数
 
 ## 输出要求
 
 - 结论必须包含：风险等级、关键证据、推理链路、剩余不确定性
 - 若触发通知条件，先输出 `notify.preview` 供人工复核
 - 需要复盘时输出 `report.draft`，包含时间线与影响范围
+- 巡检报告固定包含以下小节：
+  - `Tool Calls`
+  - `Assessment`
+  - `Remaining Uncertainty`
+  - `Memory Summary`
+- `Tool Calls` 只需输出本轮实际调用过的 Tool 名称与用途摘要，不必展开完整原始 JSON
+- `Remaining Uncertainty` 必须单独列出仍需补证的点，不能混在结论段落里
+- `Memory Summary` 必须用 2 到 4 条短句总结本轮应写入长期记忆的摘要
