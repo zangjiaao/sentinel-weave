@@ -1,0 +1,124 @@
+{
+  "version": "0.1",
+  "runtime": "hermes",
+  "integration_mode": "local_cli",
+  "tools": [
+    {
+      "name": "alert.fetch",
+      "description": "拉取待研判告警摘要队列。",
+      "when_to_use": [
+        "开始一轮巡检时",
+        "需要获取最近的新告警摘要时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli alert.fetch --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "low",
+      "idempotent": true
+    },
+    {
+      "name": "alert.detail",
+      "description": "读取单条告警详情与关键证据摘要。",
+      "when_to_use": [
+        "需要深入确认某条告警细节时",
+        "需要补充告警证据字段时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli alert.detail --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "low",
+      "idempotent": true
+    },
+    {
+      "name": "asset.search",
+      "description": "按指标搜索资产并返回资产上下文。",
+      "when_to_use": [
+        "需要确认被攻击对象归属时",
+        "需要关联公网IP与业务系统时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli asset.search --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "low",
+      "idempotent": true
+    },
+    {
+      "name": "case.get",
+      "description": "读取案件头部摘要与当前风险结论。",
+      "when_to_use": [
+        "需要查看案件状态时",
+        "需要获得案件核心字段时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli case.get --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "low",
+      "idempotent": true
+    },
+    {
+      "name": "case.timeline",
+      "description": "读取案件时间线与攻击阶段演进。",
+      "when_to_use": [
+        "需要还原攻击链过程时",
+        "需要判断阶段是否升级时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli case.timeline --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "low",
+      "idempotent": true
+    },
+    {
+      "name": "case.explain-link",
+      "description": "解释事件与案件之间的关联依据。",
+      "when_to_use": [
+        "需要说明为何属于同一攻击链时",
+        "需要输出结构化关联理由时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli case.explain-link --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "low",
+      "idempotent": true
+    },
+    {
+      "name": "intel.lookup",
+      "description": "查询缓存化威胁情报用于补证。",
+      "when_to_use": [
+        "案件证据不足且需要外部情报佐证时",
+        "需要评估指标历史风险时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli intel.lookup --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 25,
+      "cost_level": "medium",
+      "idempotent": true
+    },
+    {
+      "name": "notify.preview",
+      "description": "生成通知预览草稿，不进行实际发送。",
+      "when_to_use": [
+        "确认高风险案件后需要通知内容草稿时",
+        "需要向人工值守输出即时摘要时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli notify.preview --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 15,
+      "cost_level": "medium",
+      "idempotent": true
+    },
+    {
+      "name": "report.draft",
+      "description": "生成案件分析报告草稿。",
+      "when_to_use": [
+        "需要产出可复盘的结构化报告草稿时",
+        "需要沉淀事件过程与证据摘要时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli report.draft --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": true,
+      "timeout_sec": 20,
+      "cost_level": "medium",
+      "idempotent": true
+    }
+  ]
+}

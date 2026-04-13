@@ -3,6 +3,7 @@ name = "security-analyst-agent"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+  "mcp>=1.27.0",
   "pydantic>=2.7,<3",
   "typer>=0.12,<1",
 ]

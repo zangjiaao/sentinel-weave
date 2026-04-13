@@ -1,0 +1,18 @@
+{
+  "schedule": "every_5m",
+  "entry_tool": "alert.fetch",
+  "default_filters": {
+    "status": [
+      "new",
+      "open"
+    ],
+    "limit": 20
+  },
+  "max_alerts_per_run": 10,
+  "stop_conditions": [
+    "no_more_alerts",
+    "time_budget_exceeded",
+    "high_risk_case_found"
+  ],
+  "write_memory_on_finish": true
+}
