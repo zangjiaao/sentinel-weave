@@ -10,7 +10,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def build_case_digest(conn: sqlite3.Connection, case_id: str) -> dict[str, Any] | None:
+def build_case_digest(
+    conn: sqlite3.Connection, case_id: str, analysis_cutoff_at: str | None = None
+) -> dict[str, Any] | None:
     case = load_case(conn, case_id)
     if case is None:
         return None
@@ -24,17 +26,34 @@ def build_case_digest(conn: sqlite3.Connection, case_id: str) -> dict[str, Any] 
         from case_alert_links
         join alerts on alerts.alert_id = case_alert_links.alert_id
         where case_alert_links.case_id = ?
-          and case_alert_links.is_active = 1
+          and (
+            (? is null and case_alert_links.is_active = 1)
+            or (
+              ? is not null
+              and case_alert_links.linked_at <= ?
+              and (case_alert_links.unlinked_at is null or case_alert_links.unlinked_at > ?)
+            )
+          )
+          and (? is null or alerts.occurred_at <= ?)
         """,
-        (case_id,),
+        (
+            case_id,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+        ),
     ).fetchone()
     timeline_stats = conn.execute(
         """
         select max(occurred_at) as latest_timeline_at
         from timeline_events
         where case_id = ?
+          and (? is null or occurred_at <= ?)
         """,
-        (case_id,),
+        (case_id, analysis_cutoff_at, analysis_cutoff_at),
     ).fetchone()
 
     active_alert_count = int(alert_stats["active_alert_count"] or 0)

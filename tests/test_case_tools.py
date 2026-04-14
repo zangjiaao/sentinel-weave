@@ -35,6 +35,16 @@ def test_case_explain_link_shows_positive_factors(db_conn) -> None:
     assert result["data"]["link_decision"]["positive_factors"]
 
 
+def test_case_explain_link_for_round1_alert_has_no_future_evidence(db_conn) -> None:
+    result = case_explain_link(
+        db_conn,
+        {"case_id": "case_demo_001", "target_type": "alert", "target_id": "alt_day1_scan_01"},
+    )
+    evidence_ids = result["data"]["link_decision"]["supporting_evidence_ids"]
+    assert "evi_webshell_01" not in evidence_ids
+    assert "evi_shell_conn_01" not in evidence_ids
+
+
 def test_case_upsert_creates_new_case(db_conn) -> None:
     result = case_upsert(
         db_conn,
@@ -194,6 +204,51 @@ def test_case_link_alert_keeps_single_active_case_per_alert(db_conn) -> None:
     assert any(row["case_id"] == "case_new_004" for row in inactive_rows)
 
 
+def test_case_link_alert_writes_link_decision_in_dedicated_table(db_conn) -> None:
+    case_upsert(
+        db_conn,
+        {
+            "case_id": "case_new_006",
+            "title": "link decision audit table test",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_new_006",
+        },
+    )
+    case_link_alert(
+        db_conn,
+        {
+            "case_id": "case_new_006",
+            "alert_id": "alt_day2_webshell_01",
+            "confidence": 0.88,
+            "reason": "dedicated link decision log",
+        },
+    )
+    link_row = db_conn.execute(
+        """
+        select alert_id, case_id, link_confidence, reason_summary
+        from link_decisions
+        where alert_id = ?
+        order by occurred_at desc
+        limit 1
+        """,
+        ("alt_day2_webshell_01",),
+    ).fetchone()
+    assert link_row is not None
+    assert link_row["case_id"] == "case_new_006"
+    assert link_row["reason_summary"] == "dedicated link decision log"
+
+    old_style = db_conn.execute(
+        """
+        select count(*)
+        from alert_decisions
+        where decision = 'link_alert'
+        """
+    ).fetchone()[0]
+    assert old_style == 0
+
+
 def test_case_update_risk_updates_case_fields(db_conn) -> None:
     result = case_update_risk(
         db_conn,
@@ -256,3 +311,28 @@ def test_case_update_risk_allows_stage_downgrade_with_force_flag(db_conn) -> Non
     assert result["ok"] is True
     assert "stage_downgrade_blocked" not in result["warnings"]
     assert result["data"]["case"]["current_stage"] == "command_execution"
+
+
+def test_case_update_risk_writes_case_assessment_log(db_conn) -> None:
+    case_update_risk(
+        db_conn,
+        {
+            "case_id": "case_demo_001",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "investigating",
+        },
+    )
+    row = db_conn.execute(
+        """
+        select case_id, risk_level, current_stage, verdict
+        from case_assessments
+        where case_id = ?
+        order by occurred_at desc
+        limit 1
+        """,
+        ("case_demo_001",),
+    ).fetchone()
+    assert row is not None
+    assert row["risk_level"] == "high"
+    assert row["current_stage"] == "lateral_prep"

@@ -20,12 +20,14 @@ def test_secagent_skill_contains_mcp_workflow_guidance() -> None:
     assert "`case.upsert`" in text
     assert "`case.link-alert`" in text
     assert "`case.update-risk`" in text
+    assert "`assessment.upsert`" in text
     assert "`intel.lookup`" in text
     assert "`notify.send`" in text
     assert "`report.draft`" in text
     assert "不要对同一个 `alert_id` 重复调用 `case.explain-link`" in text
     assert "不要对同一个 `indicator` 重复调用 `intel.lookup`" in text
     assert "优先复用 MCP prompt" in text
+    assert "analysis_cutoff_at" in text
 
 
 def test_secagent_skill_contains_output_contract() -> None:

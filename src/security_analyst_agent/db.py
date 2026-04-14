@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
 
@@ -7,6 +9,10 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _ensure_case_alert_links_shape(conn: sqlite3.Connection) -> None:
@@ -42,6 +48,62 @@ def _ensure_case_alert_links_shape(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("create index if not exists idx_case_alert_links_alert_id on case_alert_links(alert_id)")
+
+
+def _ensure_patrol_runs_shape(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("pragma table_info(patrol_runs)").fetchall()}
+    if not columns:
+        return
+    if "analysis_cutoff_at" not in columns:
+        conn.execute("alter table patrol_runs add column analysis_cutoff_at text")
+    conn.execute(
+        """
+        update patrol_runs
+        set analysis_cutoff_at = coalesce(analysis_cutoff_at, started_at)
+        where analysis_cutoff_at is null
+        """
+    )
+
+
+def _ensure_evidence_shape(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("pragma table_info(evidence)").fetchall()}
+    if not columns:
+        return
+    if "occurred_at" not in columns:
+        conn.execute("alter table evidence add column occurred_at text")
+
+    conn.execute(
+        """
+        update evidence
+        set occurred_at = (
+          select min(timeline_events.occurred_at)
+          from timeline_events
+          join json_each(timeline_events.related_evidence_ids)
+          where json_each.value = evidence.evidence_id
+        )
+        where occurred_at is null
+        """
+    )
+    conn.execute(
+        """
+        update evidence
+        set occurred_at = (
+          select min(alerts.occurred_at)
+          from alerts
+          join case_alert_links on case_alert_links.alert_id = alerts.alert_id
+          where case_alert_links.case_id = evidence.case_id
+        )
+        where occurred_at is null
+        """
+    )
+    conn.execute(
+        """
+        update evidence
+        set occurred_at = ?
+        where occurred_at is null
+        """,
+        (_now_iso(),),
+    )
 
 
 def _backfill_case_links_from_legacy_alert_case_id(conn: sqlite3.Connection) -> None:
@@ -127,6 +189,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
         create table if not exists evidence (
           evidence_id text primary key,
           case_id text not null,
+          occurred_at text,
           evidence_type text not null,
           summary text not null
         );
@@ -152,7 +215,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
           status text not null,
           summary text not null,
           started_at text not null,
-          finished_at text
+          finished_at text,
+          analysis_cutoff_at text not null
         );
         create table if not exists case_alert_links (
           case_id text not null,
@@ -210,6 +274,53 @@ def create_schema(conn: sqlite3.Connection) -> None:
           reason text not null,
           detail_json text not null
         );
+        create table if not exists link_decisions (
+          decision_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          alert_id text not null,
+          case_id text not null,
+          link_confidence real not null,
+          reason_summary text not null,
+          positive_factors_json text not null,
+          negative_factors_json text not null,
+          uncertainties_json text not null,
+          supporting_evidence_ids_json text not null,
+          analysis_cutoff_at text
+        );
+        create table if not exists case_assessments (
+          assessment_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          case_id text not null,
+          risk_level text not null,
+          assessment_confidence real,
+          current_stage text not null,
+          verdict text not null,
+          reason_summary text not null,
+          supporting_alert_ids_json text not null,
+          supporting_evidence_ids_json text not null,
+          analysis_cutoff_at text
+        );
+        create table if not exists entity_assessments (
+          assessment_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          entity_type text not null,
+          entity_key text not null,
+          entity_label text not null,
+          related_case_id text,
+          risk_level text not null,
+          assessment_confidence real not null,
+          verdict text not null,
+          reason_summary text not null,
+          supporting_alert_ids_json text not null,
+          supporting_evidence_ids_json text not null,
+          first_seen_at text,
+          last_seen_at text,
+          analysis_cutoff_at text,
+          is_current integer not null
+        );
         create table if not exists case_changes (
           change_id text primary key,
           occurred_at text not null,
@@ -239,5 +350,20 @@ def create_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    conn.execute(
+        """
+        create unique index if not exists idx_entity_assessments_current_unique
+        on entity_assessments(entity_type, entity_key, coalesce(related_case_id, ''))
+        where is_current = 1
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_entity_assessments_filter
+        on entity_assessments(entity_type, risk_level, occurred_at desc)
+        """
+    )
     _ensure_case_alert_links_shape(conn)
+    _ensure_patrol_runs_shape(conn)
+    _ensure_evidence_shape(conn)
     _backfill_case_links_from_legacy_alert_case_id(conn)

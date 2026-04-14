@@ -13,6 +13,7 @@ CORE_TOOL_NAMES = [
     "case.upsert",
     "case.link-alert",
     "case.update-risk",
+    "assessment.upsert",
     "intel.lookup",
     "notify.send",
     "notify.preview",
@@ -51,7 +52,7 @@ def test_tool_registry_contains_expected_tools() -> None:
     tools = data["tools"]
     names = [item["name"] for item in tools]
     assert names == CORE_TOOL_NAMES
-    assert len(names) == 14
+    assert len(names) == 15
 
     for item in tools:
         assert REQUIRED_TOOL_FIELDS.issubset(item.keys())
@@ -157,6 +158,8 @@ def test_patrol_prompt_contains_output_contract() -> None:
     assert "First call `alert.fetch`" in text
     assert "call `alert.ack` to set status to `triaged`" in text
     assert "Only call `intel.lookup` when evidence is insufficient" in text
+    assert "Use `assessment.upsert` to persist entity-level conclusions" in text
+    assert "Never use evidence beyond the current run `analysis_cutoff_at`" in text
     assert "Call `notify.send` only when case risk reaches escalation threshold" in text
     assert "When calling `notify.send`, default to `channel=email` and `template=high_severity`" in text
     assert "Only call `report.draft` when user explicitly requests a report" in text

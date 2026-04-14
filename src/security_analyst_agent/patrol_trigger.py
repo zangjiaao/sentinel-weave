@@ -36,12 +36,13 @@ def _load_pending_event_ids(conn: sqlite3.Connection) -> list[str]:
 
 def _create_patrol_run(conn: sqlite3.Connection, trigger_source: str, summary: str) -> str:
     run_id = f"run_{uuid4().hex[:12]}"
+    started_at = _now_iso()
     conn.execute(
         """
-        insert into patrol_runs (run_id, trigger_source, status, summary, started_at)
-        values (?, ?, ?, ?, ?)
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at)
+        values (?, ?, ?, ?, ?, ?)
         """,
-        (run_id, trigger_source, "running", summary, _now_iso()),
+        (run_id, trigger_source, "running", summary, started_at, started_at),
     )
     return run_id
 

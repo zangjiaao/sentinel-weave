@@ -49,6 +49,34 @@ def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     )
     dispatch_tool(
         conn,
+        "case.update-risk",
+        {
+            "case_id": "case_audit_001",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "investigating",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "assessment.upsert",
+        {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.23",
+            "entity_label": "198.51.100.23",
+            "related_case_id": "case_audit_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.93,
+            "verdict": "attacker",
+            "reason_summary": "audit coverage",
+            "supporting_alert_ids": ["alt_day1_scan_01"],
+            "supporting_evidence_ids": [],
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
         "alert.ack",
         {"alert_ids": ["alt_day2_webshell_01"], "status": "triaged"},
         source="cli",
@@ -56,11 +84,17 @@ def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
 
     tool_call_count = conn.execute("select count(*) from agent_tool_calls").fetchone()[0]
     alert_decision_count = conn.execute("select count(*) from alert_decisions").fetchone()[0]
+    link_decision_count = conn.execute("select count(*) from link_decisions").fetchone()[0]
+    case_assessment_count = conn.execute("select count(*) from case_assessments").fetchone()[0]
+    entity_assessment_count = conn.execute("select count(*) from entity_assessments").fetchone()[0]
     case_change_count = conn.execute("select count(*) from case_changes").fetchone()[0]
     escalation_count = conn.execute("select count(*) from escalation_decisions").fetchone()[0]
 
-    assert tool_call_count >= 4
-    assert alert_decision_count >= 2
+    assert tool_call_count >= 6
+    assert alert_decision_count >= 1
+    assert link_decision_count >= 1
+    assert case_assessment_count >= 1
+    assert entity_assessment_count >= 1
     assert case_change_count >= 1
     assert escalation_count >= 1
     conn.close()
@@ -84,6 +118,9 @@ def test_audit_cli_commands_return_rows(tmp_path) -> None:
     cases = [
         "audit.tool-calls",
         "audit.alert-decisions",
+        "audit.link-decisions",
+        "audit.case-assessments",
+        "audit.entity-assessments",
         "audit.case-changes",
         "audit.escalations",
     ]
@@ -130,6 +167,40 @@ def test_context_cli_commands_return_rows(tmp_path) -> None:
     assert "rows" in json.loads(state_result.stdout)
 
 
+def test_alert_decisions_no_longer_store_link_or_risk_semantics(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    dispatch_tool(
+        conn,
+        "case.link-alert",
+        {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_day1_scan_01",
+            "confidence": 0.8,
+            "reason": "semantic split check",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_demo_001",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "investigating",
+        },
+        source="cli",
+    )
+
+    decisions = conn.execute("select decision from alert_decisions").fetchall()
+    assert all(row["decision"] != "link_alert" for row in decisions)
+    assert conn.execute("select count(*) from link_decisions").fetchone()[0] >= 1
+    assert conn.execute("select count(*) from case_assessments").fetchone()[0] >= 1
+    conn.close()
+
+
 def test_mcp_alert_fetch_starts_auto_patrol_run_and_tags_run_id(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
@@ -147,7 +218,7 @@ def test_mcp_alert_fetch_starts_auto_patrol_run_and_tags_run_id(tmp_path) -> Non
     ).fetchone()
     run_row = conn.execute(
         """
-        select run_id, trigger_source, status
+        select run_id, trigger_source, status, analysis_cutoff_at
         from patrol_runs
         where trigger_source = 'mcp_auto'
         order by started_at desc
@@ -161,6 +232,7 @@ def test_mcp_alert_fetch_starts_auto_patrol_run_and_tags_run_id(tmp_path) -> Non
     assert run_row is not None
     assert run_row["run_id"] == call_row["run_id"]
     assert run_row["status"] == "running"
+    assert run_row["analysis_cutoff_at"] is not None
     conn.close()
 
 
@@ -241,3 +313,63 @@ def test_mcp_auto_run_closes_after_alert_ack_when_queue_drained(tmp_path) -> Non
     assert run_row["finished_at"] is not None
     assert run_row["summary"] == "auto_closed_after_alert_ack"
     conn.close()
+
+
+def test_entity_assessments_audit_filters_high_risk_attackers(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    dispatch_tool(
+        conn,
+        "assessment.upsert",
+        {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.23",
+            "entity_label": "198.51.100.23",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.93,
+            "verdict": "attacker",
+            "reason_summary": "high risk attacker",
+            "supporting_alert_ids": ["alt_day2_webshell_01"],
+            "supporting_evidence_ids": ["evi_webshell_01"],
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "assessment.upsert",
+        {
+            "entity_type": "ip",
+            "entity_key": "192.0.2.91",
+            "entity_label": "192.0.2.91",
+            "related_case_id": "case_noise_001",
+            "risk_level": "low",
+            "assessment_confidence": 0.55,
+            "verdict": "noise",
+            "reason_summary": "scan noise",
+            "supporting_alert_ids": [],
+            "supporting_evidence_ids": [],
+        },
+        source="cli",
+    )
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "audit.entity-assessments",
+            "--db-path",
+            str(db_path),
+            "--entity-type",
+            "ip",
+            "--risk-level",
+            "high",
+        ],
+    )
+    assert result.exit_code == 0
+    rows = json.loads(result.stdout)["rows"]
+    keys = {row["entity_key"] for row in rows}
+    assert "198.51.100.23" in keys
+    assert "192.0.2.91" not in keys

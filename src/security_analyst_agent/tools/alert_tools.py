@@ -4,16 +4,24 @@ from security_analyst_agent.repositories.alerts import (
     ack_alerts,
     fetch_alerts,
     get_alert_by_id,
+    get_alert_evidence_summaries,
     get_case_evidence_summaries,
 )
-from security_analyst_agent.repositories.audit import insert_alert_decision_log
+from security_analyst_agent.repositories.audit import insert_alert_decision_log, load_active_analysis_cutoff
 from security_analyst_agent.schemas.alert_tools import AlertAckRequest, AlertDetailRequest, AlertFetchRequest
 from security_analyst_agent.schemas.common import ToolResponse
 
 
 def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     request = AlertFetchRequest.model_validate(payload)
-    alerts = fetch_alerts(conn, request.limit, request.status, request.min_severity)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    alerts = fetch_alerts(
+        conn,
+        request.limit,
+        request.status,
+        request.min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
     response = ToolResponse(
         ok=True,
         summary=f"返回 {len(alerts)} 条待研判告警摘要",
@@ -25,7 +33,8 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
 
 def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
     request = AlertDetailRequest.model_validate(payload)
-    alert = get_alert_by_id(conn, request.alert_id)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    alert = get_alert_by_id(conn, request.alert_id, analysis_cutoff_at=analysis_cutoff_at)
     if alert is None:
         response = ToolResponse(
             ok=False,
@@ -35,7 +44,18 @@ def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
         )
         return response.model_dump(mode="json", by_alias=True)
 
-    evidence_rows = get_case_evidence_summaries(conn, alert["case_id"])
+    evidence_rows = get_alert_evidence_summaries(
+        conn,
+        case_id=alert["case_id"],
+        alert_id=alert["alert_id"],
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    if not evidence_rows:
+        evidence_rows = get_case_evidence_summaries(
+            conn,
+            alert["case_id"],
+            analysis_cutoff_at=analysis_cutoff_at,
+        )
     alert["parser_profile_version_id"] = "waf_nginx_v1"
     alert["evidence_summary"] = "；".join(item["summary"] for item in evidence_rows) if evidence_rows else "暂无证据摘要"
     response = ToolResponse(

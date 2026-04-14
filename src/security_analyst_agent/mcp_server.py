@@ -20,6 +20,7 @@ CORE_TOOL_NAMES = (
     "case.upsert",
     "case.link-alert",
     "case.update-risk",
+    "assessment.upsert",
     "intel.lookup",
     "notify.send",
     "notify.preview",
@@ -37,6 +38,7 @@ TOOL_DESCRIPTIONS = {
     "case.upsert": "创建或更新案件主记录。",
     "case.link-alert": "将告警关联到指定案件并记录关联理由。",
     "case.update-risk": "更新案件风险等级、阶段与状态。",
+    "assessment.upsert": "写入实体级风险评估（如攻击IP、失陷主机）。",
     "intel.lookup": "查询缓存化威胁情报用于补证。",
     "notify.send": "触发模拟通知发送并写入通知出站记录。",
     "notify.preview": "生成通知预览草稿，不进行实际发送。",
@@ -81,6 +83,12 @@ PROMPT_GUIDANCE = {
             "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
             '{"case_id":"<case_id>","overall_severity":"high","current_stage":"persistence","status":"investigating","force_downgrade":false}',
             "默认阻止阶段回退；仅在确有需要时传入 force_downgrade=true。",
+        ]
+    ),
+    "assessment.upsert": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"entity_type":"ip","entity_key":"198.51.100.23","entity_label":"198.51.100.23","related_case_id":"case_demo_001","risk_level":"high","assessment_confidence":0.93,"verdict":"attacker","reason_summary":"多阶段攻击链核心来源","supporting_alert_ids":["alt_r2_webshell"],"supporting_evidence_ids":["evi_webshell_01"]}',
         ]
     ),
     "notify.send": "\n".join(

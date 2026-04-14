@@ -62,11 +62,16 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
         "select count(*) from alert_ingest_events where trigger_state in ('pending', 'failed')"
     ).fetchone()[0]
     run_status = conn.execute("select status from patrol_runs where run_id = ?", (result["run_id"],)).fetchone()
+    run_times = conn.execute(
+        "select started_at, analysis_cutoff_at from patrol_runs where run_id = ?",
+        (result["run_id"],),
+    ).fetchone()
     state = conn.execute(
         "select state_value_json from patrol_state where state_key = 'last_patrol_status'"
     ).fetchone()
     assert pending_count == 0
     assert run_status["status"] == "success"
+    assert run_times["analysis_cutoff_at"] == run_times["started_at"]
     assert state is not None
     assert "success" in state["state_value_json"]
     conn.close()

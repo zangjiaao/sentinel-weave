@@ -3,13 +3,14 @@ import time
 from typing import Callable
 
 from security_analyst_agent.repositories.audit import (
-    bind_run_id,
+    bind_run_context,
     finalize_mcp_auto_run_after_tool,
     insert_tool_call_log,
-    reset_bound_run_id,
-    resolve_run_id_for_dispatch,
+    reset_bound_run_context,
+    resolve_run_context_for_dispatch,
 )
 from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_fetch
+from security_analyst_agent.tools.assessment_tools import assessment_upsert
 from security_analyst_agent.tools.asset_tools import asset_search
 from security_analyst_agent.tools.case_tools import (
     case_explain_link,
@@ -35,6 +36,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "case.upsert": case_upsert,
     "case.link-alert": case_link_alert,
     "case.update-risk": case_update_risk,
+    "assessment.upsert": assessment_upsert,
     "intel.lookup": intel_lookup,
     "notify.send": notify_send,
     "notify.preview": notify_preview,
@@ -46,8 +48,8 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
     if tool_name not in TOOL_HANDLERS:
         raise ValueError(f"unsupported tool: {tool_name}")
 
-    run_id = resolve_run_id_for_dispatch(conn, source=source, tool_name=tool_name)
-    token = bind_run_id(run_id)
+    run_id, analysis_cutoff_at = resolve_run_context_for_dispatch(conn, source=source, tool_name=tool_name)
+    token = bind_run_context(run_id, analysis_cutoff_at)
     try:
         start = time.perf_counter()
         result: dict
@@ -94,4 +96,4 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
         conn.commit()
         return result
     finally:
-        reset_bound_run_id(token)
+        reset_bound_run_context(token)

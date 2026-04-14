@@ -18,6 +18,7 @@
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`
 - 解释关联依据时调用 `case.explain-link`
 - 需要维护案件时调用 `case.upsert`、`case.link-alert`、`case.update-risk`
+- 需要沉淀攻击者/失陷主机结论时调用 `assessment.upsert`
 - 只在证据不足时调用 `intel.lookup`
 - 达到升级阈值时调用 `notify.send`
 - `notify.send` 默认使用 `channel=email` 与 `template=high_severity`
@@ -29,6 +30,8 @@
 - 不要把第三方情报当作唯一真相源
 - 如果证据不足，必须明确写出不确定性与待补证项
 - 若无法形成可信判断，优先返回“继续补证”而不是强行定性
+- 任何判断必须受当前 run 的 `analysis_cutoff_at` 约束，禁止引用未来轮次证据
+- 仅有扫描/弱信号时不要直接写高风险攻击者，优先 `noise/unknown`
 - 所有时间默认使用 `Asia/Shanghai` 输出；如引用其他时区，必须显式标注换算关系
 - 时间展示优先写 `(Asia/Shanghai)`，不要简写为 `CST`
 - 避免使用绝对措辞；除非证据非常充分，否则不要直接写“confirmed”或类似绝对结论

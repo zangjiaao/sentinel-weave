@@ -72,6 +72,21 @@ def _query_rows(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> lis
         conn.close()
 
 
+def _decode_json_fields(rows: list[dict], fields: list[str]) -> list[dict]:
+    decoded: list[dict] = []
+    for row in rows:
+        parsed = dict(row)
+        for field in fields:
+            raw_value = parsed.get(field)
+            if isinstance(raw_value, str):
+                try:
+                    parsed[field] = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    continue
+        decoded.append(parsed)
+    return decoded
+
+
 @app.command("alert.fetch")
 def alert_fetch_command(
     db_path: Path = typer.Option(..., "--db-path"),
@@ -150,6 +165,14 @@ def case_update_risk_command(
     payload: str = typer.Option("{}", "--payload"),
 ) -> None:
     _run_tool("case.update-risk", db_path, payload)
+
+
+@app.command("assessment.upsert")
+def assessment_upsert_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("assessment.upsert", db_path, payload)
 
 
 @app.command("intel.lookup")
@@ -316,6 +339,181 @@ def audit_case_changes_command(
             """,
             (limit,),
         )
+    typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
+
+
+@app.command("audit.link-decisions")
+def audit_link_decisions_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    limit: int = typer.Option(50, "--limit"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+) -> None:
+    if run_id:
+        rows = _query_rows(
+            db_path,
+            """
+            select
+              decision_id,
+              occurred_at,
+              run_id,
+              alert_id,
+              case_id,
+              link_confidence,
+              reason_summary,
+              positive_factors_json,
+              negative_factors_json,
+              uncertainties_json,
+              supporting_evidence_ids_json,
+              analysis_cutoff_at
+            from link_decisions
+            where run_id = ?
+            order by occurred_at desc
+            limit ?
+            """,
+            (run_id, limit),
+        )
+    else:
+        rows = _query_rows(
+            db_path,
+            """
+            select
+              decision_id,
+              occurred_at,
+              run_id,
+              alert_id,
+              case_id,
+              link_confidence,
+              reason_summary,
+              positive_factors_json,
+              negative_factors_json,
+              uncertainties_json,
+              supporting_evidence_ids_json,
+              analysis_cutoff_at
+            from link_decisions
+            order by occurred_at desc
+            limit ?
+            """,
+            (limit,),
+        )
+    rows = _decode_json_fields(
+        rows,
+        [
+            "positive_factors_json",
+            "negative_factors_json",
+            "uncertainties_json",
+            "supporting_evidence_ids_json",
+        ],
+    )
+    typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
+
+
+@app.command("audit.case-assessments")
+def audit_case_assessments_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    limit: int = typer.Option(50, "--limit"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+) -> None:
+    if run_id:
+        rows = _query_rows(
+            db_path,
+            """
+            select
+              assessment_id,
+              occurred_at,
+              run_id,
+              case_id,
+              risk_level,
+              assessment_confidence,
+              current_stage,
+              verdict,
+              reason_summary,
+              supporting_alert_ids_json,
+              supporting_evidence_ids_json,
+              analysis_cutoff_at
+            from case_assessments
+            where run_id = ?
+            order by occurred_at desc
+            limit ?
+            """,
+            (run_id, limit),
+        )
+    else:
+        rows = _query_rows(
+            db_path,
+            """
+            select
+              assessment_id,
+              occurred_at,
+              run_id,
+              case_id,
+              risk_level,
+              assessment_confidence,
+              current_stage,
+              verdict,
+              reason_summary,
+              supporting_alert_ids_json,
+              supporting_evidence_ids_json,
+              analysis_cutoff_at
+            from case_assessments
+            order by occurred_at desc
+            limit ?
+            """,
+            (limit,),
+        )
+    rows = _decode_json_fields(rows, ["supporting_alert_ids_json", "supporting_evidence_ids_json"])
+    typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
+
+
+@app.command("audit.entity-assessments")
+def audit_entity_assessments_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    limit: int = typer.Option(50, "--limit"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+    entity_type: str | None = typer.Option(None, "--entity-type"),
+    risk_level: str | None = typer.Option(None, "--risk-level"),
+) -> None:
+    conditions: list[str] = []
+    params: list[object] = []
+    if run_id:
+        conditions.append("run_id = ?")
+        params.append(run_id)
+    if entity_type:
+        conditions.append("entity_type = ?")
+        params.append(entity_type)
+    if risk_level:
+        conditions.append("risk_level = ?")
+        params.append(risk_level)
+    where_clause = f"where {' and '.join(conditions)}" if conditions else ""
+    params.append(limit)
+    rows = _query_rows(
+        db_path,
+        f"""
+        select
+          assessment_id,
+          occurred_at,
+          run_id,
+          entity_type,
+          entity_key,
+          entity_label,
+          related_case_id,
+          risk_level,
+          assessment_confidence,
+          verdict,
+          reason_summary,
+          supporting_alert_ids_json,
+          supporting_evidence_ids_json,
+          first_seen_at,
+          last_seen_at,
+          analysis_cutoff_at,
+          is_current
+        from entity_assessments
+        {where_clause}
+        order by occurred_at desc
+        limit ?
+        """,
+        tuple(params),
+    )
+    rows = _decode_json_fields(rows, ["supporting_alert_ids_json", "supporting_evidence_ids_json"])
     typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
 
 

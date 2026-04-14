@@ -17,6 +17,7 @@ def test_mcp_tool_names_match_core_contract() -> None:
         "case.upsert",
         "case.link-alert",
         "case.update-risk",
+        "assessment.upsert",
         "intel.lookup",
         "notify.send",
         "notify.preview",
@@ -107,4 +108,20 @@ def test_mcp_prompt_alert_ack_contains_usage_guidance() -> None:
 
     assert '"alert_ids":["<alert_id_1>","<alert_id_2>"]' in text
     assert '"status":"triaged"' in text
+    assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
+
+
+def test_mcp_prompt_assessment_upsert_contains_usage_guidance() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+    result = asyncio.run(server.get_prompt("assessment.upsert"))
+    text = "\n".join(
+        message.content.text
+        for message in result.messages
+        if getattr(message.content, "text", None)
+    )
+
+    assert '"entity_type":"ip"' in text
+    assert '"verdict":"attacker"' in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text

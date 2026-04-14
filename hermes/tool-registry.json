@@ -134,6 +134,19 @@
       "idempotent": true
     },
     {
+      "name": "assessment.upsert",
+      "description": "写入实体级风险评估（攻击IP/失陷主机/噪音来源）。",
+      "when_to_use": [
+        "需要把攻击者或失陷主机沉淀为结构化结论时",
+        "需要更新实体当前风险结论并保留历史记录时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli assessment.upsert --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": false,
+      "timeout_sec": 20,
+      "cost_level": "medium",
+      "idempotent": true
+    },
+    {
       "name": "intel.lookup",
       "description": "查询缓存化威胁情报用于补证。",
       "when_to_use": [

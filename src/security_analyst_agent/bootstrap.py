@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -14,6 +15,9 @@ def _read_fixture(fixture_dir: Path, filename: str) -> list[dict]:
 def _reset_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
+        delete from entity_assessments;
+        delete from case_assessments;
+        delete from link_decisions;
         delete from escalation_decisions;
         delete from case_changes;
         delete from alert_decisions;
@@ -33,6 +37,10 @@ def _reset_tables(conn: sqlite3.Connection) -> None:
         delete from assets;
         """
     )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _insert_many(conn: sqlite3.Connection, table_name: str, rows: list[dict]) -> None:
@@ -67,6 +75,24 @@ def _split_alert_rows_and_links(rows: list[dict]) -> tuple[list[dict], list[dict
     return alert_rows, link_rows
 
 
+def _prepare_evidence_rows(evidence_rows: list[dict], timeline_rows: list[dict]) -> list[dict]:
+    evidence_occurred_at: dict[str, str] = {}
+    for event in timeline_rows:
+        for evidence_id in event["related_evidence_ids"]:
+            occurred_at = event["occurred_at"]
+            if evidence_id not in evidence_occurred_at or occurred_at < evidence_occurred_at[evidence_id]:
+                evidence_occurred_at[evidence_id] = occurred_at
+
+    prepared_rows: list[dict] = []
+    for row in evidence_rows:
+        prepared = dict(row)
+        prepared["occurred_at"] = prepared.get("occurred_at") or evidence_occurred_at.get(
+            prepared["evidence_id"], _now_iso()
+        )
+        prepared_rows.append(prepared)
+    return prepared_rows
+
+
 def bootstrap_spike_database(db_path: Path, fixture_dir: Path = FIXTURE_DIR) -> None:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -83,7 +109,11 @@ def bootstrap_spike_database(db_path: Path, fixture_dir: Path = FIXTURE_DIR) -> 
     _insert_many(conn, "alerts", alert_rows)
     _insert_many(conn, "case_alert_links", link_rows)
     _insert_many(conn, "timeline_events", timeline_rows)
-    _insert_many(conn, "evidence", _read_fixture(fixture_dir, "evidence.json"))
+    _insert_many(
+        conn,
+        "evidence",
+        _prepare_evidence_rows(_read_fixture(fixture_dir, "evidence.json"), timeline_rows),
+    )
     _insert_many(conn, "intel_cache", _read_fixture(fixture_dir, "intel_cache.json"))
     conn.commit()
     conn.close()

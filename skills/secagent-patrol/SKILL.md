@@ -17,11 +17,12 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 4. Keep the patrol bounded. Process at most 10 alerts per run and stop when `no_more_alerts`, `time_budget_exceeded`, or `high_risk_case_found`.
 5. For each material alert, call `case.get` and `case.timeline`, then `case.explain-link` when explicit linkage evidence is needed.
 6. If a case record is missing or stale, update state with `case.upsert`, `case.link-alert`, and `case.update-risk`.
-7. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
-8. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
-9. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
-10. Call `report.draft` only when the user explicitly requests a report.
-11. If there is genuinely nothing new to report, return exactly `[SILENT]`.
+7. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert`.
+8. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
+9. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
+10. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
+11. Call `report.draft` only when the user explicitly requests a report.
+12. If there is genuinely nothing new to report, return exactly `[SILENT]`.
 
 ## Tool Usage Rules
 
@@ -34,11 +35,13 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - Use `case.upsert` when a case needs to be created or refreshed.
 - Use `case.link-alert` when an alert should be linked to an existing case.
 - Use `case.update-risk` when severity/stage/status should change.
+- 使用 `assessment.upsert` 沉淀实体级结论（例如 `attacker` / `compromised_host` / `noise`）。
 - 默认不要让 `current_stage` 回退；只有证据明确推翻原判断时，才使用 `force_downgrade=true` 显式降级。
 - Use `intel.lookup` with payload `{"indicator":"<ip_or_indicator>","indicator_type":"ip"}`.
 - 不要对同一个 `indicator` 重复调用 `intel.lookup`，除非缓存状态或证据上下文已经发生变化。
 - Use `notify.send` with payload `{"case_id":"<case_id>","channel":"email","template":"high_severity"}`.
 - Do not call `report.draft` during regular patrol unless user asks for a report.
+- 所有关联、时间线、证据判断必须遵守当前 run 的 `analysis_cutoff_at`，不得引用未来轮次证据。
 
 ## Analysis Rules
 
@@ -46,6 +49,8 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - If evidence is insufficient, explicitly say what is still unknown and what should be collected next.
 - Keep the uncertainty explicit when source infrastructure changes.
 - Keep `Memory Summary` limited to durable facts that help future patrols.
+- 只有出现漏洞利用、落地、控制、横向等证据时，才把实体写成 `high + attacker`。
+- 若仅有扫描或弱信号，优先写 `verdict=noise` 或 `verdict=unknown`，不要直接定高风险攻击者。
 
 ## Output Contract
 

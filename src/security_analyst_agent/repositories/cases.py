@@ -15,15 +15,16 @@ def load_case(conn: sqlite3.Connection, case_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def load_case_timeline(conn: sqlite3.Connection, case_id: str) -> list[dict]:
+def load_case_timeline(conn: sqlite3.Connection, case_id: str, analysis_cutoff_at: str | None = None) -> list[dict]:
     rows = conn.execute(
         """
         select timeline_event_id, case_id, occurred_at, stage, title, related_alert_ids, related_evidence_ids
         from timeline_events
         where case_id = ?
+          and (? is null or occurred_at <= ?)
         order by occurred_at asc
         """,
-        (case_id,),
+        (case_id, analysis_cutoff_at, analysis_cutoff_at),
     ).fetchall()
     events: list[dict] = []
     for row in rows:
@@ -34,12 +35,26 @@ def load_case_timeline(conn: sqlite3.Connection, case_id: str) -> list[dict]:
     return events
 
 
-def load_alert(conn: sqlite3.Connection, alert_id: str) -> dict | None:
+def load_alert(conn: sqlite3.Connection, alert_id: str, analysis_cutoff_at: str | None = None) -> dict | None:
     row = conn.execute(
         """
         select
           alerts.alert_id,
-          case_alert_links.case_id as case_id,
+          (
+            select case_alert_links.case_id
+            from case_alert_links
+            where case_alert_links.alert_id = alerts.alert_id
+              and (
+                (? is null and case_alert_links.is_active = 1)
+                or (
+                  ? is not null
+                  and case_alert_links.linked_at <= ?
+                  and (case_alert_links.unlinked_at is null or case_alert_links.unlinked_at > ?)
+                )
+              )
+            order by case_alert_links.linked_at desc, case_alert_links.rowid desc
+            limit 1
+          ) as case_id,
           alerts.occurred_at,
           alerts.title,
           alerts.attack_stage,
@@ -47,30 +62,93 @@ def load_alert(conn: sqlite3.Connection, alert_id: str) -> dict | None:
           alerts.dst_ip,
           alerts.asset_id
         from alerts
-        left join case_alert_links
-          on case_alert_links.alert_id = alerts.alert_id
-         and case_alert_links.is_active = 1
         where alerts.alert_id = ?
+          and (? is null or alerts.occurred_at <= ?)
         """,
-        (alert_id,),
+        (
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+            alert_id,
+            analysis_cutoff_at,
+            analysis_cutoff_at,
+        ),
     ).fetchone()
     return dict(row) if row else None
 
 
-def load_evidence_by_ids(conn: sqlite3.Connection, evidence_ids: list[str]) -> list[dict]:
+def load_evidence_by_ids(
+    conn: sqlite3.Connection,
+    evidence_ids: list[str],
+    analysis_cutoff_at: str | None = None,
+) -> list[dict]:
     if not evidence_ids:
         return []
     placeholders = ", ".join("?" for _ in evidence_ids)
     rows = conn.execute(
         f"""
-        select evidence_id, case_id, evidence_type, summary
+        select evidence_id, case_id, occurred_at, evidence_type, summary
         from evidence
         where evidence_id in ({placeholders})
+          and (? is null or occurred_at <= ?)
         order by evidence_id asc
         """,
-        tuple(evidence_ids),
+        (*tuple(evidence_ids), analysis_cutoff_at, analysis_cutoff_at),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def load_supporting_evidence_ids_for_alert(
+    conn: sqlite3.Connection,
+    *,
+    case_id: str,
+    alert_id: str,
+    analysis_cutoff_at: str | None = None,
+) -> list[str]:
+    rows = conn.execute(
+        """
+        select distinct related_evidence_ids.value as evidence_id
+        from timeline_events
+        join json_each(timeline_events.related_alert_ids) as related_alert_ids
+        join json_each(timeline_events.related_evidence_ids) as related_evidence_ids
+        where timeline_events.case_id = ?
+          and related_alert_ids.value = ?
+          and (? is null or timeline_events.occurred_at <= ?)
+        order by related_evidence_ids.value asc
+        """,
+        (case_id, alert_id, analysis_cutoff_at, analysis_cutoff_at),
+    ).fetchall()
+    return [row["evidence_id"] for row in rows]
+
+
+def load_case_alert_ids(
+    conn: sqlite3.Connection, case_id: str, analysis_cutoff_at: str | None = None
+) -> list[str]:
+    if analysis_cutoff_at:
+        rows = conn.execute(
+            """
+            select alert_id
+            from case_alert_links
+            where case_id = ?
+              and linked_at <= ?
+              and (unlinked_at is null or unlinked_at > ?)
+            order by linked_at asc
+            """,
+            (case_id, analysis_cutoff_at, analysis_cutoff_at),
+        ).fetchall()
+        return [row["alert_id"] for row in rows]
+
+    rows = conn.execute(
+        """
+        select alert_id
+        from case_alert_links
+        where case_id = ? and is_active = 1
+        order by linked_at asc
+        """,
+        (case_id,),
+    ).fetchall()
+    return [row["alert_id"] for row in rows]
 
 
 def upsert_case(conn: sqlite3.Connection, case: dict[str, Any]) -> None:

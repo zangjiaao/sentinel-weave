@@ -5,13 +5,20 @@ from security_analyst_agent.repositories.cases import (
     append_timeline_event_for_alert,
     link_alert_to_case,
     load_alert,
+    load_case_alert_ids,
     load_case,
+    load_supporting_evidence_ids_for_alert,
     load_case_timeline,
     load_evidence_by_ids,
     update_case_risk,
     upsert_case,
 )
-from security_analyst_agent.repositories.audit import insert_alert_decision_log, insert_case_change_log
+from security_analyst_agent.repositories.audit import (
+    insert_case_assessment_log,
+    insert_case_change_log,
+    insert_link_decision_log,
+    load_active_analysis_cutoff,
+)
 from security_analyst_agent.repositories.context_memory import build_case_digest, load_case_digest, upsert_case_digest
 from security_analyst_agent.schemas.case_tools import (
     CaseExplainLinkRequest,
@@ -43,6 +50,35 @@ def _resolve_stage_with_guard(current_stage: str, requested_stage: str, force_do
     return requested_stage, False
 
 
+def _load_case_supporting_evidence_ids(
+    conn: sqlite3.Connection, case_id: str, analysis_cutoff_at: str | None
+) -> list[str]:
+    if analysis_cutoff_at:
+        rows = conn.execute(
+            """
+            select distinct related_evidence_ids.value as evidence_id
+            from timeline_events
+            join json_each(timeline_events.related_evidence_ids) as related_evidence_ids
+            where timeline_events.case_id = ?
+              and timeline_events.occurred_at <= ?
+            order by related_evidence_ids.value asc
+            """,
+            (case_id, analysis_cutoff_at),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            select distinct related_evidence_ids.value as evidence_id
+            from timeline_events
+            join json_each(timeline_events.related_evidence_ids) as related_evidence_ids
+            where timeline_events.case_id = ?
+            order by related_evidence_ids.value asc
+            """,
+            (case_id,),
+        ).fetchall()
+    return [row["evidence_id"] for row in rows]
+
+
 def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseGetRequest.model_validate(payload)
     case = load_case(conn, request.case_id)
@@ -55,10 +91,14 @@ def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
         )
         return response.model_dump(mode="json", by_alias=True)
 
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
     case_with_memory = dict(case)
-    memory_digest = load_case_digest(conn, request.case_id)
-    if memory_digest is None:
-        memory_digest = upsert_case_digest(conn, request.case_id) or build_case_digest(conn, request.case_id)
+    if analysis_cutoff_at:
+        memory_digest = build_case_digest(conn, request.case_id, analysis_cutoff_at=analysis_cutoff_at)
+    else:
+        memory_digest = load_case_digest(conn, request.case_id)
+        if memory_digest is None:
+            memory_digest = upsert_case_digest(conn, request.case_id) or build_case_digest(conn, request.case_id)
     case_with_memory["memory_digest"] = memory_digest
 
     response = ToolResponse(
@@ -72,10 +112,15 @@ def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
 
 def case_timeline(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseTimelineRequest.model_validate(payload)
-    events = load_case_timeline(conn, request.case_id)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    events = load_case_timeline(conn, request.case_id, analysis_cutoff_at=analysis_cutoff_at)
     if request.include_evidence:
         for event in events:
-            event["evidence"] = load_evidence_by_ids(conn, event["related_evidence_ids"])
+            event["evidence"] = load_evidence_by_ids(
+                conn,
+                event["related_evidence_ids"],
+                analysis_cutoff_at=analysis_cutoff_at,
+            )
 
     response = ToolResponse(
         ok=True,
@@ -101,7 +146,8 @@ def case_explain_link(conn: sqlite3.Connection, payload: dict) -> dict:
         )
         return response.model_dump(mode="json", by_alias=True)
 
-    alert = load_alert(conn, request.target_id)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    alert = load_alert(conn, request.target_id, analysis_cutoff_at=analysis_cutoff_at)
     if alert is None:
         response = ToolResponse(
             ok=False,
@@ -111,7 +157,13 @@ def case_explain_link(conn: sqlite3.Connection, payload: dict) -> dict:
         )
         return response.model_dump(mode="json", by_alias=True)
 
-    decision = explain_alert_link(alert, request.case_id)
+    supporting_evidence_ids = load_supporting_evidence_ids_for_alert(
+        conn,
+        case_id=request.case_id,
+        alert_id=request.target_id,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    decision = explain_alert_link(alert, request.case_id, supporting_evidence_ids=supporting_evidence_ids)
     response = ToolResponse(
         ok=True,
         summary=f"生成关联解释：{request.target_id}",
@@ -184,17 +236,24 @@ def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
     )
     timeline_event_id = append_timeline_event_for_alert(conn=conn, case_id=request.case_id, alert=alert)
     upsert_case_digest(conn, request.case_id)
-    insert_alert_decision_log(
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    supporting_evidence_ids = load_supporting_evidence_ids_for_alert(
+        conn,
+        case_id=request.case_id,
+        alert_id=request.alert_id,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    decision = explain_alert_link(alert, request.case_id, supporting_evidence_ids=supporting_evidence_ids)
+    insert_link_decision_log(
         conn,
         alert_id=request.alert_id,
-        decision="link_alert",
         case_id=request.case_id,
-        confidence=request.confidence,
-        reason=request.reason,
-        detail={
-            "previous_case_id": previous_case_id,
-            "timeline_event_id": timeline_event_id,
-        },
+        link_confidence=request.confidence,
+        reason_summary=request.reason,
+        positive_factors=decision["positive_factors"],
+        negative_factors=decision["negative_factors"],
+        uncertainties=decision["uncertainties"],
+        supporting_evidence_ids=decision["supporting_evidence_ids"],
     )
     conn.commit()
 
@@ -233,6 +292,7 @@ def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
         return response.model_dump(mode="json", by_alias=True)
 
     before_case = dict(case)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
     effective_stage, downgraded_blocked = _resolve_stage_with_guard(
         current_stage=before_case["current_stage"],
         requested_stage=request.current_stage,
@@ -255,6 +315,34 @@ def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
         before_state=before_case,
         after_state=updated_case,
         reason="tool:case.update-risk_stage_guard" if downgraded_blocked else "tool:case.update-risk",
+    )
+    supporting_alert_ids = load_case_alert_ids(
+        conn,
+        request.case_id,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    supporting_evidence_ids = _load_case_supporting_evidence_ids(
+        conn,
+        request.case_id,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    verdict = (
+        "high_risk_active"
+        if request.overall_severity in {"high", "critical"}
+        else "under_investigation"
+        if request.overall_severity == "medium"
+        else "monitoring"
+    )
+    insert_case_assessment_log(
+        conn,
+        case_id=request.case_id,
+        risk_level=request.overall_severity,
+        assessment_confidence=0.9 if request.overall_severity in {"high", "critical"} else 0.7,
+        current_stage=effective_stage,
+        verdict=verdict,
+        reason_summary="tool:case.update-risk_stage_guard" if downgraded_blocked else "tool:case.update-risk",
+        supporting_alert_ids=supporting_alert_ids,
+        supporting_evidence_ids=supporting_evidence_ids,
     )
     conn.commit()
     warnings = ["stage_downgrade_blocked"] if downgraded_blocked else []

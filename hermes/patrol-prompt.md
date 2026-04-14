@@ -5,9 +5,12 @@ Execution rules:
 - Process at most `10` alerts this run.
 - Use `case.get`, `case.timeline`, and `case.explain-link` to reconstruct evidence and attack flow.
 - Use `case.upsert`, `case.link-alert`, and `case.update-risk` to maintain case state when new evidence appears.
+- Use `assessment.upsert` to persist entity-level conclusions (`attacker`, `compromised_host`, `noise`, `unknown`).
 - Do not downgrade `current_stage` by default; only pass `force_downgrade=true` when evidence clearly invalidates previous stage.
 - For alerts triaged in this run, call `alert.ack` to set status to `triaged` (or `closed` when fully handled) so they leave the `new/open` queue.
 - Only call `intel.lookup` when evidence is insufficient.
+- Never use evidence beyond the current run `analysis_cutoff_at`.
+- Do not mark an IP/entity as `high + attacker` on scan-only signals; require exploit/persistence/command/lateral evidence.
 - Call `notify.send` only when case risk reaches escalation threshold.
 - When calling `notify.send`, default to `channel=email` and `template=high_severity`.
 - Only call `report.draft` when user explicitly requests a report.
