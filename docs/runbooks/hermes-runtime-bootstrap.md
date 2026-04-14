@@ -21,19 +21,38 @@
 ## Register Tool Registry
 
 1. 在 Hermes 中导入 `hermes/tool-registry.json`
-2. 确认识别到 9 个 Tool：
+2. 确认识别到 14 个 Tool：
    - `alert.fetch`
    - `alert.detail`
+   - `alert.ack`
    - `asset.search`
    - `case.get`
    - `case.timeline`
    - `case.explain-link`
+   - `case.upsert`
+   - `case.link-alert`
+   - `case.update-risk`
    - `intel.lookup`
+   - `notify.send`
    - `notify.preview`
    - `report.draft`
 3. 任选一个 Tool 用最小 payload 试跑，确认 Hermes 能消费 JSON 输出
 
-## Optional: Register via MCP CLI
+## Recommended: Run MCP Server in Listener Mode
+
+推荐将 `secagent` 作为独立 MCP server 常驻，再让 Hermes 通过 URL 连接，避免每次会话重复拉起 stdio 进程。
+
+1. 启动 MCP server（新终端）：
+   - `make mcp-server`
+   - 可指定数据库：`make mcp-server SPIKE_DB_PATH=/Users/zangjiaao/Codebase/ai-pentester/spike.db`
+   - 默认监听：`http://127.0.0.1:8787/mcp`
+2. 将 Hermes MCP 客户端切换到 URL：
+   - `make sync-hermes-mcp-url`
+   - 若手工设置，推荐：`hermes config set mcp_servers.secagent.url http://127.0.0.1:8787/mcp`
+3. 验证连通：
+   - `hermes mcp test secagent`
+
+## Optional: Register via MCP CLI (Stdio Mode)
 
 如果你的 Hermes 使用 MCP 管理 Tool，可直接用 CLI 注册本地 stdio server：
 
@@ -53,9 +72,10 @@
 1. 更新 Hermes 全局行为文件：`/Users/zangjiaao/.hermes/SOUL.md`
    - 注意：该文件是本机运行态配置，不是项目真源
    - 后续部署到其他机器时，应从仓库模板或 bootstrap 脚本生成
+   - 推荐从仓库模板同步：`cp hermes/SOUL.template.md ~/.hermes/SOUL.md`
 2. 在 `SOUL.md` 中声明：
    - 优先加载 `secagent-patrol`
-   - 巡检时不要自由试探 `case.explain-link`、`intel.lookup`、`notify.preview`、`report.draft` 参数
+   - 巡检时不要自由试探 `alert.ack`、`case.explain-link`、`case.upsert`、`case.link-alert`、`case.update-risk`、`intel.lookup`、`notify.send`、`report.draft` 参数
    - MCP prompt 仅作为兜底说明
 3. 将仓库中的 Skill 同步到 Hermes：
    - `rm -rf ~/.hermes/skills/secagent-patrol && cp -R skills/secagent-patrol ~/.hermes/skills/secagent-patrol`
@@ -70,7 +90,8 @@
 3. 确认提示词中存在以下护栏：
    - 默认先调用 `alert.fetch`
    - 只在证据不足时调用 `intel.lookup`
-   - 只生成 `notify.preview`，不直接发送通知
+   - 达到升级阈值时调用 `notify.send`（当前为模拟发送）
+   - 仅在用户明确要求时调用 `report.draft`
    - 不要直接处理海量原始日志
 
 ## Configure Patrol Loop
@@ -92,15 +113,16 @@
 2. Confirm `alert.fetch` is called first
 3. Confirm patrol run has `secagent-patrol` attached
 4. 选择一个告警并继续调用 `case.get` 与 `case.timeline`
-5. 若证据不足，再触发一次 `intel.lookup`
-6. 对高风险案件生成 `notify.preview`
-7. 最后生成 `report.draft`
-8. 确认本轮无任何通知发送动作，仅有草稿输出
-9. Confirm output includes `Tool Calls`
-10. Confirm output includes `Memory Summary`
-11. Confirm output includes `Remaining Uncertainty`
-12. Confirm all report timestamps use `Asia/Shanghai`
-13. Confirm assessment wording avoids unjustified absolute claims
+5. 处理完成后对告警调用 `alert.ack`（`status=triaged` 或 `closed`）避免重复巡检
+6. 若证据不足，再触发一次 `intel.lookup`
+7. 对高风险案件触发 `notify.send`（当前为模拟发送）
+8. 仅在用户明确要求时生成 `report.draft`
+9. 巡检无实质变化时输出 `[SILENT]`
+10. Confirm output includes `Tool Calls`
+11. Confirm output includes `Memory Summary`
+12. Confirm output includes `Remaining Uncertainty`
+13. Confirm all report timestamps use `Asia/Shanghai`
+14. Confirm assessment wording avoids unjustified absolute claims
 
 ## Runtime Boundary Checks
 

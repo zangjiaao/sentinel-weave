@@ -1,11 +1,13 @@
 import sqlite3
 
 from security_analyst_agent.repositories.alerts import (
+    ack_alerts,
     fetch_alerts,
     get_alert_by_id,
     get_case_evidence_summaries,
 )
-from security_analyst_agent.schemas.alert_tools import AlertDetailRequest, AlertFetchRequest
+from security_analyst_agent.repositories.audit import insert_alert_decision_log
+from security_analyst_agent.schemas.alert_tools import AlertAckRequest, AlertDetailRequest, AlertFetchRequest
 from security_analyst_agent.schemas.common import ToolResponse
 
 
@@ -47,3 +49,49 @@ def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
     )
     return response.model_dump(mode="json", by_alias=True)
 
+
+def alert_ack(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = AlertAckRequest.model_validate(payload)
+    ack = ack_alerts(conn, request.alert_ids, request.status)
+    conn.commit()
+
+    warnings = []
+    if ack["missing_count"] > 0:
+        warnings.append("alert_not_found")
+
+    for alert_id in ack["updated_alert_ids"]:
+        insert_alert_decision_log(
+            conn,
+            alert_id=alert_id,
+            decision=f"ack_{request.status}",
+            case_id=None,
+            confidence=None,
+            reason="tool:alert.ack",
+        )
+    for alert_id in ack["already_status_alert_ids"]:
+        insert_alert_decision_log(
+            conn,
+            alert_id=alert_id,
+            decision=f"ack_{request.status}_noop",
+            case_id=None,
+            confidence=None,
+            reason="tool:alert.ack_already_status",
+        )
+    for alert_id in ack["missing_alert_ids"]:
+        insert_alert_decision_log(
+            conn,
+            alert_id=alert_id,
+            decision="ack_missing_alert",
+            case_id=None,
+            confidence=None,
+            reason="tool:alert.ack_alert_not_found",
+        )
+
+    response = ToolResponse(
+        ok=True,
+        summary=f"已确认 {ack['updated_count']} 条告警为 {request.status}",
+        data={"ack": ack},
+        refs={"alert_ids": ack["updated_alert_ids"] + ack["already_status_alert_ids"]},
+        warnings=warnings,
+    )
+    return response.model_dump(mode="json", by_alias=True)

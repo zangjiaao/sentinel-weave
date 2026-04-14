@@ -1,0 +1,415 @@
+[
+  {
+    "round_id": "round_01_recon",
+    "previous_round_id": null,
+    "cases_upsert": [
+      {
+        "case_id": "case_demo_001",
+        "title": "多阶段 Web 入侵与后续横向准备",
+        "status": "open",
+        "overall_severity": "medium",
+        "current_stage": "recon",
+        "primary_actor_id": "actor_demo_001"
+      },
+      {
+        "case_id": "case_noise_001",
+        "title": "低质量扫描与误报混合事件",
+        "status": "observing",
+        "overall_severity": "low",
+        "current_stage": "recon",
+        "primary_actor_id": "actor_noise_001"
+      }
+    ],
+    "alerts": [
+      {
+        "alert_id": "alt_r1_api_scan",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-10T09:10:00+08:00",
+        "title": "扫描统一认证 API 登录入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_r1_admin_scan",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-10T09:11:00+08:00",
+        "title": "扫描运营后台登录入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_r1_static_scan",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-10T09:12:00+08:00",
+        "title": "扫描官网静态站点历史路径",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_r1_noise_probe",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-10T09:14:00+08:00",
+        "title": "低价值目录探测命中通用规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.200",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      }
+    ],
+    "timeline_events": [
+      {
+        "timeline_event_id": "tl_r1_recon_main",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-10T09:10:00+08:00",
+        "stage": "recon",
+        "title": "同一来源对三个公网入口进行打点",
+        "related_alert_ids": ["alt_r1_api_scan", "alt_r1_admin_scan", "alt_r1_static_scan"],
+        "related_evidence_ids": []
+      },
+      {
+        "timeline_event_id": "tl_r1_noise_minor",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-10T09:14:00+08:00",
+        "stage": "recon",
+        "title": "低价值目录探测触发通用规则",
+        "related_alert_ids": ["alt_r1_noise_probe"],
+        "related_evidence_ids": []
+      }
+    ],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_02_exploit",
+    "previous_round_id": "round_01_recon",
+    "cases_upsert": [
+      {
+        "case_id": "case_demo_001",
+        "title": "多阶段 Web 入侵与后续横向准备",
+        "status": "open",
+        "overall_severity": "high",
+        "current_stage": "persistence",
+        "primary_actor_id": "actor_demo_001"
+      },
+      {
+        "case_id": "case_noise_001",
+        "title": "低质量扫描与误报混合事件",
+        "status": "observing",
+        "overall_severity": "low",
+        "current_stage": "recon",
+        "primary_actor_id": "actor_noise_001"
+      }
+    ],
+    "alerts": [
+      {
+        "alert_id": "alt_r2_webshell",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-11T14:20:00+08:00",
+        "title": "漏洞利用后写入 webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "persistence",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_r2_noise_repeat",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-11T14:05:00+08:00",
+        "title": "重复目录探测命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.200",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_r2_noise_healthcheck",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-11T14:06:00+08:00",
+        "title": "健康检查流量误命中高误报规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.200",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_r2_noise_proxy_probe",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-11T14:08:00+08:00",
+        "title": "代理出口随机目录探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.56",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      }
+    ],
+    "timeline_events": [
+      {
+        "timeline_event_id": "tl_r2_webshell",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-11T14:20:00+08:00",
+        "stage": "persistence",
+        "title": "利用漏洞写入 webshell",
+        "related_alert_ids": ["alt_r2_webshell"],
+        "related_evidence_ids": ["evi_webshell_01"]
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "evi_webshell_01",
+        "case_id": "case_demo_001",
+        "evidence_type": "payload",
+        "summary": "上传行为包含 webshell 落地痕迹"
+      }
+    ],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_03_new_ip",
+    "previous_round_id": "round_02_exploit",
+    "cases_upsert": [
+      {
+        "case_id": "case_demo_001",
+        "title": "多阶段 Web 入侵与后续横向准备",
+        "status": "open",
+        "overall_severity": "high",
+        "current_stage": "command_execution",
+        "primary_actor_id": "actor_demo_001"
+      }
+    ],
+    "alerts": [
+      {
+        "alert_id": "alt_r3_shell_new_ip",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-12T11:03:00+08:00",
+        "title": "新 IP 连接既有 webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "198.51.100.77",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_r3_noise_proxy_shift",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-12T11:05:00+08:00",
+        "title": "代理出口变化导致目录探测源地址波动",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.91",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      }
+    ],
+    "timeline_events": [
+      {
+        "timeline_event_id": "tl_r3_new_ip",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-12T11:03:00+08:00",
+        "stage": "command_execution",
+        "title": "新源 IP 连接既有 webshell 并尝试命令执行",
+        "related_alert_ids": ["alt_r3_shell_new_ip"],
+        "related_evidence_ids": ["evi_shell_conn_01"]
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "evi_shell_conn_01",
+        "case_id": "case_demo_001",
+        "evidence_type": "connection",
+        "summary": "新源 IP 连接已存在 webshell"
+      }
+    ],
+    "intel_cache_upsert": [
+      {
+        "indicator": "198.51.100.77",
+        "indicator_type": "ip",
+        "verdict": "unknown",
+        "confidence": 0.0,
+        "queried_at": "2026-04-12T11:10:00+08:00"
+      }
+    ]
+  },
+  {
+    "round_id": "round_04_lateral_prep",
+    "previous_round_id": "round_03_new_ip",
+    "cases_upsert": [
+      {
+        "case_id": "case_demo_001",
+        "title": "多阶段 Web 入侵与后续横向准备",
+        "status": "open",
+        "overall_severity": "high",
+        "current_stage": "lateral_prep",
+        "primary_actor_id": "actor_demo_001"
+      }
+    ],
+    "alerts": [
+      {
+        "alert_id": "alt_r4_internal_scan",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-12T11:20:00+08:00",
+        "title": "webshell 后触发内网扫描准备",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "lateral_prep",
+        "src_ip": "198.51.100.77",
+        "dst_ip": "10.0.0.12",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_r4_host_noise",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-12T11:22:00+08:00",
+        "title": "主机侧低价值进程异常",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": null,
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      }
+    ],
+    "timeline_events": [
+      {
+        "timeline_event_id": "tl_r4_lateral_prep",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-12T11:20:00+08:00",
+        "stage": "lateral_prep",
+        "title": "命令执行后出现横向准备迹象",
+        "related_alert_ids": ["alt_r4_internal_scan"],
+        "related_evidence_ids": ["evi_lateral_01"]
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "evi_lateral_01",
+        "case_id": "case_demo_001",
+        "evidence_type": "host_activity",
+        "summary": "受害主机出现横向探测特征"
+      }
+    ],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_05_silent_period",
+    "previous_round_id": "round_04_lateral_prep",
+    "cases_upsert": [
+      {
+        "case_id": "case_demo_001",
+        "title": "多阶段 Web 入侵与后续横向准备",
+        "status": "open",
+        "overall_severity": "high",
+        "current_stage": "lateral_prep",
+        "primary_actor_id": "actor_demo_001"
+      }
+    ],
+    "alerts": [
+      {
+        "alert_id": "alt_r5_noise_repeat",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-13T10:00:00+08:00",
+        "title": "低质量扫描器重复命中通用规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.201",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_06_reactivation",
+    "previous_round_id": "round_05_silent_period",
+    "cases_upsert": [
+      {
+        "case_id": "case_demo_001",
+        "title": "多阶段 Web 入侵与后续横向准备",
+        "status": "open",
+        "overall_severity": "high",
+        "current_stage": "lateral_prep",
+        "primary_actor_id": "actor_demo_001"
+      }
+    ],
+    "alerts": [
+      {
+        "alert_id": "alt_r6_shell_reactivation",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-14T08:30:00+08:00",
+        "title": "静默后再次连接既有 webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "198.51.100.91",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_r6_noise_api_probe",
+        "case_id": "case_noise_001",
+        "occurred_at": "2026-04-14T08:32:00+08:00",
+        "title": "无状态 API 探测命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.123",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      }
+    ],
+    "timeline_events": [
+      {
+        "timeline_event_id": "tl_r6_reactivation",
+        "case_id": "case_demo_001",
+        "occurred_at": "2026-04-14T08:30:00+08:00",
+        "stage": "command_execution",
+        "title": "静默期后再次出现对既有落点的访问",
+        "related_alert_ids": ["alt_r6_shell_reactivation"],
+        "related_evidence_ids": ["evi_reactivation_01"]
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "evi_reactivation_01",
+        "case_id": "case_demo_001",
+        "evidence_type": "connection",
+        "summary": "静默后再次出现对既有落点的访问"
+      }
+    ],
+    "intel_cache_upsert": [
+      {
+        "indicator": "198.51.100.91",
+        "indicator_type": "ip",
+        "verdict": "unknown",
+        "confidence": 0.0,
+        "queried_at": "2026-04-14T08:35:00+08:00"
+      }
+    ]
+  }
+]

@@ -5,11 +5,16 @@ from pathlib import Path
 CORE_TOOL_NAMES = [
     "alert.fetch",
     "alert.detail",
+    "alert.ack",
     "asset.search",
     "case.get",
     "case.timeline",
     "case.explain-link",
+    "case.upsert",
+    "case.link-alert",
+    "case.update-risk",
     "intel.lookup",
+    "notify.send",
     "notify.preview",
     "report.draft",
 ]
@@ -26,18 +31,31 @@ REQUIRED_TOOL_FIELDS = {
 }
 
 
-def test_tool_registry_contains_nine_core_tools() -> None:
+READ_ONLY_TOOLS = {
+    "alert.fetch",
+    "alert.detail",
+    "asset.search",
+    "case.get",
+    "case.timeline",
+    "case.explain-link",
+    "intel.lookup",
+    "notify.preview",
+    "report.draft",
+}
+
+
+def test_tool_registry_contains_expected_tools() -> None:
     data = json.loads(Path("hermes/tool-registry.json").read_text(encoding="utf-8"))
     assert data["runtime"] == "hermes"
 
     tools = data["tools"]
     names = [item["name"] for item in tools]
     assert names == CORE_TOOL_NAMES
-    assert len(names) == 9
+    assert len(names) == 14
 
     for item in tools:
         assert REQUIRED_TOOL_FIELDS.issubset(item.keys())
-        assert item["read_only"] is True
+        assert item["read_only"] is (item["name"] in READ_ONLY_TOOLS)
         assert isinstance(item["timeout_sec"], int)
         assert item["timeout_sec"] > 0
         assert item["cost_level"] in {"low", "medium", "high"}
@@ -69,8 +87,9 @@ def test_main_analyst_prompt_contains_guardrails() -> None:
     text = Path("hermes/agents/main-analyst.md").read_text(encoding="utf-8")
 
     assert "默认先调用 `alert.fetch`" in text
+    assert "对已处理告警调用 `alert.ack` 出队" in text
     assert "只在证据不足时调用 `intel.lookup`" in text
-    assert "只生成 `notify.preview`，不直接发送通知" in text
+    assert "达到升级阈值时调用 `notify.send`" in text
     assert "不要直接处理海量原始日志" in text
     assert "所有时间默认使用 `Asia/Shanghai` 输出" in text
     assert "时间展示优先写 `(Asia/Shanghai)`，不要简写为 `CST`" in text
@@ -78,8 +97,8 @@ def test_main_analyst_prompt_contains_guardrails() -> None:
     assert "`Memory Summary`" in text
     assert "`Remaining Uncertainty`" in text
     assert "避免使用绝对措辞" in text
-    assert "`notify.preview` 默认使用 `channel=email` 与 `template=high_severity`" in text
-    assert "`report.draft` 默认使用 `template=standard` 与 `tone=analytical`" in text
+    assert "`notify.send` 默认使用 `channel=email` 与 `template=high_severity`" in text
+    assert "仅在用户明确要求输出报告时调用 `report.draft`" in text
 
 
 def test_runtime_runbook_contains_smoke_loop_steps() -> None:
@@ -90,6 +109,9 @@ def test_runtime_runbook_contains_smoke_loop_steps() -> None:
     assert "本机运行态产物" in text
     assert "hermes/tool-registry.json" in text
     assert "hermes/agents/main-analyst.md" in text
+    assert "hermes/SOUL.template.md" in text
+    assert "make mcp-server" in text
+    assert "make sync-hermes-mcp-url" in text
     assert "/Users/zangjiaao/.hermes/SOUL.md" in text
     assert "secagent-patrol" in text
     assert "hermes/patrol-loop.json" in text
@@ -119,17 +141,40 @@ def test_hermes_soul_prefers_secagent_skill() -> None:
     assert "MCP prompt 仅作为兜底说明" in text
 
 
+def test_repo_soul_template_contains_runtime_guardrails() -> None:
+    text = Path("hermes/SOUL.template.md").read_text(encoding="utf-8")
+
+    assert "secagent-patrol" in text
+    assert "[SILENT]" in text
+    assert "notify.send" in text
+    assert "report.draft" in text
+    assert "Asia/Shanghai" in text
+
+
 def test_patrol_prompt_contains_output_contract() -> None:
     text = Path("hermes/patrol-prompt.md").read_text(encoding="utf-8")
 
     assert "First call `alert.fetch`" in text
+    assert "call `alert.ack` to set status to `triaged`" in text
     assert "Only call `intel.lookup` when evidence is insufficient" in text
-    assert "Do not send notifications; only generate `notify.preview`" in text
-    assert "When calling `notify.preview`, default to `channel=email` and `template=high_severity`" in text
-    assert "When calling `report.draft`, default to `template=standard` and `tone=analytical`" in text
+    assert "Call `notify.send` only when case risk reaches escalation threshold" in text
+    assert "When calling `notify.send`, default to `channel=email` and `template=high_severity`" in text
+    assert "Only call `report.draft` when user explicitly requests a report" in text
     assert "All timestamps must be rendered in `Asia/Shanghai`" in text
     assert "Prefer `(Asia/Shanghai)` instead of ambiguous abbreviations like `CST`" in text
-    assert "## Tool Calls" in text
-    assert "## Remaining Uncertainty" in text
+    assert "If there is no material update, return exactly `[SILENT]`" in text
+    assert "## Patrol Action Summary" in text
     assert "## Memory Summary" in text
     assert "Avoid unjustified absolute claims" in text
+
+
+def test_memory_spike_runbook_contains_round_commands() -> None:
+    text = Path("docs/runbooks/hermes-memory-spike.md").read_text(encoding="utf-8")
+
+    assert "security_analyst_agent.memory_spike bootstrap" in text
+    assert "round_01_recon" in text
+    assert "round_06_reactivation" in text
+    assert "Memory Summary" in text
+    assert "次要干扰案件" in text
+    assert "主案件" in text
+    assert "不要把 Hermes memory 当事实源" in text

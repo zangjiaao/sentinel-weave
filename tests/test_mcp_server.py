@@ -9,11 +9,16 @@ def test_mcp_tool_names_match_core_contract() -> None:
     assert CORE_TOOL_NAMES == (
         "alert.fetch",
         "alert.detail",
+        "alert.ack",
         "asset.search",
         "case.get",
         "case.timeline",
         "case.explain-link",
+        "case.upsert",
+        "case.link-alert",
+        "case.update-risk",
         "intel.lookup",
+        "notify.send",
         "notify.preview",
         "report.draft",
     )
@@ -52,6 +57,7 @@ def test_mcp_server_exposes_guidance_prompts() -> None:
     prompts = asyncio.run(server.list_prompts())
     names = {item.name for item in prompts}
 
+    assert "alert.ack" in names
     assert "case.explain-link" in names
     assert "intel.lookup" in names
 
@@ -85,4 +91,20 @@ def test_mcp_prompt_intel_lookup_contains_usage_guidance() -> None:
 
     assert '"indicator": "<ip_or_indicator>"' in text
     assert '"indicator_type": "ip"' in text
+    assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
+
+
+def test_mcp_prompt_alert_ack_contains_usage_guidance() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+    result = asyncio.run(server.get_prompt("alert.ack"))
+    text = "\n".join(
+        message.content.text
+        for message in result.messages
+        if getattr(message.content, "text", None)
+    )
+
+    assert '"alert_ids":["<alert_id_1>","<alert_id_2>"]' in text
+    assert '"status":"triaged"' in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text

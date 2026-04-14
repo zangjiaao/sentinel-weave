@@ -4,61 +4,30 @@ Execution rules:
 - First call `alert.fetch` with payload `{"status":["new","open"],"limit":20}`.
 - Process at most `10` alerts this run.
 - Use `case.get`, `case.timeline`, and `case.explain-link` to reconstruct evidence and attack flow.
+- Use `case.upsert`, `case.link-alert`, and `case.update-risk` to maintain case state when new evidence appears.
+- Do not downgrade `current_stage` by default; only pass `force_downgrade=true` when evidence clearly invalidates previous stage.
+- For alerts triaged in this run, call `alert.ack` to set status to `triaged` (or `closed` when fully handled) so they leave the `new/open` queue.
 - Only call `intel.lookup` when evidence is insufficient.
-- Do not send notifications; only generate `notify.preview`.
-- When calling `notify.preview`, default to `channel=email` and `template=high_severity`.
-- Generate `report.draft` when a case is high risk or clearly worth reporting.
-- When calling `report.draft`, default to `template=standard` and `tone=analytical`.
-- Do not spend extra tool calls discovering prompt or template names during patrol runs; use the defaults above.
+- Call `notify.send` only when case risk reaches escalation threshold.
+- When calling `notify.send`, default to `channel=email` and `template=high_severity`.
+- Only call `report.draft` when user explicitly requests a report.
 - Stop when any of these conditions is met:
   - `no_more_alerts`
   - `time_budget_exceeded`
   - `high_risk_case_found`
 
 Output contract:
+- If there is no material update, return exactly `[SILENT]`.
 - All timestamps must be rendered in `Asia/Shanghai`.
 - Prefer `(Asia/Shanghai)` instead of ambiguous abbreviations like `CST`.
 - Avoid unjustified absolute claims. Prefer `high-confidence`, `likely`, or `supported by current evidence` unless certainty is truly high.
-- If there is nothing new to report, output exactly `[SILENT]`.
 - Use the following Markdown structure exactly:
 
-## Patrol Report — <Asia/Shanghai time>
+## Patrol Action Summary
+- `<what changed this run>`
 
-### Stop Reason
-`<stop_reason>`
-
-## Tool Calls
-- `<tool_name>` — `<why it was used>`
-
-## Case
-- `case_id`: `<case_id>`
-- `severity`: `<severity>`
-- `status`: `<status>`
-- `current_stage`: `<stage>`
-
-## Alert Summary
-- `<alert_id>` — `<summary>`
-
-## Attack Timeline
-1. `<time>` — `<stage>` — `<action>`
-
-## Threat Intelligence
-- `<indicator>` — `<verdict / confidence / cache status>`
-
-## Link Analysis
-- `<linked object>` — `<why it belongs to the case>`
-
-## Target Asset
-- `<asset>` — `<owner / exposed surface / key context>`
-
-## Notification Preview
-- `<title / why now / recipients>`
-
-## Report Draft
-- `<report id / outline / status>`
-
-## Assessment
-- `<overall assessment written in cautious, evidence-based language>`
+## Escalation
+- `<notify.send call summary or 'none'>`
 
 ## Remaining Uncertainty
 - `<unknown or ambiguous point 1>`

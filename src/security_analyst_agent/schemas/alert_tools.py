@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from security_analyst_agent.schemas.common import TimeRange
@@ -15,3 +17,7 @@ class AlertFetchRequest(BaseModel):
 class AlertDetailRequest(BaseModel):
     alert_id: str
 
+
+class AlertAckRequest(BaseModel):
+    alert_ids: list[str] = Field(min_length=1)
+    status: Literal["triaged", "closed"] = "triaged"

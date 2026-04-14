@@ -1,29 +1,97 @@
 import sqlite3
+import time
 from typing import Callable
 
-from security_analyst_agent.tools.alert_tools import alert_detail, alert_fetch
+from security_analyst_agent.repositories.audit import (
+    bind_run_id,
+    finalize_mcp_auto_run_after_tool,
+    insert_tool_call_log,
+    reset_bound_run_id,
+    resolve_run_id_for_dispatch,
+)
+from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_fetch
 from security_analyst_agent.tools.asset_tools import asset_search
-from security_analyst_agent.tools.case_tools import case_explain_link, case_get, case_timeline
+from security_analyst_agent.tools.case_tools import (
+    case_explain_link,
+    case_get,
+    case_link_alert,
+    case_timeline,
+    case_update_risk,
+    case_upsert,
+)
 from security_analyst_agent.tools.intel_tools import intel_lookup
-from security_analyst_agent.tools.output_tools import notify_preview, report_draft
+from security_analyst_agent.tools.output_tools import notify_preview, notify_send, report_draft
 
 ToolHandler = Callable[[sqlite3.Connection, dict], dict]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.fetch": alert_fetch,
     "alert.detail": alert_detail,
+    "alert.ack": alert_ack,
     "asset.search": asset_search,
     "case.get": case_get,
     "case.timeline": case_timeline,
     "case.explain-link": case_explain_link,
+    "case.upsert": case_upsert,
+    "case.link-alert": case_link_alert,
+    "case.update-risk": case_update_risk,
     "intel.lookup": intel_lookup,
+    "notify.send": notify_send,
     "notify.preview": notify_preview,
     "report.draft": report_draft,
 }
 
 
-def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict) -> dict:
+def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, source: str = "unknown") -> dict:
     if tool_name not in TOOL_HANDLERS:
         raise ValueError(f"unsupported tool: {tool_name}")
-    return TOOL_HANDLERS[tool_name](conn, payload)
 
+    run_id = resolve_run_id_for_dispatch(conn, source=source, tool_name=tool_name)
+    token = bind_run_id(run_id)
+    try:
+        start = time.perf_counter()
+        result: dict
+        try:
+            result = TOOL_HANDLERS[tool_name](conn, payload)
+        except Exception:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            fallback_result = {
+                "ok": False,
+                "summary": "tool execution exception",
+                "data": {"tool": tool_name},
+                "warnings": ["tool_exception"],
+                "refs": {},
+                "page": {"next_cursor": None, "has_more": False},
+                "meta": {},
+            }
+            insert_tool_call_log(
+                conn,
+                source=source,
+                tool_name=tool_name,
+                payload=payload,
+                result=fallback_result,
+                latency_ms=latency_ms,
+            )
+            conn.commit()
+            raise
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        finalize_mcp_auto_run_after_tool(
+            conn,
+            source=source,
+            run_id=run_id,
+            tool_name=tool_name,
+            result=result,
+        )
+        insert_tool_call_log(
+            conn,
+            source=source,
+            tool_name=tool_name,
+            payload=payload,
+            result=result,
+            latency_ms=latency_ms,
+        )
+        conn.commit()
+        return result
+    finally:
+        reset_bound_run_id(token)

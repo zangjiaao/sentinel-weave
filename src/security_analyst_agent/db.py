@@ -9,6 +9,81 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_case_alert_links_shape(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("pragma table_info(case_alert_links)").fetchall()}
+    if not columns:
+        return
+
+    if "is_active" not in columns:
+        conn.execute("alter table case_alert_links add column is_active integer not null default 1")
+    if "unlinked_at" not in columns:
+        conn.execute("alter table case_alert_links add column unlinked_at text")
+
+    conn.execute("update case_alert_links set is_active = 1 where is_active is null")
+    conn.execute(
+        """
+        with ranked as (
+          select
+            rowid,
+            row_number() over (partition by alert_id order by linked_at desc, rowid desc) as rank_id
+          from case_alert_links
+          where is_active = 1
+        )
+        update case_alert_links
+        set is_active = 0, unlinked_at = coalesce(unlinked_at, linked_at)
+        where rowid in (select rowid from ranked where rank_id > 1)
+        """
+    )
+    conn.execute(
+        """
+        create unique index if not exists idx_case_alert_links_active_alert
+        on case_alert_links(alert_id)
+        where is_active = 1
+        """
+    )
+    conn.execute("create index if not exists idx_case_alert_links_alert_id on case_alert_links(alert_id)")
+
+
+def _backfill_case_links_from_legacy_alert_case_id(conn: sqlite3.Connection) -> None:
+    alert_columns = {row["name"] for row in conn.execute("pragma table_info(alerts)").fetchall()}
+    if "case_id" not in alert_columns:
+        return
+
+    conn.execute(
+        """
+        insert into case_alert_links (
+          case_id,
+          alert_id,
+          linked_at,
+          confidence,
+          reason,
+          is_active,
+          unlinked_at
+        )
+        select
+          alerts.case_id,
+          alerts.alert_id,
+          alerts.occurred_at,
+          1.0,
+          'legacy_alert_case_id_backfill',
+          1,
+          null
+        from alerts
+        left join case_alert_links
+          on case_alert_links.alert_id = alerts.alert_id
+         and case_alert_links.is_active = 1
+        where alerts.case_id is not null
+          and case_alert_links.alert_id is null
+        on conflict(case_id, alert_id) do update set
+          linked_at = excluded.linked_at,
+          confidence = excluded.confidence,
+          reason = excluded.reason,
+          is_active = 1,
+          unlinked_at = null
+        """
+    )
+
+
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -23,7 +98,6 @@ def create_schema(conn: sqlite3.Connection) -> None:
         );
         create table if not exists alerts (
           alert_id text primary key,
-          case_id text,
           occurred_at text not null,
           title text not null,
           status text not null,
@@ -64,6 +138,106 @@ def create_schema(conn: sqlite3.Connection) -> None:
           queried_at text not null,
           primary key (indicator, indicator_type)
         );
+        create table if not exists alert_ingest_events (
+          event_id text primary key,
+          alert_id text not null,
+          source text not null,
+          ingested_at text not null,
+          processed_at text,
+          trigger_state text not null
+        );
+        create table if not exists patrol_runs (
+          run_id text primary key,
+          trigger_source text not null,
+          status text not null,
+          summary text not null,
+          started_at text not null,
+          finished_at text
+        );
+        create table if not exists case_alert_links (
+          case_id text not null,
+          alert_id text not null,
+          linked_at text not null,
+          confidence real not null,
+          reason text not null,
+          is_active integer not null default 1,
+          unlinked_at text,
+          primary key (case_id, alert_id)
+        );
+        create table if not exists notification_outbox (
+          notification_id text primary key,
+          case_id text not null,
+          channel text not null,
+          template text not null,
+          title text not null,
+          body text not null,
+          dedupe_key text not null,
+          status text not null,
+          created_at text not null,
+          sent_at text
+        );
+        create table if not exists case_digests (
+          case_id text primary key,
+          digest_text text not null,
+          facts_json text not null,
+          updated_at text not null
+        );
+        create table if not exists patrol_state (
+          state_key text primary key,
+          state_value_json text not null,
+          updated_at text not null
+        );
+        create table if not exists agent_tool_calls (
+          call_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          source text not null,
+          tool_name text not null,
+          payload_json text not null,
+          result_ok integer not null,
+          result_summary text not null,
+          result_json text not null,
+          latency_ms integer not null
+        );
+        create table if not exists alert_decisions (
+          decision_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          alert_id text not null,
+          decision text not null,
+          case_id text,
+          confidence real,
+          reason text not null,
+          detail_json text not null
+        );
+        create table if not exists case_changes (
+          change_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          case_id text not null,
+          action text not null,
+          before_json text not null,
+          after_json text not null,
+          reason text not null
+        );
+        create table if not exists escalation_decisions (
+          escalation_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          case_id text not null,
+          triggered integer not null,
+          channel text not null,
+          template text not null,
+          notification_id text,
+          dedupe_key text not null,
+          reason text not null,
+          detail_json text not null
+        );
+        create table if not exists spike_round_runs (
+          round_id text primary key,
+          applied_at text not null
+        );
         """
     )
-
+    _ensure_case_alert_links_shape(conn)
+    _backfill_case_links_from_legacy_alert_case_id(conn)

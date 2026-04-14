@@ -14,6 +14,17 @@ def _read_fixture(fixture_dir: Path, filename: str) -> list[dict]:
 def _reset_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
+        delete from escalation_decisions;
+        delete from case_changes;
+        delete from alert_decisions;
+        delete from agent_tool_calls;
+        delete from patrol_state;
+        delete from case_digests;
+        delete from notification_outbox;
+        delete from case_alert_links;
+        delete from patrol_runs;
+        delete from alert_ingest_events;
+        delete from spike_round_runs;
         delete from intel_cache;
         delete from evidence;
         delete from timeline_events;
@@ -34,6 +45,28 @@ def _insert_many(conn: sqlite3.Connection, table_name: str, rows: list[dict]) ->
     conn.executemany(sql, values)
 
 
+def _split_alert_rows_and_links(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    alert_rows: list[dict] = []
+    link_rows: list[dict] = []
+    for row in rows:
+        alert_row = dict(row)
+        case_id = alert_row.pop("case_id", None)
+        alert_rows.append(alert_row)
+        if case_id:
+            link_rows.append(
+                {
+                    "case_id": case_id,
+                    "alert_id": alert_row["alert_id"],
+                    "linked_at": alert_row["occurred_at"],
+                    "confidence": 1.0,
+                    "reason": "fixture_seed",
+                    "is_active": 1,
+                    "unlinked_at": None,
+                }
+            )
+    return alert_rows, link_rows
+
+
 def bootstrap_spike_database(db_path: Path, fixture_dir: Path = FIXTURE_DIR) -> None:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -44,9 +77,11 @@ def bootstrap_spike_database(db_path: Path, fixture_dir: Path = FIXTURE_DIR) -> 
         row["related_evidence_ids"] = json.dumps(row["related_evidence_ids"], ensure_ascii=False)
 
     _reset_tables(conn)
+    alert_rows, link_rows = _split_alert_rows_and_links(_read_fixture(fixture_dir, "alerts.json"))
     _insert_many(conn, "assets", _read_fixture(fixture_dir, "assets.json"))
     _insert_many(conn, "cases", _read_fixture(fixture_dir, "cases.json"))
-    _insert_many(conn, "alerts", _read_fixture(fixture_dir, "alerts.json"))
+    _insert_many(conn, "alerts", alert_rows)
+    _insert_many(conn, "case_alert_links", link_rows)
     _insert_many(conn, "timeline_events", timeline_rows)
     _insert_many(conn, "evidence", _read_fixture(fixture_dir, "evidence.json"))
     _insert_many(conn, "intel_cache", _read_fixture(fixture_dir, "intel_cache.json"))
@@ -64,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
