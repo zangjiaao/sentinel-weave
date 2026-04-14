@@ -1,0 +1,39 @@
+{
+  "scenario": "hermes-slow-integration",
+  "skills": ["secagent-patrol"],
+  "preflight_query": "Reply exactly READY",
+  "round_defaults": {
+    "query": "Run exactly one patrol pass against the current alert queue. First call alert.fetch. Review enough evidence to explain the active intrusion, use case tools to maintain case state when justified, persist at least one entity-level conclusion when supported, and ack any alert you have triaged. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
+    "max_turns": 18,
+    "required_output_headers": [
+      "## Patrol Action Summary",
+      "## Remaining Uncertainty",
+      "## Memory Summary"
+    ],
+    "required_tool_names": ["alert.fetch"],
+    "required_any_tool_names": [
+      ["alert.detail", "case.get", "case.timeline", "case.explain-link"]
+    ],
+    "min_tool_calls": 2,
+    "first_tool_name": "alert.fetch"
+  },
+  "rounds": [
+    {"round_id": "round_01_recon"},
+    {"round_id": "round_02_exploit"},
+    {"round_id": "round_03_new_ip"},
+    {"round_id": "round_04_lateral_prep"},
+    {"round_id": "round_05_silent_period"},
+    {"round_id": "round_06_reactivation"}
+  ],
+  "final_assertions": {
+    "min_patrol_runs": 6,
+    "min_tool_calls": 12,
+    "required_tool_names": ["alert.fetch", "alert.ack"],
+    "required_any_tool_names": [
+      ["alert.detail", "case.get", "case.timeline", "case.explain-link"],
+      ["assessment.upsert", "case.link-alert", "case.update-risk"]
+    ],
+    "min_entity_assessments": 1,
+    "min_alert_decisions": 1
+  }
+}
