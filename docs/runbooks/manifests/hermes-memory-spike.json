@@ -1,0 +1,240 @@
+{
+  "scenario": "hermes-memory-spike",
+  "fixture_dir": "fixtures/spike_memory",
+  "rounds": [
+    {
+      "round_id": "round_01_recon",
+      "run_id": "run_verify_round_01",
+      "started_at": "2026-04-10T23:59:59+08:00",
+      "analysis_cutoff_at": "2026-04-10T23:59:59+08:00",
+      "checks": [
+        {
+          "type": "alert_detail_excludes_evidence",
+          "alert_id": "alt_r1_api_scan",
+          "excluded_evidence_ids": ["evi_webshell_01", "evi_shell_conn_01", "evi_lateral_01", "evi_reactivation_01"],
+          "summary_key": "round1_detail_evidence_ids"
+        },
+        {
+          "type": "explain_link_excludes_evidence",
+          "case_id": "case_demo_001",
+          "alert_id": "alt_r1_api_scan",
+          "excluded_evidence_ids": ["evi_webshell_01", "evi_shell_conn_01", "evi_lateral_01", "evi_reactivation_01"],
+          "summary_key": "round1_link_supporting_evidence_ids"
+        }
+      ],
+      "actions": [
+        {
+          "tool": "alert.ack",
+          "payload": {"alert_ids": ["alt_r1_api_scan"], "status": "triaged"}
+        }
+      ]
+    },
+    {
+      "round_id": "round_02_exploit",
+      "run_id": "run_verify_round_02",
+      "started_at": "2026-04-11T23:59:59+08:00",
+      "analysis_cutoff_at": "2026-04-11T23:59:59+08:00",
+      "checks": [],
+      "actions": [
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r2_webshell",
+            "confidence": 0.92,
+            "reason": "round2 webshell evidence links exploit to existing recon case"
+          }
+        },
+        {
+          "tool": "case.update-risk",
+          "payload": {
+            "case_id": "case_demo_001",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "investigating"
+          }
+        },
+        {
+          "tool": "assessment.upsert",
+          "payload": {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.23",
+            "entity_label": "198.51.100.23",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.93,
+            "verdict": "attacker",
+            "reason_summary": "漏洞利用后写入 webshell 的核心来源",
+            "supporting_alert_ids": ["alt_r2_webshell"],
+            "supporting_evidence_ids": ["evi_webshell_01"]
+          }
+        },
+        {
+          "tool": "assessment.upsert",
+          "payload": {
+            "entity_type": "asset",
+            "entity_key": "203.0.113.10",
+            "entity_label": "203.0.113.10",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.88,
+            "verdict": "compromised_host",
+            "reason_summary": "出现 webshell 落地证据的疑似失陷主机",
+            "supporting_alert_ids": ["alt_r2_webshell"],
+            "supporting_evidence_ids": ["evi_webshell_01"]
+          }
+        }
+      ]
+    },
+    {
+      "round_id": "round_03_new_ip",
+      "run_id": "run_verify_round_03",
+      "started_at": "2026-04-12T11:10:00+08:00",
+      "analysis_cutoff_at": "2026-04-12T11:10:00+08:00",
+      "checks": [],
+      "actions": [
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r3_shell_new_ip",
+            "confidence": 0.9,
+            "reason": "new source IP connects to existing webshell landing point"
+          }
+        },
+        {
+          "tool": "case.update-risk",
+          "payload": {
+            "case_id": "case_demo_001",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "status": "investigating"
+          }
+        },
+        {
+          "tool": "assessment.upsert",
+          "payload": {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.77",
+            "entity_label": "198.51.100.77",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.91,
+            "verdict": "attacker",
+            "reason_summary": "新源 IP 连接既有 webshell",
+            "supporting_alert_ids": ["alt_r3_shell_new_ip"],
+            "supporting_evidence_ids": ["evi_shell_conn_01"]
+          }
+        },
+        {
+          "tool": "assessment.upsert",
+          "payload": {
+            "entity_type": "ip",
+            "entity_key": "192.0.2.91",
+            "entity_label": "192.0.2.91",
+            "related_case_id": "case_noise_001",
+            "risk_level": "low",
+            "assessment_confidence": 0.55,
+            "verdict": "noise",
+            "reason_summary": "代理出口变化导致目录探测源地址波动",
+            "supporting_alert_ids": ["alt_r3_noise_proxy_shift"],
+            "supporting_evidence_ids": []
+          }
+        }
+      ]
+    },
+    {
+      "round_id": "round_04_lateral_prep",
+      "run_id": "run_verify_round_04",
+      "started_at": "2026-04-12T11:30:00+08:00",
+      "analysis_cutoff_at": "2026-04-12T11:30:00+08:00",
+      "checks": [],
+      "actions": [
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r4_internal_scan",
+            "confidence": 0.9,
+            "reason": "webshell control followed by internal scanning preparation"
+          }
+        },
+        {
+          "tool": "case.update-risk",
+          "payload": {
+            "case_id": "case_demo_001",
+            "overall_severity": "high",
+            "current_stage": "lateral_prep",
+            "status": "investigating"
+          }
+        }
+      ]
+    },
+    {
+      "round_id": "round_05_silent_period",
+      "run_id": "run_verify_round_05",
+      "started_at": "2026-04-13T23:59:59+08:00",
+      "analysis_cutoff_at": "2026-04-13T23:59:59+08:00",
+      "checks": [],
+      "actions": []
+    },
+    {
+      "round_id": "round_06_reactivation",
+      "run_id": "run_verify_round_06",
+      "started_at": "2026-04-14T23:59:59+08:00",
+      "analysis_cutoff_at": "2026-04-14T23:59:59+08:00",
+      "checks": [],
+      "actions": [
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r6_shell_reactivation",
+            "confidence": 0.9,
+            "reason": "silent period followed by reactivation against existing webshell"
+          }
+        },
+        {
+          "tool": "assessment.upsert",
+          "payload": {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.91",
+            "entity_label": "198.51.100.91",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.9,
+            "verdict": "attacker",
+            "reason_summary": "静默后再次连接既有 webshell",
+            "supporting_alert_ids": ["alt_r6_shell_reactivation"],
+            "supporting_evidence_ids": ["evi_reactivation_01"]
+          }
+        },
+        {
+          "tool": "assessment.upsert",
+          "payload": {
+            "entity_type": "ip",
+            "entity_key": "192.0.2.123",
+            "entity_label": "192.0.2.123",
+            "related_case_id": "case_noise_001",
+            "risk_level": "low",
+            "assessment_confidence": 0.55,
+            "verdict": "noise",
+            "reason_summary": "无状态 API 探测命中旧规则",
+            "supporting_alert_ids": ["alt_r6_noise_api_probe"],
+            "supporting_evidence_ids": []
+          }
+        }
+      ]
+    }
+  ],
+  "final_assertions": {
+    "high_attacker_ips": ["198.51.100.23", "198.51.100.77", "198.51.100.91"],
+    "noise_ips": ["192.0.2.123", "192.0.2.91"],
+    "not_high_attacker_ips": ["192.0.2.91", "192.0.2.123"],
+    "compromised_host": {
+      "entity_key": "203.0.113.10",
+      "allowed_risk_levels": ["high", "medium"],
+      "verdict": "compromised_host"
+    }
+  }
+}
