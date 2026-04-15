@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import sqlite3
+
+from security_analyst_agent.repositories.actors import (
+    add_case_actor_link,
+    add_case_actor_observation,
+    list_case_actor_profiles,
+    load_case_actor_candidate_contexts,
+    load_case_actor_profile,
+    upsert_case_actor_profile,
+)
+from security_analyst_agent.repositories.cases import load_alert, load_case
+from security_analyst_agent.schemas.actor_tools import (
+    ActorCaseAddObservationRequest,
+    ActorCaseFindCandidatesRequest,
+    ActorCaseGetRequest,
+    ActorCaseLinkRequest,
+    ActorCaseListRequest,
+    ActorCaseUpsertRequest,
+)
+from security_analyst_agent.schemas.common import ToolResponse
+from security_analyst_agent.services.case_actor_scoring import score_case_actor_candidate
+
+
+def actor_case_list(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseListRequest.model_validate(payload)
+    actors = list_case_actor_profiles(conn, request.case_id)
+    response = ToolResponse(
+        ok=True,
+        summary=f"返回案件 {request.case_id} 的案内画像 {len(actors)} 个",
+        data={"actors": actors},
+        refs={"case_ids": [request.case_id], "case_actor_ids": [item["case_actor_id"] for item in actors]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def actor_case_get(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseGetRequest.model_validate(payload)
+    actor = load_case_actor_profile(conn, request.case_actor_id)
+    if actor is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到案内画像 {request.case_actor_id}",
+            data={"actor": None},
+            warnings=[f"case_actor_not_found:{request.case_actor_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+    response = ToolResponse(
+        ok=True,
+        summary=f"读取案内画像 {request.case_actor_id}",
+        data={"actor": actor},
+        refs={"case_actor_ids": [request.case_actor_id], "case_ids": [actor["case_id"]]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseFindCandidatesRequest.model_validate(payload)
+    case = load_case(conn, request.case_id)
+    alert = load_alert(conn, request.alert_id)
+    if case is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到案件 {request.case_id}",
+            data={"candidates": []},
+            warnings=[f"case_not_found:{request.case_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+    if alert is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到告警 {request.alert_id}",
+            data={"candidates": []},
+            warnings=[f"alert_not_found:{request.alert_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+    contexts = load_case_actor_candidate_contexts(conn, case_id=request.case_id, alert_id=request.alert_id)
+    candidates = sorted(
+        [score_case_actor_candidate(context) for context in contexts],
+        key=lambda item: item["relation_score"],
+        reverse=True,
+    )[: request.limit]
+    response = ToolResponse(
+        ok=True,
+        summary=f"返回案内画像候选 {len(candidates)} 个",
+        data={"case": case, "alert": alert, "candidates": candidates},
+        refs={
+            "case_ids": [request.case_id],
+            "alert_ids": [request.alert_id],
+            "case_actor_ids": [item["case_actor_id"] for item in candidates],
+        },
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def actor_case_upsert(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseUpsertRequest.model_validate(payload)
+    case = load_case(conn, request.case_id)
+    if case is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到案件 {request.case_id}",
+            data={"actor": None},
+            warnings=[f"case_not_found:{request.case_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+    actor = upsert_case_actor_profile(conn, request.model_dump(mode="python"))
+    conn.commit()
+    response = ToolResponse(
+        ok=True,
+        summary=f"已写入案内画像 {request.case_actor_id}",
+        data={"actor": actor},
+        refs={"case_ids": [request.case_id], "case_actor_ids": [request.case_actor_id]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def actor_case_add_observation(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseAddObservationRequest.model_validate(payload)
+    actor = load_case_actor_profile(conn, request.case_actor_id)
+    if actor is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到案内画像 {request.case_actor_id}",
+            data={"observation": None},
+            warnings=[f"case_actor_not_found:{request.case_actor_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+    observation = add_case_actor_observation(conn, request.model_dump(mode="python"))
+    conn.commit()
+    response = ToolResponse(
+        ok=True,
+        summary=f"已写入案内画像观测 {request.observation_type}:{request.observation_key}",
+        data={"observation": observation},
+        refs={"case_actor_ids": [request.case_actor_id]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def actor_case_link(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseLinkRequest.model_validate(payload)
+    actor = load_case_actor_profile(conn, request.case_actor_id)
+    if actor is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到案内画像 {request.case_actor_id}",
+            data={"link": None},
+            warnings=[f"case_actor_not_found:{request.case_actor_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+    link = add_case_actor_link(conn, request.model_dump(mode="python"))
+    conn.commit()
+    response = ToolResponse(
+        ok=True,
+        summary=f"已关联案内画像 {request.case_actor_id} 到 {request.target_type}:{request.target_id}",
+        data={"link": link},
+        refs={"case_actor_ids": [request.case_actor_id], f"{request.target_type}_ids": [request.target_id]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
