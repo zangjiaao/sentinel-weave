@@ -397,6 +397,95 @@ def test_verify_final_db_state_fails_when_case_assessments_missing(tmp_path: Pat
     conn.close()
 
 
+def test_verify_final_db_state_fails_when_primary_case_actor_missing_for_single_chain(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_actor_verify_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_actor_verify_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_actor_verify_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (case_id, title, status, overall_severity, current_stage, primary_actor_id)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        ("case_actor_verify_001", "case", "open", "high", "persistence", "198.51.100.23"),
+    )
+    conn.execute(
+        """
+        insert into alerts (alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_case_actor_verify_001",
+            "2026-04-14T09:55:00+08:00",
+            "verify single chain alert",
+            "triaged",
+            "high",
+            "persistence",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_alert_links (case_id, alert_id, linked_at, confidence, reason, is_active)
+        values (?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "case_actor_verify_001",
+            "alt_case_actor_verify_001",
+            "2026-04-14T09:55:00+08:00",
+            0.9,
+            "single chain seed",
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "required_single_chain_alert_ids": ["alt_case_actor_verify_001"],
+            "require_primary_case_actor_for_single_chain": True,
+        }
+    }
+    with pytest.raises(HermesSlowVerificationError, match="primary case actor missing"):
+        _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    conn.close()
+
+
 def test_build_chat_command_includes_query_and_skill() -> None:
     command = build_chat_command(
         query="Run one patrol pass",

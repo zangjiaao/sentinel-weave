@@ -434,10 +434,40 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
             matched = True
             break
         if not matched:
-            raise HermesSlowVerificationError(
-                "final_db_assertions",
-                f"missing required current entity: {required_entity}",
-            )
+                raise HermesSlowVerificationError(
+                    "final_db_assertions",
+                    f"missing required current entity: {required_entity}",
+                )
+
+    if final_assertions.get("require_primary_case_actor_for_single_chain", False):
+        single_chain_case_ids: set[str] = set()
+        for alert_id in final_assertions.get("required_single_chain_alert_ids", []):
+            row = conn.execute(
+                """
+                select case_id
+                from case_alert_links
+                where alert_id = ? and is_active = 1
+                limit 1
+                """,
+                (alert_id,),
+            ).fetchone()
+            if row is not None:
+                single_chain_case_ids.add(row["case_id"])
+        for case_id in single_chain_case_ids:
+            row = conn.execute(
+                """
+                select case_actor_id
+                from case_actor_profiles
+                where case_id = ? and is_primary = 1
+                limit 1
+                """,
+                (case_id,),
+            ).fetchone()
+            if row is None:
+                raise HermesSlowVerificationError(
+                    "final_db_assertions",
+                    f"primary case actor missing for case_id={case_id}",
+                )
 
     return {
         "tool_calls_count": len(tool_names),
