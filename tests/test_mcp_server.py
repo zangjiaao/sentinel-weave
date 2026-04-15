@@ -11,6 +11,12 @@ def test_mcp_tool_names_match_core_contract() -> None:
         "alert.detail",
         "alert.ack",
         "asset.search",
+        "actor.case-list",
+        "actor.case-get",
+        "actor.case-find-candidates",
+        "actor.case-upsert",
+        "actor.case-add-observation",
+        "actor.case-link",
         "case.get",
         "case.timeline",
         "case.explain-link",
@@ -162,3 +168,15 @@ def test_mcp_prompt_timeline_upsert_contains_usage_guidance() -> None:
     assert '"timeline_event_id":"<timeline_event_id>"' in text
     assert '"related_alert_ids":["<alert_id>"]' in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
+
+
+def test_mcp_server_registers_actor_tools() -> None:
+    from security_analyst_agent.mcp_server import CORE_TOOL_NAMES, TOOL_DESCRIPTIONS
+
+    assert "actor.case-list" in CORE_TOOL_NAMES
+    assert "actor.case-get" in CORE_TOOL_NAMES
+    assert "actor.case-find-candidates" in CORE_TOOL_NAMES
+    assert "actor.case-upsert" in CORE_TOOL_NAMES
+    assert "actor.case-add-observation" in CORE_TOOL_NAMES
+    assert "actor.case-link" in CORE_TOOL_NAMES
+    assert "actor.case-link" in TOOL_DESCRIPTIONS

@@ -12,6 +12,14 @@ from security_analyst_agent.repositories.audit import (
 from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_fetch
 from security_analyst_agent.tools.assessment_tools import assessment_upsert
 from security_analyst_agent.tools.asset_tools import asset_search
+from security_analyst_agent.tools.actor_tools import (
+    actor_case_add_observation,
+    actor_case_find_candidates,
+    actor_case_get,
+    actor_case_link,
+    actor_case_list,
+    actor_case_upsert,
+)
 from security_analyst_agent.tools.case_tools import (
     case_explain_link,
     case_get,
@@ -31,6 +39,12 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.detail": alert_detail,
     "alert.ack": alert_ack,
     "asset.search": asset_search,
+    "actor.case-list": actor_case_list,
+    "actor.case-get": actor_case_get,
+    "actor.case-find-candidates": actor_case_find_candidates,
+    "actor.case-upsert": actor_case_upsert,
+    "actor.case-add-observation": actor_case_add_observation,
+    "actor.case-link": actor_case_link,
     "case.get": case_get,
     "case.timeline": case_timeline,
     "case.explain-link": case_explain_link,

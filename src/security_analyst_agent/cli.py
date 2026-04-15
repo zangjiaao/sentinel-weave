@@ -119,6 +119,54 @@ def asset_search_command(
     _run_tool("asset.search", db_path, payload)
 
 
+@app.command("actor.case-list")
+def actor_case_list_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-list", db_path, payload)
+
+
+@app.command("actor.case-get")
+def actor_case_get_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-get", db_path, payload)
+
+
+@app.command("actor.case-find-candidates")
+def actor_case_find_candidates_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-find-candidates", db_path, payload)
+
+
+@app.command("actor.case-upsert")
+def actor_case_upsert_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-upsert", db_path, payload)
+
+
+@app.command("actor.case-add-observation")
+def actor_case_add_observation_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-add-observation", db_path, payload)
+
+
+@app.command("actor.case-link")
+def actor_case_link_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-link", db_path, payload)
+
+
 @app.command("case.get")
 def case_get_command(
     db_path: Path = typer.Option(..., "--db-path"),
