@@ -228,6 +228,64 @@ def create_schema(conn: sqlite3.Connection) -> None:
           unlinked_at text,
           primary key (case_id, alert_id)
         );
+        create table if not exists case_actor_profiles (
+          case_actor_id text primary key,
+          case_id text not null,
+          label text not null,
+          status text not null,
+          profile_confidence real not null,
+          risk_level text not null,
+          is_primary integer not null default 0,
+          current_stage text not null,
+          first_seen_at text,
+          last_seen_at text,
+          summary text not null,
+          created_at text not null,
+          updated_at text not null
+        );
+        create table if not exists case_actor_observations (
+          observation_id text primary key,
+          case_actor_id text not null,
+          observation_type text not null,
+          observation_key text not null,
+          observation_value text not null,
+          confidence real not null,
+          first_seen_at text,
+          last_seen_at text,
+          source_count integer not null default 1,
+          created_at text not null,
+          updated_at text not null
+        );
+        create table if not exists case_actor_links (
+          link_id text primary key,
+          case_actor_id text not null,
+          target_type text not null,
+          target_id text not null,
+          link_confidence real not null,
+          link_reason text not null,
+          linked_at text not null
+        );
+        create table if not exists attacker_profiles (
+          attacker_profile_id text primary key,
+          label text not null,
+          status text not null,
+          profile_confidence real not null,
+          risk_level text not null,
+          summary text not null,
+          first_seen_at text,
+          last_seen_at text,
+          created_at text not null,
+          updated_at text not null
+        );
+        create table if not exists case_actor_profile_links (
+          link_id text primary key,
+          case_actor_id text not null,
+          attacker_profile_id text not null,
+          relation_status text not null,
+          relation_score real not null,
+          decision_reason text not null,
+          created_at text not null
+        );
         create table if not exists notification_outbox (
           notification_id text primary key,
           case_id text not null,
@@ -361,6 +419,31 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """
         create index if not exists idx_entity_assessments_filter
         on entity_assessments(entity_type, risk_level, occurred_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create unique index if not exists idx_case_actor_profiles_primary
+        on case_actor_profiles(case_id)
+        where is_primary = 1
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_case_actor_profiles_case
+        on case_actor_profiles(case_id, status, updated_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create unique index if not exists idx_case_actor_observations_unique
+        on case_actor_observations(case_actor_id, observation_type, observation_key)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_case_actor_links_target
+        on case_actor_links(target_type, target_id)
         """
     )
     _ensure_case_alert_links_shape(conn)
