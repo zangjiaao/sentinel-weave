@@ -6,5 +6,4 @@ __pycache__/
 .pytest_cache
 .ruff_cache
 spike.db
-memory-spike.db
-spike-*.db
+hermes-slow-verify.db
