@@ -37,6 +37,14 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - 不要对同一个 `alert_id` 重复调用 `case.explain-link`，除非出现新的矛盾证据需要重新解释。
 - Use `alert.ack` with payload `{"alert_ids":["<alert_id>"],"status":"triaged"}` after analysis is complete for those alerts.
 - Use `case.upsert` when a case needs to be created or refreshed；不要假设 fixture 已经替你建好案件。
+- 每个 `case` 可以有一个或多个案内攻击者画像。
+- 画像不等于单个 IP；IP 只是 `observation`。
+- 不要因为源 IP 变化就创建新的案内画像。
+- 当告警已归入案件后，使用 `actor.case-list` 查看该案已有画像。
+- 对代表性告警使用 `actor.case-find-candidates` 判断是否属于已有案内画像。
+- 如果属于已有画像，使用 `actor.case-add-observation` 追加新的 IP、资产、URI、C2 或 webshell 线索，并用 `actor.case-link` 关联告警/证据/时间线。
+- 如果没有合格候选，且该告警代表独立高信号攻击活动，使用 `actor.case-upsert` 创建新的案内画像。
+- 噪音告警不创建案内画像。
 - `case.upsert` 只允许这些字段：`case_id`、`title`、`status`、`overall_severity`、`current_stage`、`primary_actor_id`。
 - 调用 `case.upsert` 时不要传额外字段，例如：`description`、`severity`、`created_at`、`updated_at`。
 - Use `case.link-alert` when an alert should be linked to an existing case.

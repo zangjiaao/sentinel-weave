@@ -82,6 +82,15 @@ def test_secagent_skill_requires_case_update_risk_for_case_level_assessment() ->
     assert "即使案件头字段已经同步" in text
 
 
+def test_secagent_skill_teaches_case_actor_workflow() -> None:
+    text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
+
+    assert "actor.case-list" in text
+    assert "actor.case-find-candidates" in text
+    assert "actor.case-upsert" in text
+    assert "不要因为源 IP 变化就创建新的案内画像" in text
+
+
 def test_secagent_skill_marks_only_alert_asset_intel_as_preloaded_facts() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
