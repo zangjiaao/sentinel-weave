@@ -2,7 +2,7 @@ import json
 
 from typer.testing import CliRunner
 
-from security_analyst_agent.bootstrap import bootstrap_spike_database
+from security_analyst_agent.bootstrap import bootstrap_spike_database, materialize_spike_runtime_demo
 from security_analyst_agent.cli import app
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.tool_dispatch import dispatch_tool
@@ -11,6 +11,7 @@ from security_analyst_agent.tool_dispatch import dispatch_tool
 def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
     conn = connect_db(db_path)
 
     dispatch_tool(
@@ -60,6 +61,32 @@ def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     )
     dispatch_tool(
         conn,
+        "evidence.upsert",
+        {
+            "evidence_id": "evi_audit_001",
+            "case_id": "case_audit_001",
+            "occurred_at": "2026-04-15T13:00:00+08:00",
+            "evidence_type": "webshell",
+            "summary": "audit evidence",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "timeline.upsert",
+        {
+            "timeline_event_id": "tl_audit_001",
+            "case_id": "case_audit_001",
+            "occurred_at": "2026-04-15T13:01:00+08:00",
+            "stage": "persistence",
+            "title": "audit timeline",
+            "related_alert_ids": ["alt_day1_scan_01"],
+            "related_evidence_ids": ["evi_audit_001"],
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
         "assessment.upsert",
         {
             "entity_type": "ip",
@@ -90,12 +117,12 @@ def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     case_change_count = conn.execute("select count(*) from case_changes").fetchone()[0]
     escalation_count = conn.execute("select count(*) from escalation_decisions").fetchone()[0]
 
-    assert tool_call_count >= 6
+    assert tool_call_count >= 8
     assert alert_decision_count >= 1
     assert link_decision_count >= 1
     assert case_assessment_count >= 1
     assert entity_assessment_count >= 1
-    assert case_change_count >= 1
+    assert case_change_count >= 3
     assert escalation_count >= 1
     conn.close()
 
@@ -170,6 +197,7 @@ def test_context_cli_commands_return_rows(tmp_path) -> None:
 def test_alert_decisions_no_longer_store_link_or_risk_semantics(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
     conn = connect_db(db_path)
     dispatch_tool(
         conn,

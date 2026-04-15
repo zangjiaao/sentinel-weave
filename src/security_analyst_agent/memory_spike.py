@@ -104,14 +104,16 @@ def _prepare_evidence_rows(
     return prepared_rows
 
 
-def _split_alert_rows_and_links(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _split_alert_rows_and_links(
+    rows: list[dict[str, Any]], *, seed_case_links: bool = True
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     alert_rows: list[dict[str, Any]] = []
     link_rows: list[dict[str, Any]] = []
     for row in rows:
         alert_row = dict(row)
         case_id = alert_row.pop("case_id", None)
         alert_rows.append(alert_row)
-        if case_id:
+        if seed_case_links and case_id:
             link_rows.append(
                 {
                     "case_id": case_id,
@@ -136,14 +138,12 @@ def bootstrap_memory_spike_database(db_path: Path, fixture_dir: Path = SPIKE_MEM
     conn = connect_db(db_path)
     create_schema(conn)
     bundle = _read_json(fixture_dir / "base_bundle.json")
-    alert_rows, link_rows = _split_alert_rows_and_links(bundle["alerts"])
+    alert_rows, link_rows = _split_alert_rows_and_links(bundle["alerts"], seed_case_links=False)
     _reset_tables(conn)
     _insert_many(conn, "assets", bundle["assets"])
     _insert_many(conn, "cases", bundle["cases"])
     _insert_many(conn, "alerts", alert_rows)
     _insert_many(conn, "case_alert_links", link_rows)
-    _insert_many(conn, "timeline_events", _prepare_timeline_rows(bundle["timeline_events"]))
-    _insert_many(conn, "evidence", _prepare_evidence_rows(bundle["evidence"], bundle["timeline_events"]))
     _insert_many(conn, "intel_cache", bundle["intel_cache"])
     conn.commit()
     conn.close()
@@ -180,12 +180,9 @@ def apply_memory_spike_round(
         conn.close()
         raise ValueError("previous round must be applied first")
 
-    alert_rows, link_rows = _split_alert_rows_and_links(batch["alerts"])
-    _upsert_many(conn, "cases", batch["cases_upsert"], ["case_id"])
+    alert_rows, link_rows = _split_alert_rows_and_links(batch["alerts"], seed_case_links=False)
     _insert_many(conn, "alerts", alert_rows)
     _insert_many(conn, "case_alert_links", link_rows)
-    _insert_many(conn, "timeline_events", _prepare_timeline_rows(batch["timeline_events"]))
-    _insert_many(conn, "evidence", _prepare_evidence_rows(batch["evidence"], batch["timeline_events"]))
     _upsert_many(conn, "intel_cache", batch["intel_cache_upsert"], ["indicator", "indicator_type"])
     conn.execute(
         "insert into spike_round_runs (round_id, applied_at) values (?, ?)",
@@ -198,9 +195,9 @@ def apply_memory_spike_round(
         "round_id": round_id,
         "applied": True,
         "inserted_alerts": len(batch["alerts"]),
-        "upserted_cases": len(batch["cases_upsert"]),
-        "inserted_timeline_events": len(batch["timeline_events"]),
-        "inserted_evidence": len(batch["evidence"]),
+        "upserted_cases": 0,
+        "inserted_timeline_events": 0,
+        "inserted_evidence": 0,
     }
 
 

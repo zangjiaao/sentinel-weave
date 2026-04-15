@@ -134,6 +134,32 @@
       "idempotent": true
     },
     {
+      "name": "evidence.upsert",
+      "description": "写入或更新案件证据记录。",
+      "when_to_use": [
+        "需要把漏洞利用、webshell、横向扫描等证据沉淀为结构化记录时",
+        "需要让后续案件时间线或评估引用该证据时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli evidence.upsert --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": false,
+      "timeout_sec": 20,
+      "cost_level": "medium",
+      "idempotent": true
+    },
+    {
+      "name": "timeline.upsert",
+      "description": "写入或更新时间线节点，沉淀攻击过程。",
+      "when_to_use": [
+        "需要把多条告警和证据合并成一个攻击步骤时",
+        "需要把攻击链过程结构化到案件时间线时"
+      ],
+      "command_template": "uv run python -m security_analyst_agent.cli timeline.upsert --db-path ${SPIKE_DB_PATH} --payload '${JSON_PAYLOAD}'",
+      "read_only": false,
+      "timeout_sec": 20,
+      "cost_level": "medium",
+      "idempotent": true
+    },
+    {
       "name": "assessment.upsert",
       "description": "写入实体级风险评估（攻击IP/失陷主机/噪音来源）。",
       "when_to_use": [

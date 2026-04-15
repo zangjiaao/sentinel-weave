@@ -1,9 +1,30 @@
 import json
+from pathlib import Path
 import subprocess
 import sys
 
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.runbook_verify import run_scenario
+
+
+def test_hermes_memory_spike_runbook_creates_cases_via_actions() -> None:
+    manifest = json.loads(Path("docs/runbooks/manifests/hermes-memory-spike.json").read_text(encoding="utf-8"))
+
+    first_round_tools = [item["tool"] for item in manifest["rounds"][0]["actions"]]
+    assert "case.upsert" in first_round_tools
+    assert "case.link-alert" in first_round_tools
+
+
+def test_hermes_memory_spike_runbook_persists_runtime_evidence_and_timeline() -> None:
+    manifest = json.loads(Path("docs/runbooks/manifests/hermes-memory-spike.json").read_text(encoding="utf-8"))
+
+    later_round_tools = {
+        item["tool"]
+        for round_spec in manifest["rounds"][1:]
+        for item in round_spec["actions"]
+    }
+    assert "evidence.upsert" in later_round_tools
+    assert "timeline.upsert" in later_round_tools
 
 
 def test_hermes_memory_spike_runbook_verifier_passes(tmp_path) -> None:

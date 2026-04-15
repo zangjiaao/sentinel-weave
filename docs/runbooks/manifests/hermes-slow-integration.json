@@ -3,7 +3,7 @@
   "skills": ["secagent-patrol"],
   "preflight_query": "Reply exactly READY",
   "round_defaults": {
-    "query": "Run exactly one patrol pass against the current alert queue. First call alert.fetch. Review enough evidence to explain the active intrusion, use case tools to maintain case state when justified, persist at least one entity-level conclusion when supported, and ack any alert you have triaged. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
+    "query": "Run exactly one patrol pass against the current alert queue. First call alert.fetch. Review enough evidence to explain the active intrusion. If current alerts justify a new case or the referenced case record does not exist yet, call alert.detail on at least one representative alert first, then create the case with case.upsert using the exact case.upsert schema keys from the MCP prompt only. Do not send extra case.upsert fields such as description, severity, created_at, or updated_at. Then use case tools to maintain case state when justified, always include numeric confidence and reason when calling case.link-alert, call case.update-risk to persist a case-level assessment snapshot whenever this run advances stage, raises severity, or forms a new case-level judgment even if the case header is already synced, persist entity-level conclusions with the exact assessment.upsert schema keys from the MCP prompt, include compromised_host for an asset when exploitation/webshell/foothold evidence supports it, and ack any alert you have triaged. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
     "max_turns": 18,
     "required_output_headers": [
       "## Patrol Action Summary",
@@ -28,10 +28,20 @@
   "final_assertions": {
     "min_patrol_runs": 6,
     "min_tool_calls": 12,
-    "required_tool_names": ["alert.fetch", "alert.ack"],
+    "required_tool_names": ["alert.fetch", "alert.ack", "case.upsert"],
     "required_any_tool_names": [
       ["alert.detail", "case.get", "case.timeline", "case.explain-link"],
       ["assessment.upsert", "case.link-alert", "case.update-risk"]
+    ],
+    "max_failed_tool_calls": 0,
+    "min_case_assessments": 1,
+    "required_current_entities": [
+      {
+        "entity_type": "asset",
+        "entity_key": "asset_api_prod",
+        "risk_level": "high",
+        "verdict": "compromised_host"
+      }
     ],
     "min_entity_assessments": 1,
     "min_alert_decisions": 1

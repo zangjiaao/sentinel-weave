@@ -20,6 +20,8 @@ def test_secagent_skill_contains_mcp_workflow_guidance() -> None:
     assert "`case.upsert`" in text
     assert "`case.link-alert`" in text
     assert "`case.update-risk`" in text
+    assert "`evidence.upsert`" in text
+    assert "`timeline.upsert`" in text
     assert "`assessment.upsert`" in text
     assert "`intel.lookup`" in text
     assert "`notify.send`" in text
@@ -37,6 +39,54 @@ def test_secagent_skill_contains_output_contract() -> None:
     assert "`Escalation`" in text
     assert "`Memory Summary`" in text
     assert "`Asia/Shanghai`" in text
+
+
+def test_secagent_skill_contains_assessment_upsert_contract() -> None:
+    text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
+
+    assert "`related_case_id`" in text
+    assert "`assessment_confidence`" in text
+    assert "`supporting_alert_ids`" in text
+    assert "`supporting_evidence_ids`" in text
+    assert "`entity_id`" in text
+    assert "`case_ids`" in text
+    assert "不要使用字符串置信度" in text
+
+
+def test_secagent_skill_contains_case_link_alert_contract() -> None:
+    text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
+
+    assert "`case.link-alert`" in text
+    assert "`confidence`" in text
+    assert "`reason`" in text
+    assert "必须带 `confidence`" in text
+
+
+def test_secagent_skill_contains_exact_case_upsert_contract() -> None:
+    text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
+
+    assert "`case.upsert`" in text
+    assert "`overall_severity`" in text
+    assert "`primary_actor_id`" in text
+    assert "`description`" in text
+    assert "`created_at`" in text
+    assert "`updated_at`" in text
+    assert "不要传额外字段" in text
+
+
+def test_secagent_skill_requires_case_update_risk_for_case_level_assessment() -> None:
+    text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
+
+    assert "`case.update-risk`" in text
+    assert "案件级评估" in text
+    assert "即使案件头字段已经同步" in text
+
+
+def test_secagent_skill_marks_only_alert_asset_intel_as_preloaded_facts() -> None:
+    text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
+
+    assert "`alerts` / `assets` / `intel_cache`" in text
+    assert "`cases` / `case_alert_links` / `timeline_events` / `evidence`" in text
 
 
 def test_secagent_skill_openai_yaml_mentions_skill() -> None:

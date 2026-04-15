@@ -20,6 +20,7 @@ from security_analyst_agent.tools.case_tools import (
     case_update_risk,
     case_upsert,
 )
+from security_analyst_agent.tools.derived_tools import evidence_upsert, timeline_upsert
 from security_analyst_agent.tools.intel_tools import intel_lookup
 from security_analyst_agent.tools.output_tools import notify_preview, notify_send, report_draft
 
@@ -36,6 +37,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "case.upsert": case_upsert,
     "case.link-alert": case_link_alert,
     "case.update-risk": case_update_risk,
+    "evidence.upsert": evidence_upsert,
+    "timeline.upsert": timeline_upsert,
     "assessment.upsert": assessment_upsert,
     "intel.lookup": intel_lookup,
     "notify.send": notify_send,

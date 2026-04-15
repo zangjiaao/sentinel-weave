@@ -2,7 +2,7 @@ import json
 
 from typer.testing import CliRunner
 
-from security_analyst_agent.bootstrap import bootstrap_spike_database
+from security_analyst_agent.bootstrap import bootstrap_spike_database, materialize_spike_runtime_demo
 from security_analyst_agent.cli import app
 from security_analyst_agent.db import connect_db
 
@@ -22,6 +22,7 @@ def test_cli_alert_fetch_returns_json(tmp_path) -> None:
 def test_cli_all_core_tools_return_unified_shape(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
     runner = CliRunner()
     cases = [
         ("alert.fetch", {"status": ["open"], "limit": 2}),
@@ -58,6 +59,28 @@ def test_cli_all_core_tools_return_unified_shape(tmp_path) -> None:
                 "overall_severity": "high",
                 "current_stage": "persistence",
                 "status": "investigating",
+            },
+        ),
+        (
+            "evidence.upsert",
+            {
+                "evidence_id": "evi_cli_001",
+                "case_id": "case_cli_001",
+                "occurred_at": "2026-04-15T12:00:00+08:00",
+                "evidence_type": "webshell",
+                "summary": "cli e2e evidence",
+            },
+        ),
+        (
+            "timeline.upsert",
+            {
+                "timeline_event_id": "tl_cli_001",
+                "case_id": "case_cli_001",
+                "occurred_at": "2026-04-15T12:01:00+08:00",
+                "stage": "persistence",
+                "title": "cli e2e timeline",
+                "related_alert_ids": ["alt_day1_scan_01"],
+                "related_evidence_ids": ["evi_cli_001"],
             },
         ),
         (

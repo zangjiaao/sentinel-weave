@@ -13,6 +13,8 @@ CORE_TOOL_NAMES = [
     "case.upsert",
     "case.link-alert",
     "case.update-risk",
+    "evidence.upsert",
+    "timeline.upsert",
     "assessment.upsert",
     "intel.lookup",
     "notify.send",
@@ -52,7 +54,7 @@ def test_tool_registry_contains_expected_tools() -> None:
     tools = data["tools"]
     names = [item["name"] for item in tools]
     assert names == CORE_TOOL_NAMES
-    assert len(names) == 15
+    assert len(names) == 17
 
     for item in tools:
         assert REQUIRED_TOOL_FIELDS.issubset(item.keys())
@@ -89,6 +91,8 @@ def test_main_analyst_prompt_contains_guardrails() -> None:
 
     assert "默认先调用 `alert.fetch`" in text
     assert "对已处理告警调用 `alert.ack` 出队" in text
+    assert "`evidence.upsert`" in text
+    assert "`timeline.upsert`" in text
     assert "只在证据不足时调用 `intel.lookup`" in text
     assert "达到升级阈值时调用 `notify.send`" in text
     assert "不要直接处理海量原始日志" in text
@@ -150,15 +154,28 @@ def test_repo_soul_template_contains_runtime_guardrails() -> None:
     assert "notify.send" in text
     assert "report.draft" in text
     assert "Asia/Shanghai" in text
+    assert "related_case_id" in text
+    assert "assessment_confidence" in text
+    assert "supporting_alert_ids" in text
+    assert "supporting_evidence_ids" in text
+    assert "case.link-alert" in text
+    assert "evidence.upsert" in text
+    assert "timeline.upsert" in text
+    assert "confidence" in text
+    assert "case_assessments" in text or "案件级评估" in text
 
 
 def test_patrol_prompt_contains_output_contract() -> None:
     text = Path("hermes/patrol-prompt.md").read_text(encoding="utf-8")
 
     assert "First call `alert.fetch`" in text
+    assert "call `alert.detail` on at least one representative alert before creating a new case" in text
     assert "call `alert.ack` to set status to `triaged`" in text
     assert "Only call `intel.lookup` when evidence is insufficient" in text
+    assert "Use exact `case.upsert` schema keys" in text
     assert "Use `assessment.upsert` to persist entity-level conclusions" in text
+    assert "Use `evidence.upsert` to persist derived evidence records" in text
+    assert "Use `timeline.upsert` to persist attack-chain timeline nodes" in text
     assert "Never use evidence beyond the current run `analysis_cutoff_at`" in text
     assert "Call `notify.send` only when case risk reaches escalation threshold" in text
     assert "When calling `notify.send`, default to `channel=email` and `template=high_severity`" in text

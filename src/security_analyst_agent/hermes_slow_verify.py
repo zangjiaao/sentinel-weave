@@ -84,13 +84,12 @@ def build_chat_command(
 
 def prepare_isolated_hermes_home(source_home: Path, dest_home: Path, repo_skill_dir: Path) -> None:
     dest_home.mkdir(parents=True, exist_ok=True)
-    for filename in ("config.yaml", ".env", "auth.json", "SOUL.md"):
+    for filename in ("config.yaml", ".env", "auth.json"):
         source_path = source_home / filename
         if source_path.exists():
             shutil.copy2(source_path, dest_home / filename)
 
-    if not (dest_home / "SOUL.md").exists():
-        shutil.copy2(PROJECT_ROOT / "hermes" / "SOUL.template.md", dest_home / "SOUL.md")
+    shutil.copy2(PROJECT_ROOT / "hermes" / "SOUL.template.md", dest_home / "SOUL.md")
 
     (dest_home / "skills").mkdir(parents=True, exist_ok=True)
     target_skill_dir = dest_home / "skills" / repo_skill_dir.name
@@ -352,7 +351,7 @@ def _verify_round_db_state(conn, *, round_spec: dict[str, Any], started_at: str)
 def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) -> dict[str, Any]:
     tool_rows = conn.execute(
         """
-        select tool_name, occurred_at, source, run_id
+        select tool_name, occurred_at, source, run_id, result_ok, result_summary
         from agent_tool_calls
         order by occurred_at asc
         """
@@ -360,6 +359,15 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
     tool_names = [row["tool_name"] for row in tool_rows]
     final_assertions = manifest.get("final_assertions", {})
     _assert_tool_requirements(tool_names=tool_names, expectations=final_assertions, stage="final_db_assertions")
+
+    failed_tool_rows = [row for row in tool_rows if int(row["result_ok"]) == 0]
+    max_failed_tool_calls = int(final_assertions.get("max_failed_tool_calls", len(failed_tool_rows)))
+    if len(failed_tool_rows) > max_failed_tool_calls:
+        failed_summary = [f"{row['tool_name']}:{row['result_summary']}" for row in failed_tool_rows]
+        raise HermesSlowVerificationError(
+            "final_db_assertions",
+            f"failed tool calls exceeded limit: {failed_summary}",
+        )
 
     patrol_runs = conn.execute(
         """
@@ -392,12 +400,52 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
             f"expected at least {min_alert_decisions} alert decisions, got {alert_decisions_count}",
         )
 
+    case_assessments_count = conn.execute("select count(*) from case_assessments").fetchone()[0]
+    min_case_assessments = int(final_assertions.get("min_case_assessments", 0))
+    if case_assessments_count < min_case_assessments:
+        raise HermesSlowVerificationError(
+            "final_db_assertions",
+            f"expected at least {min_case_assessments} case assessments, got {case_assessments_count}",
+        )
+
+    current_entities = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select entity_type, entity_key, risk_level, verdict, related_case_id
+            from entity_assessments
+            where is_current = 1
+            """
+        ).fetchall()
+    ]
+    for required_entity in final_assertions.get("required_current_entities", []):
+        matched = False
+        for current_entity in current_entities:
+            if current_entity["entity_type"] != required_entity["entity_type"]:
+                continue
+            if current_entity["entity_key"] != required_entity["entity_key"]:
+                continue
+            if current_entity["risk_level"] != required_entity["risk_level"]:
+                continue
+            if current_entity["verdict"] != required_entity["verdict"]:
+                continue
+            if "related_case_id" in required_entity and current_entity["related_case_id"] != required_entity["related_case_id"]:
+                continue
+            matched = True
+            break
+        if not matched:
+            raise HermesSlowVerificationError(
+                "final_db_assertions",
+                f"missing required current entity: {required_entity}",
+            )
+
     return {
         "tool_calls_count": len(tool_names),
         "tool_names": tool_names,
+        "failed_tool_calls_count": len(failed_tool_rows),
         "patrol_runs": [dict(row) for row in patrol_runs],
         "link_decisions_count": conn.execute("select count(*) from link_decisions").fetchone()[0],
-        "case_assessments_count": conn.execute("select count(*) from case_assessments").fetchone()[0],
+        "case_assessments_count": case_assessments_count,
         "entity_assessments_count": entity_assessments_count,
         "alert_decisions_count": alert_decisions_count,
     }

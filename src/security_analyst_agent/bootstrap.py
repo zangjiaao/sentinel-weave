@@ -6,6 +6,8 @@ import sqlite3
 
 from security_analyst_agent.config import DEFAULT_DB_PATH, FIXTURE_DIR
 from security_analyst_agent.db import connect_db, create_schema
+from security_analyst_agent.tools.case_tools import case_link_alert, case_update_risk, case_upsert
+from security_analyst_agent.tools.derived_tools import evidence_upsert, timeline_upsert
 
 
 def _read_fixture(fixture_dir: Path, filename: str) -> list[dict]:
@@ -97,26 +99,112 @@ def bootstrap_spike_database(db_path: Path, fixture_dir: Path = FIXTURE_DIR) -> 
     conn = connect_db(db_path)
     create_schema(conn)
 
-    timeline_rows = _read_fixture(fixture_dir, "timeline.json")
-    for row in timeline_rows:
-        row["related_alert_ids"] = json.dumps(row["related_alert_ids"], ensure_ascii=False)
-        row["related_evidence_ids"] = json.dumps(row["related_evidence_ids"], ensure_ascii=False)
-
     _reset_tables(conn)
-    alert_rows, link_rows = _split_alert_rows_and_links(_read_fixture(fixture_dir, "alerts.json"))
+    alert_rows, _ = _split_alert_rows_and_links(_read_fixture(fixture_dir, "alerts.json"))
     _insert_many(conn, "assets", _read_fixture(fixture_dir, "assets.json"))
-    _insert_many(conn, "cases", _read_fixture(fixture_dir, "cases.json"))
     _insert_many(conn, "alerts", alert_rows)
-    _insert_many(conn, "case_alert_links", link_rows)
-    _insert_many(conn, "timeline_events", timeline_rows)
-    _insert_many(
-        conn,
-        "evidence",
-        _prepare_evidence_rows(_read_fixture(fixture_dir, "evidence.json"), timeline_rows),
-    )
     _insert_many(conn, "intel_cache", _read_fixture(fixture_dir, "intel_cache.json"))
     conn.commit()
     conn.close()
+
+
+def materialize_spike_runtime_demo(db_path: Path) -> None:
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        case_upsert(
+            conn,
+            {
+                "case_id": "case_demo_001",
+                "title": "多阶段 Web 入侵与后续横向准备",
+                "status": "open",
+                "overall_severity": "high",
+                "current_stage": "recon",
+                "primary_actor_id": "actor_demo_001",
+            },
+        )
+        case_link_alert(
+            conn,
+            {
+                "case_id": "case_demo_001",
+                "alert_id": "alt_day1_scan_01",
+                "confidence": 0.82,
+                "reason": "same-source reconnaissance on exposed API target",
+            },
+        )
+        case_link_alert(
+            conn,
+            {
+                "case_id": "case_demo_001",
+                "alert_id": "alt_day2_webshell_01",
+                "confidence": 0.92,
+                "reason": "exploit activity continues from the same target path",
+            },
+        )
+        case_link_alert(
+            conn,
+            {
+                "case_id": "case_demo_001",
+                "alert_id": "alt_day3_shell_01",
+                "confidence": 0.91,
+                "reason": "new IP continues controlling the same compromised host",
+            },
+        )
+        evidence_upsert(
+            conn,
+            {
+                "evidence_id": "evi_webshell_01",
+                "case_id": "case_demo_001",
+                "occurred_at": "2026-04-11T14:23:00+08:00",
+                "evidence_type": "webshell",
+                "summary": "漏洞利用后在统一认证 API 主机写入 webshell",
+            },
+        )
+        evidence_upsert(
+            conn,
+            {
+                "evidence_id": "evi_shell_conn_01",
+                "case_id": "case_demo_001",
+                "occurred_at": "2026-04-12T11:03:00+08:00",
+                "evidence_type": "shell_connection",
+                "summary": "攻击者使用新源 IP 继续连接已落地 webshell",
+            },
+        )
+        timeline_upsert(
+            conn,
+            {
+                "timeline_event_id": "tl_link_alt_day2_webshell_01",
+                "case_id": "case_demo_001",
+                "occurred_at": "2026-04-11T14:20:00+08:00",
+                "stage": "persistence",
+                "title": "漏洞利用后写入 webshell",
+                "related_alert_ids": ["alt_day2_webshell_01"],
+                "related_evidence_ids": ["evi_webshell_01"],
+            },
+        )
+        timeline_upsert(
+            conn,
+            {
+                "timeline_event_id": "tl_link_alt_day3_shell_01",
+                "case_id": "case_demo_001",
+                "occurred_at": "2026-04-12T11:03:00+08:00",
+                "stage": "command_execution",
+                "title": "新 IP 连接 webshell",
+                "related_alert_ids": ["alt_day3_shell_01"],
+                "related_evidence_ids": ["evi_shell_conn_01", "evi_webshell_01"],
+            },
+        )
+        case_update_risk(
+            conn,
+            {
+                "case_id": "case_demo_001",
+                "overall_severity": "high",
+                "current_stage": "lateral_prep",
+                "status": "open",
+            },
+        )
+    finally:
+        conn.close()
 
 
 def main() -> None:

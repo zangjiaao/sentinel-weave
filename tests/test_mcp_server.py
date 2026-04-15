@@ -1,6 +1,6 @@
 import asyncio
 
-from security_analyst_agent.bootstrap import bootstrap_spike_database
+from security_analyst_agent.bootstrap import bootstrap_spike_database, materialize_spike_runtime_demo
 
 
 def test_mcp_tool_names_match_core_contract() -> None:
@@ -17,6 +17,8 @@ def test_mcp_tool_names_match_core_contract() -> None:
         "case.upsert",
         "case.link-alert",
         "case.update-risk",
+        "evidence.upsert",
+        "timeline.upsert",
         "assessment.upsert",
         "intel.lookup",
         "notify.send",
@@ -42,6 +44,7 @@ def test_mcp_tools_return_dict(tmp_path) -> None:
 
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
 
     tool = get_tool_callable("case.get", db_path=db_path)
     body = tool(payload={"case_id": "case_demo_001"})
@@ -60,6 +63,8 @@ def test_mcp_server_exposes_guidance_prompts() -> None:
 
     assert "alert.ack" in names
     assert "case.explain-link" in names
+    assert "evidence.upsert" in names
+    assert "timeline.upsert" in names
     assert "intel.lookup" in names
 
 
@@ -124,4 +129,36 @@ def test_mcp_prompt_assessment_upsert_contains_usage_guidance() -> None:
 
     assert '"entity_type":"ip"' in text
     assert '"verdict":"attacker"' in text
+    assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
+
+
+def test_mcp_prompt_evidence_upsert_contains_usage_guidance() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+    result = asyncio.run(server.get_prompt("evidence.upsert"))
+    text = "\n".join(
+        message.content.text
+        for message in result.messages
+        if getattr(message.content, "text", None)
+    )
+
+    assert '"evidence_id":"<evidence_id>"' in text
+    assert '"evidence_type":"webshell"' in text
+    assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
+
+
+def test_mcp_prompt_timeline_upsert_contains_usage_guidance() -> None:
+    from security_analyst_agent.mcp_server import create_mcp_server
+
+    server = create_mcp_server()
+    result = asyncio.run(server.get_prompt("timeline.upsert"))
+    text = "\n".join(
+        message.content.text
+        for message in result.messages
+        if getattr(message.content, "text", None)
+    )
+
+    assert '"timeline_event_id":"<timeline_event_id>"' in text
+    assert '"related_alert_ids":["<alert_id>"]' in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text

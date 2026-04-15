@@ -18,7 +18,20 @@
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`
 - 解释关联依据时调用 `case.explain-link`
 - 需要维护案件时调用 `case.upsert`、`case.link-alert`、`case.update-risk`
+- 需要把关键攻击事实沉淀为证据时调用 `evidence.upsert`
+- 需要把攻击过程整理成可复盘步骤时调用 `timeline.upsert`
+- Spike/PoC 里默认只有 `alerts`、`assets`、`intel_cache` 是预置事实，不要假设案件或证据已经存在
+- 若当前攻击链还没有案件，先对至少一条代表性告警调用 `alert.detail`，不要只凭 `alert.fetch` 摘要直接建案
+- `case.link-alert` 必须使用 `case_id`、`alert_id`、`confidence`、`reason`，且 `confidence` 为数字
+- 若判断当前是一条新的攻击链，而 `case.get` 读不到对应案件，先用 `case.upsert` 创建案件，再继续维护
+- `case.upsert` 仅使用 `case_id`、`title`、`status`、`overall_severity`、`current_stage`、`primary_actor_id`
+- `case.upsert` 不要传 `description`、`severity`、`created_at`、`updated_at` 这类额外字段
+- `case.update-risk` 既更新案件头字段，也负责沉淀案件级评估到 `case_assessments`
+- 即使案件头字段已经同步，若本轮出现阶段推进、风险升级或新的案件级判断，仍要调用一次 `case.update-risk`
 - 需要沉淀攻击者/失陷主机结论时调用 `assessment.upsert`
+- `assessment.upsert` 仅使用标准字段：`entity_type`、`entity_key`、`entity_label`、`related_case_id`、`risk_level`、`assessment_confidence`、`verdict`、`reason_summary`、`supporting_alert_ids`、`supporting_evidence_ids`、`first_seen_at`、`last_seen_at`
+- 不要使用旧别名字段：`entity_id`、`case_id`、`case_ids`、`confidence`、`reason`、`first_seen`、`last_seen`
+- `assessment_confidence` 必须是 `0.0` 到 `1.0` 的数字
 - 只在证据不足时调用 `intel.lookup`
 - 达到升级阈值时调用 `notify.send`
 - `notify.send` 默认使用 `channel=email` 与 `template=high_severity`
@@ -32,6 +45,7 @@
 - 若无法形成可信判断，优先返回“继续补证”而不是强行定性
 - 任何判断必须受当前 run 的 `analysis_cutoff_at` 约束，禁止引用未来轮次证据
 - 仅有扫描/弱信号时不要直接写高风险攻击者，优先 `noise/unknown`
+- 出现漏洞利用、webshell 落地、持久化或控制证据时，除攻击 IP 外，还应为失陷主机补写一条 `entity_type=asset`、`verdict=compromised_host` 的 `assessment.upsert`
 - 所有时间默认使用 `Asia/Shanghai` 输出；如引用其他时区，必须显式标注换算关系
 - 时间展示优先写 `(Asia/Shanghai)`，不要简写为 `CST`
 - 避免使用绝对措辞；除非证据非常充分，否则不要直接写“confirmed”或类似绝对结论

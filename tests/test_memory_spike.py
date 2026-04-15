@@ -45,17 +45,30 @@ def test_apply_memory_spike_rounds_are_incremental_and_idempotent(tmp_path) -> N
     repeated = apply_memory_spike_round(db_path, "round_02_exploit")
 
     conn = connect_db(db_path)
-    case = conn.execute(
-        "select overall_severity, current_stage from cases where case_id = ?",
-        ("case_demo_001",),
-    ).fetchone()
-
     assert first["applied"] is True
     assert second["applied"] is True
     assert repeated["applied"] is False
     assert conn.execute("select count(*) from alerts").fetchone()[0] == 8
-    assert case["overall_severity"] == "high"
-    assert case["current_stage"] == "persistence"
+    assert conn.execute("select count(*) from cases").fetchone()[0] == 0
+    assert conn.execute("select count(*) from case_alert_links").fetchone()[0] == 0
+    assert conn.execute("select count(*) from timeline_events").fetchone()[0] == 0
+    assert conn.execute("select count(*) from evidence").fetchone()[0] == 0
+
+
+def test_apply_memory_spike_rounds_leave_case_creation_to_agent(tmp_path) -> None:
+    db_path = tmp_path / "memory-spike.db"
+    bootstrap_memory_spike_database(db_path)
+
+    first = apply_memory_spike_round(db_path, "round_01_recon")
+
+    conn = connect_db(db_path)
+    assert first["upserted_cases"] == 0
+    assert conn.execute("select count(*) from cases").fetchone()[0] == 0
+    assert conn.execute("select count(*) from case_alert_links").fetchone()[0] == 0
+    assert first["inserted_timeline_events"] == 0
+    assert first["inserted_evidence"] == 0
+    assert conn.execute("select count(*) from timeline_events").fetchone()[0] == 0
+    assert conn.execute("select count(*) from evidence").fetchone()[0] == 0
 
 
 def test_apply_memory_spike_round_requires_previous_round(tmp_path) -> None:

@@ -167,6 +167,22 @@ def case_update_risk_command(
     _run_tool("case.update-risk", db_path, payload)
 
 
+@app.command("evidence.upsert")
+def evidence_upsert_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("evidence.upsert", db_path, payload)
+
+
+@app.command("timeline.upsert")
+def timeline_upsert_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("timeline.upsert", db_path, payload)
+
+
 @app.command("assessment.upsert")
 def assessment_upsert_command(
     db_path: Path = typer.Option(..., "--db-path"),

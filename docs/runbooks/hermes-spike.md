@@ -9,6 +9,21 @@ uv sync --extra dev
 UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.bootstrap --db-path ./spike.db
 ```
 
+说明：
+
+- `bootstrap` 现在只预置事实样本：`assets` / `alerts` / `intel_cache`
+- `cases` / `case_alert_links` / `timeline_events` / `evidence` 不再由 fixture 直接灌入
+- 如果你想快速复现旧版 demo 攻击链，可以显式 materialize 一次运行态对象：
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python - <<'PY'
+from pathlib import Path
+from security_analyst_agent.bootstrap import materialize_spike_runtime_demo
+materialize_spike_runtime_demo(Path("./spike.db"))
+print("materialized runtime demo: ./spike.db")
+PY
+```
+
 ## Core Tool Commands
 
 ```bash

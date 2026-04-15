@@ -24,6 +24,64 @@
       ],
       "actions": [
         {
+          "tool": "case.upsert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "title": "多阶段 Web 入侵与后续横向准备",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_demo_001"
+          }
+        },
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r1_api_scan",
+            "confidence": 0.86,
+            "reason": "same-source recon against API entry"
+          }
+        },
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r1_admin_scan",
+            "confidence": 0.86,
+            "reason": "same-source recon against admin entry"
+          }
+        },
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_demo_001",
+            "alert_id": "alt_r1_static_scan",
+            "confidence": 0.84,
+            "reason": "same-source recon against static site entry"
+          }
+        },
+        {
+          "tool": "case.upsert",
+          "payload": {
+            "case_id": "case_noise_001",
+            "title": "低质量扫描与误报混合事件",
+            "status": "observing",
+            "overall_severity": "low",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_noise_001"
+          }
+        },
+        {
+          "tool": "case.link-alert",
+          "payload": {
+            "case_id": "case_noise_001",
+            "alert_id": "alt_r1_noise_probe",
+            "confidence": 0.72,
+            "reason": "single low-value probe belongs to the noise case"
+          }
+        },
+        {
           "tool": "alert.ack",
           "payload": {"alert_ids": ["alt_r1_api_scan"], "status": "triaged"}
         }
@@ -36,6 +94,28 @@
       "analysis_cutoff_at": "2026-04-11T23:59:59+08:00",
       "checks": [],
       "actions": [
+        {
+          "tool": "evidence.upsert",
+          "payload": {
+            "evidence_id": "evi_webshell_01",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-11T14:23:00+08:00",
+            "evidence_type": "webshell",
+            "summary": "在统一认证 API 主机落地 webshell"
+          }
+        },
+        {
+          "tool": "timeline.upsert",
+          "payload": {
+            "timeline_event_id": "tl_r2_persistence_main",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-11T14:23:00+08:00",
+            "stage": "persistence",
+            "title": "利用漏洞后写入 webshell 建立持久化",
+            "related_alert_ids": ["alt_r2_webshell"],
+            "related_evidence_ids": ["evi_webshell_01"]
+          }
+        },
         {
           "tool": "case.link-alert",
           "payload": {
@@ -94,6 +174,28 @@
       "checks": [],
       "actions": [
         {
+          "tool": "evidence.upsert",
+          "payload": {
+            "evidence_id": "evi_shell_conn_01",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-12T11:02:00+08:00",
+            "evidence_type": "shell_connection",
+            "summary": "新源 IP 连接既有 webshell 会话"
+          }
+        },
+        {
+          "tool": "timeline.upsert",
+          "payload": {
+            "timeline_event_id": "tl_r3_command_exec_main",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-12T11:02:00+08:00",
+            "stage": "command_execution",
+            "title": "攻击者更换源 IP 继续控制既有 webshell",
+            "related_alert_ids": ["alt_r3_shell_new_ip"],
+            "related_evidence_ids": ["evi_shell_conn_01"]
+          }
+        },
+        {
           "tool": "case.link-alert",
           "payload": {
             "case_id": "case_demo_001",
@@ -151,6 +253,28 @@
       "checks": [],
       "actions": [
         {
+          "tool": "evidence.upsert",
+          "payload": {
+            "evidence_id": "evi_lateral_01",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-12T11:25:00+08:00",
+            "evidence_type": "internal_scan",
+            "summary": "受控主机开始对内网地址段进行探测"
+          }
+        },
+        {
+          "tool": "timeline.upsert",
+          "payload": {
+            "timeline_event_id": "tl_r4_lateral_prep_main",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-12T11:25:00+08:00",
+            "stage": "lateral_prep",
+            "title": "攻击者开始内网扫描准备下一步横向渗透",
+            "related_alert_ids": ["alt_r4_internal_scan"],
+            "related_evidence_ids": ["evi_lateral_01"]
+          }
+        },
+        {
           "tool": "case.link-alert",
           "payload": {
             "case_id": "case_demo_001",
@@ -185,6 +309,28 @@
       "analysis_cutoff_at": "2026-04-14T23:59:59+08:00",
       "checks": [],
       "actions": [
+        {
+          "tool": "evidence.upsert",
+          "payload": {
+            "evidence_id": "evi_reactivation_01",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-14T16:40:00+08:00",
+            "evidence_type": "reactivation",
+            "summary": "静默期后再次连接既有 webshell"
+          }
+        },
+        {
+          "tool": "timeline.upsert",
+          "payload": {
+            "timeline_event_id": "tl_r6_reactivation_main",
+            "case_id": "case_demo_001",
+            "occurred_at": "2026-04-14T16:40:00+08:00",
+            "stage": "command_execution",
+            "title": "攻击者在静默期后重新激活控制通道",
+            "related_alert_ids": ["alt_r6_shell_reactivation"],
+            "related_evidence_ids": ["evi_reactivation_01"]
+          }
+        },
         {
           "tool": "case.link-alert",
           "payload": {

@@ -99,6 +99,53 @@ def load_evidence_by_ids(
     return [dict(row) for row in rows]
 
 
+def load_timeline_event(conn: sqlite3.Connection, timeline_event_id: str) -> dict | None:
+    row = conn.execute(
+        """
+        select timeline_event_id, case_id, occurred_at, stage, title, related_alert_ids, related_evidence_ids
+        from timeline_events
+        where timeline_event_id = ?
+        """,
+        (timeline_event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    event = dict(row)
+    event["related_alert_ids"] = json.loads(event["related_alert_ids"])
+    event["related_evidence_ids"] = json.loads(event["related_evidence_ids"])
+    return event
+
+
+def load_alert_ids_existing(conn: sqlite3.Connection, alert_ids: list[str]) -> set[str]:
+    if not alert_ids:
+        return set()
+    placeholders = ", ".join("?" for _ in alert_ids)
+    rows = conn.execute(
+        f"""
+        select alert_id
+        from alerts
+        where alert_id in ({placeholders})
+        """,
+        tuple(alert_ids),
+    ).fetchall()
+    return {row["alert_id"] for row in rows}
+
+
+def load_evidence_ids_existing(conn: sqlite3.Connection, evidence_ids: list[str]) -> set[str]:
+    if not evidence_ids:
+        return set()
+    placeholders = ", ".join("?" for _ in evidence_ids)
+    rows = conn.execute(
+        f"""
+        select evidence_id
+        from evidence
+        where evidence_id in ({placeholders})
+        """,
+        tuple(evidence_ids),
+    ).fetchall()
+    return {row["evidence_id"] for row in rows}
+
+
 def load_supporting_evidence_ids_for_alert(
     conn: sqlite3.Connection,
     *,
@@ -222,7 +269,13 @@ def append_timeline_event_for_alert(
           related_alert_ids,
           related_evidence_ids
         ) values (?, ?, ?, ?, ?, ?, ?)
-        on conflict(timeline_event_id) do nothing
+        on conflict(timeline_event_id) do update set
+          case_id=excluded.case_id,
+          occurred_at=excluded.occurred_at,
+          stage=excluded.stage,
+          title=excluded.title,
+          related_alert_ids=excluded.related_alert_ids,
+          related_evidence_ids=excluded.related_evidence_ids
         """,
         (
             timeline_event_id,
@@ -235,6 +288,59 @@ def append_timeline_event_for_alert(
         ),
     )
     return timeline_event_id
+
+
+def upsert_evidence(conn: sqlite3.Connection, evidence: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        on conflict(evidence_id) do update set
+          case_id=excluded.case_id,
+          occurred_at=excluded.occurred_at,
+          evidence_type=excluded.evidence_type,
+          summary=excluded.summary
+        """,
+        (
+            evidence["evidence_id"],
+            evidence["case_id"],
+            evidence["occurred_at"],
+            evidence["evidence_type"],
+            evidence["summary"],
+        ),
+    )
+
+
+def upsert_timeline_event(conn: sqlite3.Connection, timeline_event: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        insert into timeline_events (
+          timeline_event_id,
+          case_id,
+          occurred_at,
+          stage,
+          title,
+          related_alert_ids,
+          related_evidence_ids
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        on conflict(timeline_event_id) do update set
+          case_id=excluded.case_id,
+          occurred_at=excluded.occurred_at,
+          stage=excluded.stage,
+          title=excluded.title,
+          related_alert_ids=excluded.related_alert_ids,
+          related_evidence_ids=excluded.related_evidence_ids
+        """,
+        (
+            timeline_event["timeline_event_id"],
+            timeline_event["case_id"],
+            timeline_event["occurred_at"],
+            timeline_event["stage"],
+            timeline_event["title"],
+            json.dumps(timeline_event["related_alert_ids"], ensure_ascii=False),
+            json.dumps(timeline_event["related_evidence_ids"], ensure_ascii=False),
+        ),
+    )
 
 
 def update_case_risk(

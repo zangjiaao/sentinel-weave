@@ -20,6 +20,8 @@ CORE_TOOL_NAMES = (
     "case.upsert",
     "case.link-alert",
     "case.update-risk",
+    "evidence.upsert",
+    "timeline.upsert",
     "assessment.upsert",
     "intel.lookup",
     "notify.send",
@@ -38,6 +40,8 @@ TOOL_DESCRIPTIONS = {
     "case.upsert": "创建或更新案件主记录。",
     "case.link-alert": "将告警关联到指定案件并记录关联理由。",
     "case.update-risk": "更新案件风险等级、阶段与状态。",
+    "evidence.upsert": "写入或更新案件证据记录。",
+    "timeline.upsert": "写入或更新时间线节点，沉淀攻击过程。",
     "assessment.upsert": "写入实体级风险评估（如攻击IP、失陷主机）。",
     "intel.lookup": "查询缓存化威胁情报用于补证。",
     "notify.send": "触发模拟通知发送并写入通知出站记录。",
@@ -83,6 +87,18 @@ PROMPT_GUIDANCE = {
             "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
             '{"case_id":"<case_id>","overall_severity":"high","current_stage":"persistence","status":"investigating","force_downgrade":false}',
             "默认阻止阶段回退；仅在确有需要时传入 force_downgrade=true。",
+        ]
+    ),
+    "evidence.upsert": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"evidence_id":"<evidence_id>","case_id":"<case_id>","occurred_at":"2026-04-15T10:00:00+08:00","evidence_type":"webshell","summary":"<evidence_summary>"}',
+        ]
+    ),
+    "timeline.upsert": "\n".join(
+        [
+            "以下内容仅在 `secagent-patrol` skill 不可用时作为兜底说明。",
+            '{"timeline_event_id":"<timeline_event_id>","case_id":"<case_id>","occurred_at":"2026-04-15T10:01:00+08:00","stage":"persistence","title":"<timeline_title>","related_alert_ids":["<alert_id>"],"related_evidence_ids":["<evidence_id>"]}',
         ]
     ),
     "assessment.upsert": "\n".join(
