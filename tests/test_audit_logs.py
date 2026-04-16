@@ -343,6 +343,80 @@ def test_mcp_auto_run_closes_after_alert_ack_when_queue_drained(tmp_path) -> Non
     conn.close()
 
 
+def test_mcp_tail_calls_after_ack_inherit_recent_auto_run_id(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_tail_runid_001",
+            "title": "tail run id case",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+        },
+        source="mcp",
+    )
+    alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": alert_ids, "status": "triaged"}, source="mcp")
+
+    closed_run = conn.execute(
+        """
+        select run_id, status
+        from patrol_runs
+        where trigger_source = 'mcp_auto'
+        order by started_at desc
+        limit 1
+        """
+    ).fetchone()
+    assert closed_run is not None
+    assert closed_run["status"] == "success"
+
+    dispatch_tool(
+        conn,
+        "timeline.upsert",
+        {
+            "timeline_event_id": "tl_tail_runid_001",
+            "case_id": "case_tail_runid_001",
+            "occurred_at": "2026-04-12T11:03:00+08:00",
+            "stage": "command_execution",
+            "title": "tail tool call should inherit run id",
+            "related_alert_ids": [alert_ids[0]],
+            "related_evidence_ids": [],
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_tail_runid_001",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+
+    tail_calls = conn.execute(
+        """
+        select tool_name, run_id
+        from agent_tool_calls
+        where tool_name in ('timeline.upsert', 'case.update-risk')
+        order by occurred_at desc
+        limit 2
+        """
+    ).fetchall()
+    assert len(tail_calls) == 2
+    assert all(row["run_id"] == closed_run["run_id"] for row in tail_calls)
+    conn.close()
+
+
 def test_entity_assessments_audit_filters_high_risk_attackers(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

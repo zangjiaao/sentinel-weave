@@ -149,12 +149,13 @@ def test_mcp_auto_run_triggers_case_convergence_after_ack(tmp_path) -> None:
 
     case_b = conn.execute(
         """
-        select canonical_case_id, merged_into_case_id, merge_state
+        select status, canonical_case_id, merged_into_case_id, merge_state
         from cases
         where case_id = ?
         """,
         ("case_conv_b",),
     ).fetchone()
+    assert case_b["status"] == "closed"
     assert case_b["canonical_case_id"] == "case_conv_a"
     assert case_b["merged_into_case_id"] == "case_conv_a"
     assert case_b["merge_state"] == "merged"
@@ -345,12 +346,13 @@ def test_case_convergence_promotes_bridge_candidate_from_confirmed_cluster(tmp_p
 
     case_c = conn.execute(
         """
-        select canonical_case_id, merged_into_case_id, merge_state
+        select status, canonical_case_id, merged_into_case_id, merge_state
         from cases
         where case_id = ?
         """,
         ("case_bridge_c",),
     ).fetchone()
     assert case_c is not None
+    assert case_c["status"] == "closed"
     assert case_c["merge_state"] == "merged"
     conn.close()

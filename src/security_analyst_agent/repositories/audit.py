@@ -10,6 +10,7 @@ from security_analyst_agent.services.case_convergence import run_case_convergenc
 _UNSET = object()
 _BOUND_RUN_ID: ContextVar[object] = ContextVar("audit_bound_run_id", default=_UNSET)
 _BOUND_ANALYSIS_CUTOFF_AT: ContextVar[object] = ContextVar("audit_bound_analysis_cutoff_at", default=_UNSET)
+_RECENT_FINISHED_MCP_AUTO_RUN_GRACE_SECONDS = 120
 
 
 def now_iso() -> str:
@@ -26,6 +27,41 @@ def _load_active_patrol_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
         limit 1
         """
     ).fetchone()
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _load_recent_finished_mcp_auto_run(
+    conn: sqlite3.Connection, *, grace_seconds: int
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        select run_id, analysis_cutoff_at, finished_at
+        from patrol_runs
+        where trigger_source = 'mcp_auto' and status = 'success' and finished_at is not null
+        order by finished_at desc
+        limit 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    finished_at = _parse_iso_datetime(row["finished_at"])
+    if finished_at is None:
+        return None
+    delta_seconds = (datetime.now(timezone.utc) - finished_at).total_seconds()
+    if delta_seconds < 0 or delta_seconds > grace_seconds:
+        return None
+    return row
 
 
 def load_active_patrol_run_id(conn: sqlite3.Connection) -> str | None:
@@ -169,6 +205,13 @@ def resolve_run_context_for_dispatch(
 
     if active:
         return active["run_id"], active["analysis_cutoff_at"]
+
+    recent = _load_recent_finished_mcp_auto_run(
+        conn,
+        grace_seconds=_RECENT_FINISHED_MCP_AUTO_RUN_GRACE_SECONDS,
+    )
+    if recent:
+        return recent["run_id"], recent["analysis_cutoff_at"]
     return None, None
 
 

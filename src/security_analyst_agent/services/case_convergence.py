@@ -230,7 +230,7 @@ def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: lis
         row["case_id"]: dict(row)
         for row in conn.execute(
             """
-            select case_id, canonical_case_id, merged_into_case_id, merge_state
+            select case_id, status, canonical_case_id, merged_into_case_id, merge_state
             from cases
             where case_id in ({})
             """.format(", ".join("?" for _ in case_ids)),
@@ -240,17 +240,23 @@ def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: lis
 
     changed_case_ids: list[str] = []
     for case_id in case_ids:
+        before = previous_rows.get(case_id)
         if case_id == canonical_case_id:
             canonical_target = case_id
             merged_into_target = None
             merge_state_target = "standalone"
+            if before is not None and str(before.get("status", "")).lower() != "closed":
+                status_target = before["status"]
+            else:
+                status_target = "open"
         else:
             canonical_target = canonical_case_id
             merged_into_target = canonical_case_id
             merge_state_target = "merged"
-        before = previous_rows.get(case_id)
+            status_target = "closed"
         if (
             before is not None
+            and before.get("status") == status_target
             and before.get("canonical_case_id") == canonical_target
             and before.get("merged_into_case_id") == merged_into_target
             and before.get("merge_state") == merge_state_target
@@ -259,10 +265,10 @@ def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: lis
         conn.execute(
             """
             update cases
-            set canonical_case_id = ?, merged_into_case_id = ?, merge_state = ?, merge_updated_at = ?
+            set status = ?, canonical_case_id = ?, merged_into_case_id = ?, merge_state = ?, merge_updated_at = ?
             where case_id = ?
             """,
-            (canonical_target, merged_into_target, merge_state_target, now, case_id),
+            (status_target, canonical_target, merged_into_target, merge_state_target, now, case_id),
         )
         changed_case_ids.append(case_id)
 
