@@ -27,6 +27,8 @@ def _reset_tables(conn: sqlite3.Connection) -> None:
         delete from patrol_state;
         delete from case_digests;
         delete from notification_outbox;
+        delete from case_merge_events;
+        delete from case_relations;
         delete from case_alert_links;
         delete from patrol_runs;
         delete from alert_ingest_events;

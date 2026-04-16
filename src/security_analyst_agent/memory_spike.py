@@ -23,6 +23,8 @@ RESET_TABLES = (
     "patrol_state",
     "case_digests",
     "notification_outbox",
+    "case_merge_events",
+    "case_relations",
     "case_alert_links",
     "patrol_runs",
     "alert_ingest_events",

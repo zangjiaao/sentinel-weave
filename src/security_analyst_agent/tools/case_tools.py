@@ -7,6 +7,7 @@ from security_analyst_agent.repositories.cases import (
     load_alert,
     load_case_alert_ids,
     load_case,
+    resolve_canonical_case_id,
     load_supporting_evidence_ids_for_alert,
     load_case_timeline,
     load_evidence_by_ids,
@@ -83,7 +84,11 @@ def _load_case_supporting_evidence_ids(
 
 def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseGetRequest.model_validate(payload)
-    case = load_case(conn, request.case_id)
+    warnings: list[str] = []
+    effective_case_id = resolve_canonical_case_id(conn, request.case_id)
+    if effective_case_id != request.case_id:
+        warnings.append("case_redirected_to_canonical")
+    case = load_case(conn, effective_case_id)
     if case is None:
         response = ToolResponse(
             ok=False,
@@ -96,26 +101,31 @@ def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
     case_with_memory = dict(case)
     if analysis_cutoff_at:
-        memory_digest = build_case_digest(conn, request.case_id, analysis_cutoff_at=analysis_cutoff_at)
+        memory_digest = build_case_digest(conn, effective_case_id, analysis_cutoff_at=analysis_cutoff_at)
     else:
-        memory_digest = load_case_digest(conn, request.case_id)
+        memory_digest = load_case_digest(conn, effective_case_id)
         if memory_digest is None:
-            memory_digest = upsert_case_digest(conn, request.case_id) or build_case_digest(conn, request.case_id)
+            memory_digest = upsert_case_digest(conn, effective_case_id) or build_case_digest(conn, effective_case_id)
     case_with_memory["memory_digest"] = memory_digest
 
     response = ToolResponse(
         ok=True,
-        summary=f"读取案件 {request.case_id}",
+        summary=f"读取案件 {effective_case_id}",
         data={"case": case_with_memory},
-        refs={"case_ids": [request.case_id]},
+        refs={"case_ids": [effective_case_id]},
+        warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)
 
 
 def case_timeline(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseTimelineRequest.model_validate(payload)
+    warnings: list[str] = []
+    effective_case_id = resolve_canonical_case_id(conn, request.case_id)
+    if effective_case_id != request.case_id:
+        warnings.append("case_redirected_to_canonical")
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
-    events = load_case_timeline(conn, request.case_id, analysis_cutoff_at=analysis_cutoff_at)
+    events = load_case_timeline(conn, effective_case_id, analysis_cutoff_at=analysis_cutoff_at)
     if request.include_evidence:
         for event in events:
             event["evidence"] = load_evidence_by_ids(
@@ -126,13 +136,14 @@ def case_timeline(conn: sqlite3.Connection, payload: dict) -> dict:
 
     response = ToolResponse(
         ok=True,
-        summary=f"返回案件 {request.case_id} 时间线，共 {len(events)} 个节点",
+        summary=f"返回案件 {effective_case_id} 时间线，共 {len(events)} 个节点",
         data={"events": events},
         refs={
-            "case_ids": [request.case_id],
+            "case_ids": [effective_case_id],
             "alert_ids": [item for event in events for item in event["related_alert_ids"]],
             "evidence_ids": [item for event in events for item in event["related_evidence_ids"]],
         },
+        warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)
 
@@ -242,7 +253,11 @@ def case_upsert_batch(conn: sqlite3.Connection, payload: dict) -> dict:
 
 def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseLinkAlertRequest.model_validate(payload)
-    case = load_case(conn, request.case_id)
+    warnings: list[str] = []
+    effective_case_id = resolve_canonical_case_id(conn, request.case_id)
+    if effective_case_id != request.case_id:
+        warnings.append("case_redirected_to_canonical")
+    case = load_case(conn, effective_case_id)
     if case is None:
         response = ToolResponse(
             ok=False,
@@ -263,29 +278,28 @@ def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
         return response.model_dump(mode="json", by_alias=True)
 
     linked_at = datetime.now(timezone.utc).isoformat()
-    previous_case_id = alert.get("case_id")
     link_alert_to_case(
         conn=conn,
-        case_id=request.case_id,
+        case_id=effective_case_id,
         alert_id=request.alert_id,
         confidence=request.confidence,
         reason=request.reason,
         linked_at=linked_at,
     )
-    timeline_event_id = append_timeline_event_for_alert(conn=conn, case_id=request.case_id, alert=alert)
-    upsert_case_digest(conn, request.case_id)
+    timeline_event_id = append_timeline_event_for_alert(conn=conn, case_id=effective_case_id, alert=alert)
+    upsert_case_digest(conn, effective_case_id)
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
     supporting_evidence_ids = load_supporting_evidence_ids_for_alert(
         conn,
-        case_id=request.case_id,
+        case_id=effective_case_id,
         alert_id=request.alert_id,
         analysis_cutoff_at=analysis_cutoff_at,
     )
-    decision = explain_alert_link(alert, request.case_id, supporting_evidence_ids=supporting_evidence_ids)
+    decision = explain_alert_link(alert, effective_case_id, supporting_evidence_ids=supporting_evidence_ids)
     insert_link_decision_log(
         conn,
         alert_id=request.alert_id,
-        case_id=request.case_id,
+        case_id=effective_case_id,
         link_confidence=request.confidence,
         reason_summary=request.reason,
         positive_factors=decision["positive_factors"],
@@ -297,10 +311,10 @@ def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
 
     response = ToolResponse(
         ok=True,
-        summary=f"已关联告警 {request.alert_id} 到案件 {request.case_id}",
+        summary=f"已关联告警 {request.alert_id} 到案件 {effective_case_id}",
         data={
             "link": {
-                "case_id": request.case_id,
+                "case_id": effective_case_id,
                 "alert_id": request.alert_id,
                 "confidence": request.confidence,
                 "reason": request.reason,
@@ -309,10 +323,11 @@ def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
             }
         },
         refs={
-            "case_ids": [request.case_id],
+            "case_ids": [effective_case_id],
             "alert_ids": [request.alert_id],
             "timeline_event_ids": [timeline_event_id],
         },
+        warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)
 
@@ -364,7 +379,11 @@ def case_link_alert_batch(conn: sqlite3.Connection, payload: dict) -> dict:
 
 def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseUpdateRiskRequest.model_validate(payload)
-    case = load_case(conn, request.case_id)
+    warnings: list[str] = []
+    effective_case_id = resolve_canonical_case_id(conn, request.case_id)
+    if effective_case_id != request.case_id:
+        warnings.append("case_redirected_to_canonical")
+    case = load_case(conn, effective_case_id)
     if case is None:
         response = ToolResponse(
             ok=False,
@@ -384,16 +403,16 @@ def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
 
     update_case_risk(
         conn=conn,
-        case_id=request.case_id,
+        case_id=effective_case_id,
         overall_severity=request.overall_severity,
         current_stage=effective_stage,
         status=request.status,
     )
-    updated_case = load_case(conn, request.case_id)
-    upsert_case_digest(conn, request.case_id)
+    updated_case = load_case(conn, effective_case_id)
+    upsert_case_digest(conn, effective_case_id)
     insert_case_change_log(
         conn,
-        case_id=request.case_id,
+        case_id=effective_case_id,
         action="case_update_risk",
         before_state=before_case,
         after_state=updated_case,
@@ -401,12 +420,12 @@ def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
     )
     supporting_alert_ids = load_case_alert_ids(
         conn,
-        request.case_id,
+        effective_case_id,
         analysis_cutoff_at=analysis_cutoff_at,
     )
     supporting_evidence_ids = _load_case_supporting_evidence_ids(
         conn,
-        request.case_id,
+        effective_case_id,
         analysis_cutoff_at=analysis_cutoff_at,
     )
     verdict = (
@@ -418,7 +437,7 @@ def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
     )
     insert_case_assessment_log(
         conn,
-        case_id=request.case_id,
+        case_id=effective_case_id,
         risk_level=request.overall_severity,
         assessment_confidence=0.9 if request.overall_severity in {"high", "critical"} else 0.7,
         current_stage=effective_stage,
@@ -428,17 +447,18 @@ def case_update_risk(conn: sqlite3.Connection, payload: dict) -> dict:
         supporting_evidence_ids=supporting_evidence_ids,
     )
     conn.commit()
-    warnings = ["stage_downgrade_blocked"] if downgraded_blocked else []
+    if downgraded_blocked:
+        warnings.append("stage_downgrade_blocked")
     summary = (
-        f"已更新案件风险 {request.case_id}（阶段回退已阻止，保持 {before_case['current_stage']}）"
+        f"已更新案件风险 {effective_case_id}（阶段回退已阻止，保持 {before_case['current_stage']}）"
         if downgraded_blocked
-        else f"已更新案件风险 {request.case_id}"
+        else f"已更新案件风险 {effective_case_id}"
     )
     response = ToolResponse(
         ok=True,
         summary=summary,
         data={"case": updated_case},
-        refs={"case_ids": [request.case_id]},
+        refs={"case_ids": [effective_case_id]},
         warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)

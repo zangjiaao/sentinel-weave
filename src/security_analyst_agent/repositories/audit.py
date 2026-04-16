@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from security_analyst_agent.services.case_convergence import run_case_convergence_for_run
+
 _UNSET = object()
 _BOUND_RUN_ID: ContextVar[object] = ContextVar("audit_bound_run_id", default=_UNSET)
 _BOUND_ANALYSIS_CUTOFF_AT: ContextVar[object] = ContextVar("audit_bound_analysis_cutoff_at", default=_UNSET)
@@ -143,6 +145,7 @@ def finalize_mcp_auto_run_after_tool(
         ).fetchone()[0]
         if int(pending_count) == 0:
             _finish_auto_patrol_run(conn, run_id=run_id, summary="auto_closed_after_alert_ack")
+            run_case_convergence_for_run(conn, run_id=run_id)
 
 
 def resolve_run_context_for_dispatch(

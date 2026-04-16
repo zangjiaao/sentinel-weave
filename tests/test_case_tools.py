@@ -10,6 +10,22 @@ from security_analyst_agent.tools.case_tools import (
 )
 
 
+def test_schema_contains_case_convergence_columns_and_tables(db_conn) -> None:
+    case_cols = {row["name"] for row in db_conn.execute("pragma table_info(cases)").fetchall()}
+    assert "canonical_case_id" in case_cols
+    assert "merged_into_case_id" in case_cols
+    assert "merge_state" in case_cols
+
+    tables = {
+        row["name"]
+        for row in db_conn.execute(
+            "select name from sqlite_master where type='table'"
+        ).fetchall()
+    }
+    assert "case_relations" in tables
+    assert "case_merge_events" in tables
+
+
 def test_case_get_returns_actor_and_target_summary(db_conn) -> None:
     result = case_get(db_conn, {"case_id": "case_demo_001"})
     assert result["data"]["case"]["overall_severity"] == "high"
@@ -278,6 +294,60 @@ def test_case_link_alert_writes_link_decision_in_dedicated_table(db_conn) -> Non
         """
     ).fetchone()[0]
     assert old_style == 0
+
+
+def test_case_link_alert_redirects_to_canonical_case_when_child_is_merged(db_conn) -> None:
+    case_upsert(
+        db_conn,
+        {
+            "case_id": "case_canonical",
+            "title": "canonical case",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_canonical",
+        },
+    )
+    case_upsert(
+        db_conn,
+        {
+            "case_id": "case_child",
+            "title": "merged child case",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_child",
+        },
+    )
+    db_conn.execute(
+        """
+        update cases
+        set canonical_case_id = ?, merged_into_case_id = ?, merge_state = 'merged'
+        where case_id = ?
+        """,
+        ("case_canonical", "case_canonical", "case_child"),
+    )
+    db_conn.commit()
+
+    result = case_link_alert(
+        db_conn,
+        {
+            "case_id": "case_child",
+            "alert_id": "alt_day1_scan_01",
+            "confidence": 0.8,
+            "reason": "should redirect to canonical",
+        },
+    )
+    assert result["warnings"] == ["case_redirected_to_canonical"]
+    active = db_conn.execute(
+        """
+        select case_id
+        from case_alert_links
+        where alert_id = ? and is_active = 1
+        """,
+        ("alt_day1_scan_01",),
+    ).fetchone()
+    assert active["case_id"] == "case_canonical"
 
 
 def test_case_link_alert_batch_links_multiple_alerts(db_conn) -> None:

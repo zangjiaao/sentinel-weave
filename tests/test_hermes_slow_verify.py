@@ -338,6 +338,105 @@ def test_verify_final_db_state_matches_required_entity_without_related_case_id(t
     conn.close()
 
 
+def test_verify_final_db_state_checks_case_convergence(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_conv_verify_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_conv_verify_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_conv_verify_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (
+          case_id, title, status, overall_severity, current_stage, primary_actor_id,
+          canonical_case_id, merged_into_case_id, merge_state, merge_updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "case_conv_main",
+            "main",
+            "open",
+            "high",
+            "persistence",
+            "actor_conv",
+            "case_conv_main",
+            None,
+            "standalone",
+            "2026-04-14T10:00:30+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (
+          case_id, title, status, overall_severity, current_stage, primary_actor_id,
+          canonical_case_id, merged_into_case_id, merge_state, merge_updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "case_conv_child",
+            "child",
+            "open",
+            "medium",
+            "command_execution",
+            "actor_conv_child",
+            "case_conv_main",
+            "case_conv_main",
+            "merged",
+            "2026-04-14T10:00:30+08:00",
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+            "min_converged_case_clusters": 1,
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["converged_case_clusters_count"] >= 1
+    conn.close()
+
+
 def test_verify_final_db_state_fails_when_case_assessments_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "slow.db"
     conn = connect_db(db_path)

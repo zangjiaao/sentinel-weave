@@ -1,18 +1,119 @@
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def load_case(conn: sqlite3.Connection, case_id: str) -> dict | None:
     row = conn.execute(
         """
-        select case_id, title, status, overall_severity, current_stage, primary_actor_id
+        select
+          case_id,
+          title,
+          status,
+          overall_severity,
+          current_stage,
+          primary_actor_id,
+          canonical_case_id,
+          merged_into_case_id,
+          merge_state,
+          merge_updated_at
         from cases
         where case_id = ?
         """,
         (case_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def resolve_canonical_case_id(conn: sqlite3.Connection, case_id: str) -> str:
+    current_case_id = case_id
+    visited: set[str] = set()
+    while current_case_id and current_case_id not in visited:
+        visited.add(current_case_id)
+        row = conn.execute(
+            """
+            select canonical_case_id
+            from cases
+            where case_id = ?
+            """,
+            (current_case_id,),
+        ).fetchone()
+        if row is None:
+            return case_id
+        canonical_case_id = row["canonical_case_id"]
+        if not canonical_case_id or canonical_case_id == current_case_id:
+            return current_case_id
+        current_case_id = canonical_case_id
+    return case_id
+
+
+def reselect_cluster_canonical_case(conn: sqlite3.Connection, case_ids: list[str], run_id: str) -> str:
+    del run_id
+    deduped_case_ids = list(dict.fromkeys(case_ids))
+    if not deduped_case_ids:
+        raise ValueError("case_ids must not be empty")
+
+    best_case_id = deduped_case_ids[0]
+    best_score = (-1, -1, -1, -1, "", "")
+    for case_id in deduped_case_ids:
+        timeline_count = conn.execute(
+            "select count(*) from timeline_events where case_id = ?",
+            (case_id,),
+        ).fetchone()[0]
+        evidence_count = conn.execute(
+            "select count(*) from evidence where case_id = ?",
+            (case_id,),
+        ).fetchone()[0]
+        alert_count = conn.execute(
+            """
+            select count(*)
+            from case_alert_links
+            where case_id = ? and is_active = 1
+            """,
+            (case_id,),
+        ).fetchone()[0]
+        relation_count = conn.execute(
+            """
+            select count(*)
+            from case_relations
+            where status in ('candidate', 'confirmed')
+              and (left_case_id = ? or right_case_id = ?)
+            """,
+            (case_id, case_id),
+        ).fetchone()[0]
+        last_activity = conn.execute(
+            """
+            select max(activity_at) as last_activity
+            from (
+              select max(occurred_at) as activity_at from timeline_events where case_id = ?
+              union all
+              select max(occurred_at) as activity_at from evidence where case_id = ?
+              union all
+              select max(alerts.occurred_at) as activity_at
+              from case_alert_links
+              join alerts on alerts.alert_id = case_alert_links.alert_id
+              where case_alert_links.case_id = ? and case_alert_links.is_active = 1
+            )
+            """,
+            (case_id, case_id, case_id),
+        ).fetchone()["last_activity"] or ""
+        score = (
+            int(timeline_count),
+            int(evidence_count),
+            int(alert_count),
+            int(relation_count),
+            str(last_activity),
+            case_id,
+        )
+        if score > best_score:
+            best_case_id = case_id
+            best_score = score
+    return best_case_id
 
 
 def load_case_timeline(conn: sqlite3.Connection, case_id: str, analysis_cutoff_at: str | None = None) -> list[dict]:
@@ -199,16 +300,31 @@ def load_case_alert_ids(
 
 
 def upsert_case(conn: sqlite3.Connection, case: dict[str, Any]) -> None:
+    now = _now_iso()
     conn.execute(
         """
-        insert into cases (case_id, title, status, overall_severity, current_stage, primary_actor_id)
-        values (?, ?, ?, ?, ?, ?)
+        insert into cases (
+          case_id,
+          title,
+          status,
+          overall_severity,
+          current_stage,
+          primary_actor_id,
+          canonical_case_id,
+          merged_into_case_id,
+          merge_state,
+          merge_updated_at
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         on conflict(case_id) do update set
           title=excluded.title,
           status=excluded.status,
           overall_severity=excluded.overall_severity,
           current_stage=excluded.current_stage,
-          primary_actor_id=excluded.primary_actor_id
+          primary_actor_id=excluded.primary_actor_id,
+          canonical_case_id=coalesce(cases.canonical_case_id, excluded.canonical_case_id),
+          merge_state=coalesce(cases.merge_state, excluded.merge_state),
+          merge_updated_at=coalesce(cases.merge_updated_at, excluded.merge_updated_at)
         """,
         (
             case["case_id"],
@@ -217,6 +333,10 @@ def upsert_case(conn: sqlite3.Connection, case: dict[str, Any]) -> None:
             case["overall_severity"],
             case["current_stage"],
             case.get("primary_actor_id"),
+            case["case_id"],
+            None,
+            "standalone",
+            now,
         ),
     )
 

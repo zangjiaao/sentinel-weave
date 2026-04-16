@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 import sqlite3
 
@@ -62,6 +61,31 @@ def _ensure_patrol_runs_shape(conn: sqlite3.Connection) -> None:
         set analysis_cutoff_at = coalesce(analysis_cutoff_at, started_at)
         where analysis_cutoff_at is null
         """
+    )
+
+
+def _ensure_cases_convergence_shape(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("pragma table_info(cases)").fetchall()}
+    if not columns:
+        return
+
+    if "canonical_case_id" not in columns:
+        conn.execute("alter table cases add column canonical_case_id text")
+    if "merged_into_case_id" not in columns:
+        conn.execute("alter table cases add column merged_into_case_id text")
+    if "merge_state" not in columns:
+        conn.execute("alter table cases add column merge_state text")
+    if "merge_updated_at" not in columns:
+        conn.execute("alter table cases add column merge_updated_at text")
+
+    conn.execute(
+        """
+        update cases
+        set canonical_case_id = coalesce(canonical_case_id, case_id),
+            merge_state = coalesce(merge_state, 'standalone'),
+            merge_updated_at = coalesce(merge_updated_at, ?)
+        """,
+        (_now_iso(),),
     )
 
 
@@ -175,7 +199,38 @@ def create_schema(conn: sqlite3.Connection) -> None:
           status text not null,
           overall_severity text not null,
           current_stage text not null,
-          primary_actor_id text
+          primary_actor_id text,
+          canonical_case_id text,
+          merged_into_case_id text,
+          merge_state text,
+          merge_updated_at text
+        );
+        create table if not exists case_relations (
+          relation_id text primary key,
+          left_case_id text not null,
+          right_case_id text not null,
+          relation_type text not null,
+          score real not null,
+          streak_count integer not null,
+          status text not null,
+          last_run_id text,
+          last_reason text not null,
+          supporting_alert_ids_json text not null,
+          supporting_evidence_ids_json text not null,
+          first_seen_at text not null,
+          last_seen_at text not null,
+          unique (left_case_id, right_case_id, relation_type)
+        );
+        create table if not exists case_merge_events (
+          event_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          cluster_id text not null,
+          old_canonical_case_id text,
+          new_canonical_case_id text not null,
+          affected_case_ids_json text not null,
+          reason text not null,
+          detail_json text not null
         );
         create table if not exists timeline_events (
           timeline_event_id text primary key,
@@ -448,5 +503,6 @@ def create_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_case_alert_links_shape(conn)
     _ensure_patrol_runs_shape(conn)
+    _ensure_cases_convergence_shape(conn)
     _ensure_evidence_shape(conn)
     _backfill_case_links_from_legacy_alert_case_id(conn)

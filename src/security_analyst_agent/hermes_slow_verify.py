@@ -469,6 +469,26 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
                     f"primary case actor missing for case_id={case_id}",
                 )
 
+    converged_case_clusters_count = conn.execute(
+        """
+        select count(*)
+        from (
+          select canonical_case_id
+          from cases
+          where canonical_case_id is not null
+          group by canonical_case_id
+          having count(*) >= 2
+        )
+        """
+    ).fetchone()[0]
+    min_converged_case_clusters = int(final_assertions.get("min_converged_case_clusters", 0))
+    if converged_case_clusters_count < min_converged_case_clusters:
+        raise HermesSlowVerificationError(
+            "final_db_assertions",
+            "expected at least "
+            f"{min_converged_case_clusters} converged case clusters, got {converged_case_clusters_count}",
+        )
+
     return {
         "tool_calls_count": len(tool_names),
         "tool_names": tool_names,
@@ -478,6 +498,7 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         "case_assessments_count": case_assessments_count,
         "entity_assessments_count": entity_assessments_count,
         "alert_decisions_count": alert_decisions_count,
+        "converged_case_clusters_count": converged_case_clusters_count,
     }
 
 
