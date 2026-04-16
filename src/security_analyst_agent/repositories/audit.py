@@ -258,7 +258,70 @@ def _should_auto_escalate_case(conn: sqlite3.Connection, *, case_id: str) -> boo
     return _case_has_continuity_signal(conn, case_id=case_id)
 
 
-def _send_auto_escalation_notification(conn: sqlite3.Connection, *, case_id: str) -> None:
+def _resolve_escalation_target_case_id(conn: sqlite3.Connection, *, case_id: str) -> str:
+    current_case_id = case_id
+    visited: set[str] = set()
+    while current_case_id and current_case_id not in visited:
+        visited.add(current_case_id)
+        row = conn.execute(
+            """
+            select canonical_case_id
+            from cases
+            where case_id = ?
+            """,
+            (current_case_id,),
+        ).fetchone()
+        if row is None:
+            return case_id
+        canonical_case_id = row["canonical_case_id"]
+        if not canonical_case_id or canonical_case_id == current_case_id:
+            return current_case_id
+        current_case_id = canonical_case_id
+    return case_id
+
+
+def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_id: str) -> str:
+    rows = conn.execute(
+        """
+        select left_case_id, right_case_id
+        from case_relations
+        where status = 'confirmed'
+        """
+    ).fetchall()
+    if not rows:
+        return case_id
+
+    adjacency: dict[str, set[str]] = {}
+    for row in rows:
+        left_case_id = row["left_case_id"]
+        right_case_id = row["right_case_id"]
+        adjacency.setdefault(left_case_id, set()).add(right_case_id)
+        adjacency.setdefault(right_case_id, set()).add(left_case_id)
+    if case_id not in adjacency:
+        return case_id
+
+    stack = [case_id]
+    visited: set[str] = set()
+    component: list[str] = []
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        component.append(current)
+        for neighbor in adjacency.get(current, set()):
+            if neighbor not in visited:
+                stack.append(neighbor)
+    return min(component) if component else case_id
+
+
+def _send_auto_escalation_notification(
+    conn: sqlite3.Connection,
+    *,
+    case_id: str,
+    source_case_id: str | None = None,
+    dedupe_case_id: str | None = None,
+) -> None:
     from security_analyst_agent.repositories.cases import load_case
     from security_analyst_agent.services.output import build_notify_preview
 
@@ -266,7 +329,9 @@ def _send_auto_escalation_notification(conn: sqlite3.Connection, *, case_id: str
     if case is None:
         return
 
-    dedupe_key = f"{case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}"
+    dedupe_anchor_case_id = dedupe_case_id or case_id
+    dedupe_key = f"{dedupe_anchor_case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}"
+    source_case = source_case_id or case_id
     existing = conn.execute(
         """
         select notification_id
@@ -287,7 +352,13 @@ def _send_auto_escalation_notification(conn: sqlite3.Connection, *, case_id: str
             notification_id=existing["notification_id"],
             dedupe_key=dedupe_key,
             reason="dedupe_hit",
-            detail={"status": "deduped", "auto_policy": "stage_persistence_with_continuity"},
+            detail={
+                "status": "deduped",
+                "auto_policy": "stage_persistence_with_continuity",
+                "source_case_id": source_case,
+                "escalation_case_id": case_id,
+                "dedupe_case_id": dedupe_anchor_case_id,
+            },
         )
         return
 
@@ -322,7 +393,13 @@ def _send_auto_escalation_notification(conn: sqlite3.Connection, *, case_id: str
         notification_id=notification_id,
         dedupe_key=dedupe_key,
         reason="threshold_met",
-        detail={"status": "sent_simulated", "auto_policy": "stage_persistence_with_continuity"},
+        detail={
+            "status": "sent_simulated",
+            "auto_policy": "stage_persistence_with_continuity",
+            "source_case_id": source_case,
+            "escalation_case_id": case_id,
+            "dedupe_case_id": dedupe_anchor_case_id,
+        },
     )
 
 
@@ -331,7 +408,44 @@ def _auto_escalate_after_case_update(conn: sqlite3.Connection, *, result: dict[s
         return
     for case_id in _extract_case_ids_from_result(result):
         if _should_auto_escalate_case(conn, case_id=case_id):
-            _send_auto_escalation_notification(conn, case_id=case_id)
+            _send_auto_escalation_notification(
+                conn,
+                case_id=case_id,
+                dedupe_case_id=_resolve_escalation_chain_anchor_case_id(conn, case_id=case_id),
+            )
+
+
+def _auto_escalate_after_run_convergence(conn: sqlite3.Connection, *, run_id: str) -> None:
+    rows = conn.execute(
+        """
+        select distinct case_id
+        from case_changes
+        where run_id = ? and action = 'case_update_risk'
+        order by case_id asc
+        """,
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        return
+
+    source_to_target: dict[str, str] = {}
+    for row in rows:
+        source_case_id = row["case_id"]
+        target_case_id = _resolve_escalation_target_case_id(conn, case_id=source_case_id)
+        source_to_target[source_case_id] = target_case_id
+
+    first_source_by_target: dict[str, str] = {}
+    for source_case_id, target_case_id in source_to_target.items():
+        first_source_by_target.setdefault(target_case_id, source_case_id)
+
+    for target_case_id, source_case_id in sorted(first_source_by_target.items()):
+        if _should_auto_escalate_case(conn, case_id=target_case_id):
+            _send_auto_escalation_notification(
+                conn,
+                case_id=target_case_id,
+                source_case_id=source_case_id,
+                dedupe_case_id=_resolve_escalation_chain_anchor_case_id(conn, case_id=target_case_id),
+            )
 
 
 def finalize_mcp_auto_run_after_tool(
@@ -345,10 +459,9 @@ def finalize_mcp_auto_run_after_tool(
     if source != "mcp":
         return
 
-    if tool_name == "case.update-risk":
-        _auto_escalate_after_case_update(conn, result=result)
-
     if not run_id:
+        if tool_name == "case.update-risk":
+            _auto_escalate_after_case_update(conn, result=result)
         return
 
     row = conn.execute(
@@ -359,7 +472,12 @@ def finalize_mcp_auto_run_after_tool(
         """,
         (run_id,),
     ).fetchone()
-    if row is None or row["trigger_source"] != "mcp_auto" or row["status"] != "running":
+    active_mcp_auto_run = row is not None and row["trigger_source"] == "mcp_auto" and row["status"] == "running"
+
+    if tool_name == "case.update-risk" and not active_mcp_auto_run:
+        _auto_escalate_after_case_update(conn, result=result)
+
+    if not active_mcp_auto_run:
         return
 
     if tool_name == "alert.fetch":
@@ -375,6 +493,7 @@ def finalize_mcp_auto_run_after_tool(
         if int(pending_count) == 0:
             _finish_auto_patrol_run(conn, run_id=run_id, summary="auto_closed_after_alert_ack")
             run_case_convergence_for_run(conn, run_id=run_id)
+            _auto_escalate_after_run_convergence(conn, run_id=run_id)
 
 
 def resolve_run_context_for_dispatch(

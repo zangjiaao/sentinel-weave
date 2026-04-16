@@ -8,6 +8,53 @@ from security_analyst_agent.db import connect_db
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
 
+def _insert_open_alert_for_case(
+    conn,
+    *,
+    alert_id: str,
+    case_id: str,
+    occurred_at: str,
+    stage: str,
+    src_ip: str,
+    severity: str = "high",
+    confidence: float = 0.9,
+    asset_id: str = "asset_api_prod",
+    dst_ip: str = "203.0.113.10",
+) -> None:
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            alert_id,
+            occurred_at,
+            f"audit {alert_id}",
+            "open",
+            severity,
+            stage,
+            src_ip,
+            dst_ip,
+            asset_id,
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_alert_links (
+          case_id, alert_id, linked_at, confidence, reason, is_active, unlinked_at
+        ) values (?, ?, ?, ?, ?, 1, null)
+        on conflict(case_id, alert_id) do update set
+          linked_at = excluded.linked_at,
+          confidence = excluded.confidence,
+          reason = excluded.reason,
+          is_active = 1,
+          unlinked_at = null
+        """,
+        (case_id, alert_id, occurred_at, confidence, "audit_seed"),
+    )
+
+
 def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
@@ -582,6 +629,139 @@ def test_mcp_case_update_risk_does_not_auto_escalate_without_continuity_signal(t
     ).fetchone()[0]
     assert notification_count == 0
     assert escalation_count == 0
+    conn.close()
+
+
+def test_mcp_auto_escalation_dedupes_to_single_canonical_notification(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_chain_a",
+            "title": "chain a",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_chain_b",
+            "title": "chain b",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "evidence.upsert",
+        {
+            "evidence_id": "evi_chain_anchor",
+            "case_id": "case_chain_a",
+            "occurred_at": "2026-04-11T14:20:00+08:00",
+            "evidence_type": "webshell",
+            "summary": "continuity anchor",
+        },
+        source="mcp",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_chain_a",
+        case_id="case_chain_a",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_chain_b",
+        case_id="case_chain_b",
+        occurred_at="2026-04-12T10:05:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.77",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_chain_a",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_chain_b",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+
+    notification_count_before_ack = conn.execute("select count(*) from notification_outbox").fetchone()[0]
+    assert notification_count_before_ack == 0
+
+    dispatch_tool(
+        conn,
+        "alert.ack",
+        {
+            "alert_ids": ["alt_chain_a", "alt_chain_b"],
+            "status": "triaged",
+        },
+        source="mcp",
+    )
+
+    notifications = conn.execute(
+        """
+        select case_id, channel, template, status
+        from notification_outbox
+        order by created_at asc
+        """
+    ).fetchall()
+    assert len(notifications) == 1
+    assert notifications[0]["case_id"] == "case_chain_a"
+    assert notifications[0]["channel"] == "email"
+    assert notifications[0]["template"] == "high_severity"
+    assert notifications[0]["status"] == "sent_simulated"
+
+    escalation_rows = conn.execute(
+        """
+        select case_id, triggered, reason
+        from escalation_decisions
+        order by occurred_at asc
+        """
+    ).fetchall()
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["case_id"] == "case_chain_a"
+    assert escalation_rows[0]["triggered"] == 1
+    assert escalation_rows[0]["reason"] == "threshold_met"
     conn.close()
 
 
