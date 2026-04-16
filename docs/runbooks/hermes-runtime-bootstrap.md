@@ -3,7 +3,7 @@
 ## Scope
 
 - 仅覆盖 Hermes runtime 接入
-- 默认模式：本地 CLI Tool 注册
+- 默认模式：MCP Tool Discovery
 - 不包含真实设备接入
 - 不包含自动发送通知
 - Hermes 仅作为当前 Spike 的 `Runner Adapter`，不是业务核心或唯一状态源
@@ -18,24 +18,10 @@
 5. 确认 CLI 可调用：`uv run python -m security_analyst_agent.cli alert.fetch --db-path ./spike.db --payload '{}'`
 6. 确认 Hermes 全局提示词文件存在：`/Users/zangjiaao/.hermes/SOUL.md`
 
-## Register Tool Registry
+## Verify MCP Tool Discovery
 
-1. 在 Hermes 中导入 `hermes/tool-registry.json`
-2. 确认识别到 14 个 Tool：
-   - `alert.fetch`
-   - `alert.detail`
-   - `alert.ack`
-   - `asset.search`
-   - `case.get`
-   - `case.timeline`
-   - `case.explain-link`
-   - `case.upsert`
-   - `case.link-alert`
-   - `case.update-risk`
-   - `intel.lookup`
-   - `notify.send`
-   - `notify.preview`
-   - `report.draft`
+1. 启动 MCP server（见下一节）
+2. 执行 `hermes mcp test secagent`，确认能连通并发现工具列表
 3. 任选一个 Tool 用最小 payload 试跑，确认 Hermes 能消费 JSON 输出
 
 ## Recommended: Run MCP Server in Listener Mode

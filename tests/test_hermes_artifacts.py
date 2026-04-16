@@ -2,75 +2,6 @@ import json
 from pathlib import Path
 
 
-CORE_TOOL_NAMES = [
-    "alert.fetch",
-    "alert.detail",
-    "alert.ack",
-    "asset.search",
-    "case.get",
-    "case.timeline",
-    "case.explain-link",
-    "case.upsert",
-    "case.link-alert",
-    "case.update-risk",
-    "evidence.upsert",
-    "timeline.upsert",
-    "assessment.upsert",
-    "intel.lookup",
-    "notify.send",
-    "notify.preview",
-    "report.draft",
-]
-
-REQUIRED_TOOL_FIELDS = {
-    "name",
-    "description",
-    "when_to_use",
-    "command_template",
-    "read_only",
-    "timeout_sec",
-    "cost_level",
-    "idempotent",
-}
-
-
-READ_ONLY_TOOLS = {
-    "alert.fetch",
-    "alert.detail",
-    "asset.search",
-    "case.get",
-    "case.timeline",
-    "case.explain-link",
-    "intel.lookup",
-    "notify.preview",
-    "report.draft",
-}
-
-
-def test_tool_registry_contains_expected_tools() -> None:
-    data = json.loads(Path("hermes/tool-registry.json").read_text(encoding="utf-8"))
-    assert data["runtime"] == "hermes"
-
-    tools = data["tools"]
-    names = [item["name"] for item in tools]
-    assert names == CORE_TOOL_NAMES
-    assert len(names) == 17
-
-    for item in tools:
-        assert REQUIRED_TOOL_FIELDS.issubset(item.keys())
-        assert item["read_only"] is (item["name"] in READ_ONLY_TOOLS)
-        assert isinstance(item["timeout_sec"], int)
-        assert item["timeout_sec"] > 0
-        assert item["cost_level"] in {"low", "medium", "high"}
-        assert isinstance(item["idempotent"], bool)
-
-        command_template = item["command_template"]
-        assert f"security_analyst_agent.cli {item['name']}" in command_template
-        assert "--db-path ${SPIKE_DB_PATH}" in command_template
-        assert "--payload" in command_template
-        assert "${JSON_PAYLOAD}" in command_template
-
-
 def test_patrol_loop_starts_from_alert_fetch() -> None:
     data = json.loads(Path("hermes/patrol-loop.json").read_text(encoding="utf-8"))
 
@@ -112,11 +43,12 @@ def test_runtime_runbook_contains_smoke_loop_steps() -> None:
     assert "Runner Adapter" in text
     assert "不是业务核心或唯一状态源" in text
     assert "本机运行态产物" in text
-    assert "hermes/tool-registry.json" in text
+    assert "Verify MCP Tool Discovery" in text
     assert "hermes/agents/main-analyst.md" in text
     assert "hermes/SOUL.template.md" in text
     assert "make mcp-server" in text
     assert "make sync-hermes-mcp-url" in text
+    assert "hermes mcp test secagent" in text
     assert "/Users/zangjiaao/.hermes/SOUL.md" in text
     assert "secagent-patrol" in text
     assert "hermes/patrol-loop.json" in text
