@@ -82,7 +82,7 @@ def test_load_integration_manifest_requires_zero_failed_tools_and_compromised_ho
     final_assertions = manifest["final_assertions"]
     assert final_assertions["max_failed_tool_calls"] == 0
     assert final_assertions["min_case_assessments"] >= 1
-    assert "case.upsert" in final_assertions["required_tool_names"]
+    assert "case.upsert-batch" in final_assertions["required_tool_names"]
     assert {
         "entity_type": "asset",
         "entity_key": "asset_api_prod",
@@ -95,10 +95,10 @@ def test_load_integration_manifest_requires_runtime_case_creation_guidance() -> 
     manifest = load_integration_manifest("hermes-slow-integration")
 
     query = manifest["round_defaults"]["query"]
-    assert "case.upsert" in query
+    assert "case.upsert-batch" in query
     assert "new case" in query.lower() or "新案件" in query
-    assert "alert.detail" in query
-    assert "exact case.upsert schema keys" in query or "精确的 case.upsert 字段" in query
+    assert "alert.detail-batch" in query
+    assert "exact case.upsert-batch schema keys" in query or "精确的 case.upsert-batch 字段" in query
 
 
 def test_verify_final_db_state_fails_when_failed_tool_calls_exist(tmp_path: Path) -> None:

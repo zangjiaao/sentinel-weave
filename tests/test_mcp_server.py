@@ -8,7 +8,6 @@ def test_mcp_tool_names_match_core_contract() -> None:
 
     assert CORE_TOOL_NAMES == (
         "alert.fetch",
-        "alert.detail",
         "alert.detail-batch",
         "alert.ack",
         "asset.search",
@@ -16,21 +15,16 @@ def test_mcp_tool_names_match_core_contract() -> None:
         "actor.case-get",
         "actor.case-find-candidates",
         "actor.case-upsert",
-        "actor.case-add-observation",
         "actor.case-add-observation-batch",
-        "actor.case-link",
         "actor.case-link-batch",
         "case.get",
         "case.timeline",
         "case.explain-link",
-        "case.upsert",
         "case.upsert-batch",
-        "case.link-alert",
         "case.link-alert-batch",
         "case.update-risk",
         "evidence.upsert",
         "timeline.upsert",
-        "assessment.upsert",
         "assessment.upsert-batch",
         "intel.lookup",
         "notify.send",
@@ -130,21 +124,20 @@ def test_mcp_prompt_alert_ack_contains_usage_guidance() -> None:
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
 
 
-def test_mcp_prompt_assessment_upsert_contains_usage_guidance() -> None:
+def test_mcp_prompt_assessment_upsert_batch_contains_usage_guidance() -> None:
     from security_analyst_agent.mcp_server import create_mcp_server
 
     server = create_mcp_server()
-    result = asyncio.run(server.get_prompt("assessment.upsert"))
+    result = asyncio.run(server.get_prompt("assessment.upsert-batch"))
     text = "\n".join(
         message.content.text
         for message in result.messages
         if getattr(message.content, "text", None)
     )
 
-    assert "严格使用 `assessment.upsert` 的后端请求 schema 字段" in text
+    assert "严格使用 `assessment.upsert-batch` 的后端请求 schema 字段" in text
     assert "必填字段：" in text
-    assert "`entity_type`" in text
-    assert "`verdict`" in text
+    assert "`items`" in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
 
 
@@ -198,22 +191,19 @@ def test_mcp_prompt_actor_case_upsert_contains_schema_contract() -> None:
     assert "`summary`" in text
 
 
-def test_mcp_prompt_actor_case_link_contains_schema_contract() -> None:
+def test_mcp_prompt_actor_case_link_batch_contains_schema_contract() -> None:
     from security_analyst_agent.mcp_server import create_mcp_server
 
     server = create_mcp_server()
-    result = asyncio.run(server.get_prompt("actor.case-link"))
+    result = asyncio.run(server.get_prompt("actor.case-link-batch"))
     text = "\n".join(
         message.content.text
         for message in result.messages
         if getattr(message.content, "text", None)
     )
 
-    assert "严格使用 `actor.case-link` 的后端请求 schema 字段" in text
-    assert "`case_actor_id`" in text
-    assert "`target_type`" in text
-    assert "`link_confidence`" in text
-    assert "`link_reason`" in text
+    assert "严格使用 `actor.case-link-batch` 的后端请求 schema 字段" in text
+    assert "`items`" in text
 
 
 def test_mcp_server_registers_actor_tools() -> None:
@@ -223,11 +213,19 @@ def test_mcp_server_registers_actor_tools() -> None:
     assert "actor.case-get" in CORE_TOOL_NAMES
     assert "actor.case-find-candidates" in CORE_TOOL_NAMES
     assert "actor.case-upsert" in CORE_TOOL_NAMES
-    assert "actor.case-add-observation" in CORE_TOOL_NAMES
+    assert "actor.case-add-observation" not in CORE_TOOL_NAMES
     assert "actor.case-add-observation-batch" in CORE_TOOL_NAMES
-    assert "actor.case-link" in CORE_TOOL_NAMES
+    assert "actor.case-link" not in CORE_TOOL_NAMES
     assert "actor.case-link-batch" in CORE_TOOL_NAMES
-    assert "actor.case-link" in TOOL_DESCRIPTIONS
+    assert "actor.case-link-batch" in TOOL_DESCRIPTIONS
+
+
+def test_mcp_rejects_singleton_high_frequency_tools() -> None:
+    from security_analyst_agent.mcp_server import invoke_tool
+
+    body = invoke_tool("case.upsert", {"case_id": "case_test_001"})
+    assert body["ok"] is False
+    assert body["summary"] == "unsupported tool: case.upsert"
 
 
 def test_mcp_actor_tool_input_schema_is_typed() -> None:

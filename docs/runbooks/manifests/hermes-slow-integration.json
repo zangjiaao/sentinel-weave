@@ -3,7 +3,7 @@
   "skills": ["secagent-patrol"],
   "preflight_query": "Reply exactly READY",
   "round_defaults": {
-    "query": "Run exactly one patrol pass against the current alert queue. First call alert.fetch. Review enough evidence to explain the active intrusion. Keep this round budget-aware: target <=12 tool calls, avoid one-call-per-alert fan-out for homogeneous alerts, and reserve turns for final output. If current alerts justify a new case or the referenced case record does not exist yet, call alert.detail on at least one representative alert first, then create the case with case.upsert using the exact case.upsert schema keys from the MCP prompt only. When multiple cases need creation/refresh in one pass, prefer case.upsert-batch. When multiple alert details are needed in one pass, prefer alert.detail-batch instead of repeated alert.detail calls. Do not send extra case.upsert fields such as description, severity, created_at, or updated_at. Then use case tools to maintain case state when justified, always include numeric confidence and reason when calling case.link-alert, call case.update-risk to persist a case-level assessment snapshot whenever this run advances stage, raises severity, or forms a new case-level judgment even if the case header is already synced, persist entity-level conclusions with the exact assessment.upsert schema keys from the MCP prompt, include compromised_host for an asset when exploitation/webshell/foothold evidence supports it, and ack any alert you have triaged in one batch call whenever possible. When linking multiple alerts/entities/actor-relations in one pass, prefer case.link-alert-batch, assessment.upsert-batch, actor.case-link-batch, and actor.case-add-observation-batch. For same-stage events in one case, prefer one aggregated timeline.upsert node instead of per-alert timeline fan-out. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
+    "query": "Run exactly one patrol pass against the current alert queue. First call alert.fetch. Review enough evidence to explain the active intrusion. Keep this round budget-aware: target <=12 tool calls, avoid one-call-per-alert fan-out for homogeneous alerts, and reserve turns for final output. If current alerts justify a new case or the referenced case record does not exist yet, call alert.detail-batch with at least one representative alert first, then create or refresh the case with case.upsert-batch using the exact case.upsert-batch schema keys from the MCP prompt only (single-case writes also use one-item batch). Do not send extra case.upsert-batch fields such as description, severity, created_at, or updated_at. Then use case tools to maintain case state when justified, always include numeric confidence and reason in each case.link-alert-batch item, call case.update-risk to persist a case-level assessment snapshot whenever this run advances stage, raises severity, or forms a new case-level judgment even if the case header is already synced, persist entity-level conclusions with the exact assessment.upsert-batch schema keys from the MCP prompt, include compromised_host for an asset when exploitation/webshell/foothold evidence supports it, and ack any alert you have triaged in one batch call whenever possible. When linking alerts/entities/actor-relations in one pass, prefer case.link-alert-batch, assessment.upsert-batch, actor.case-link-batch, and actor.case-add-observation-batch. For same-stage events in one case, prefer one aggregated timeline.upsert node instead of per-alert timeline fan-out. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
     "max_turns": 18,
     "required_output_headers": [
       "## Patrol Action Summary",
@@ -12,7 +12,7 @@
     ],
     "required_tool_names": ["alert.fetch"],
     "required_any_tool_names": [
-      ["alert.detail", "alert.detail-batch", "case.get", "case.timeline", "case.explain-link"]
+      ["alert.detail-batch", "case.get", "case.timeline", "case.explain-link"]
     ],
     "min_tool_calls": 2,
     "first_tool_name": "alert.fetch"
@@ -28,10 +28,10 @@
   "final_assertions": {
     "min_patrol_runs": 6,
     "min_tool_calls": 12,
-    "required_tool_names": ["alert.fetch", "alert.ack", "case.upsert"],
+    "required_tool_names": ["alert.fetch", "alert.ack", "case.upsert-batch"],
     "required_any_tool_names": [
-      ["alert.detail", "alert.detail-batch", "case.get", "case.timeline", "case.explain-link"],
-      ["assessment.upsert", "case.link-alert", "case.update-risk"]
+      ["alert.detail-batch", "case.get", "case.timeline", "case.explain-link"],
+      ["assessment.upsert-batch", "case.link-alert-batch", "case.update-risk"]
     ],
     "max_failed_tool_calls": 0,
     "min_case_assessments": 1,

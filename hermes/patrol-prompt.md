@@ -6,20 +6,19 @@ Execution rules:
 - Process at most `10` alerts this run.
 - Treat only `alerts`, `assets`, and `intel_cache` as preloaded facts in the spike; `cases`, `case_alert_links`, `timeline_events`, and `evidence` must be created or refreshed by your tool calls.
 - Use `case.get`, `case.timeline`, and `case.explain-link` to reconstruct evidence and attack flow.
-- If no case exists yet for the current attack chain, call `alert.detail` on at least one representative alert before creating a new case.
-- When multiple alert details are needed in one run, prefer `alert.detail-batch` over repeated `alert.detail` calls.
+- If no case exists yet for the current attack chain, call `alert.detail-batch` with at least one representative alert before creating a new case.
+- Use `alert.detail-batch` for both single-alert and multi-alert detail lookup; for one alert, send a one-item `alert_ids` array.
 - For homogeneous alerts in the same stage/case, use representative sampling instead of one-call-per-alert fan-out.
-- If the attack chain warrants a new case and `case.get` cannot find it, create it first with `case.upsert`.
-- Use exact `case.upsert` schema keys only: `case_id`, `title`, `status`, `overall_severity`, `current_stage`, `primary_actor_id`.
-- Do not send extra `case.upsert` fields such as `description`, `severity`, `created_at`, or `updated_at`.
-- Use `case.upsert`, `case.link-alert`, and `case.update-risk` to maintain case state when new evidence appears.
-- When creating or refreshing multiple cases in one run, prefer `case.upsert-batch`.
+- If the attack chain warrants a new case and `case.get` cannot find it, create it first with `case.upsert-batch` (single case also uses one-item batch).
+- Use exact `case.upsert-batch` schema keys only.
+- Do not send extra `case.upsert-batch` fields such as `description`, `severity`, `created_at`, or `updated_at`.
+- Use `case.upsert-batch`, `case.link-alert-batch`, and `case.update-risk` to maintain case state when new evidence appears.
 - When linking multiple alerts/entities/actor-relations in one run, prefer `case.link-alert-batch`, `assessment.upsert-batch`, `actor.case-link-batch`, and `actor.case-add-observation-batch`.
 - Use `evidence.upsert` to persist derived evidence records.
 - Use `timeline.upsert` to persist attack-chain timeline nodes.
 - For same-stage events in one case, prefer one aggregated `timeline.upsert` node over per-alert timeline fan-out.
 - Use `case.update-risk` to persist case-level assessment snapshots into `case_assessments`, even when the case header already reflects the current stage/severity.
-- Use `assessment.upsert` to persist entity-level conclusions (`attacker`, `compromised_host`, `noise`, `unknown`).
+- Use `assessment.upsert-batch` to persist entity-level conclusions (`attacker`, `compromised_host`, `noise`, `unknown`); single entity also uses one-item batch.
 - Do not downgrade `current_stage` by default; only pass `force_downgrade=true` when evidence clearly invalidates previous stage.
 - For alerts triaged in this run, call `alert.ack` to set status to `triaged` (or `closed` when fully handled) so they leave the `new/open` queue.
 - Prefer one batched `alert.ack` call for all triaged alerts in the run.

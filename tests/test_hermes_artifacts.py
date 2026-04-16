@@ -158,7 +158,7 @@ def test_repo_soul_template_contains_runtime_guardrails() -> None:
     assert "assessment_confidence" in text
     assert "supporting_alert_ids" in text
     assert "supporting_evidence_ids" in text
-    assert "case.link-alert" in text
+    assert "case.link-alert-batch" in text
     assert "evidence.upsert" in text
     assert "timeline.upsert" in text
     assert "confidence" in text
@@ -169,11 +169,11 @@ def test_patrol_prompt_contains_output_contract() -> None:
     text = Path("hermes/patrol-prompt.md").read_text(encoding="utf-8")
 
     assert "First call `alert.fetch`" in text
-    assert "call `alert.detail` on at least one representative alert before creating a new case" in text
+    assert "call `alert.detail-batch` with at least one representative alert before creating a new case" in text
     assert "call `alert.ack` to set status to `triaged`" in text
     assert "Only call `intel.lookup` when evidence is insufficient" in text
-    assert "Use exact `case.upsert` schema keys" in text
-    assert "Use `assessment.upsert` to persist entity-level conclusions" in text
+    assert "Use exact `case.upsert-batch` schema keys" in text
+    assert "Use `assessment.upsert-batch` to persist entity-level conclusions" in text
     assert "Use `evidence.upsert` to persist derived evidence records" in text
     assert "Use `timeline.upsert` to persist attack-chain timeline nodes" in text
     assert "Never use evidence beyond the current run `analysis_cutoff_at`" in text

@@ -17,12 +17,12 @@ def test_secagent_skill_contains_mcp_workflow_guidance() -> None:
     assert "`case.get`" in text
     assert "`case.timeline`" in text
     assert "`case.explain-link`" in text
-    assert "`case.upsert`" in text
-    assert "`case.link-alert`" in text
+    assert "`case.upsert-batch`" in text
+    assert "`case.link-alert-batch`" in text
     assert "`case.update-risk`" in text
     assert "`evidence.upsert`" in text
     assert "`timeline.upsert`" in text
-    assert "`assessment.upsert`" in text
+    assert "`assessment.upsert-batch`" in text
     assert "`intel.lookup`" in text
     assert "`notify.send`" in text
     assert "`report.draft`" in text
@@ -44,7 +44,7 @@ def test_secagent_skill_contains_output_contract() -> None:
 def test_secagent_skill_contains_assessment_upsert_contract() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
-    assert "`assessment.upsert`" in text
+    assert "`assessment.upsert-batch`" in text
     assert "`attacker` / `compromised_host` / `noise`" in text
     assert "参数字段一律以对应 MCP prompt 的 schema contract 为准" in text
 
@@ -52,14 +52,14 @@ def test_secagent_skill_contains_assessment_upsert_contract() -> None:
 def test_secagent_skill_contains_case_link_alert_contract() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
-    assert "`case.link-alert`" in text
+    assert "`case.link-alert-batch`" in text
     assert "参数字段一律以对应 MCP prompt 的 schema contract 为准" in text
 
 
 def test_secagent_skill_contains_exact_case_upsert_contract() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
-    assert "`case.upsert`" in text
+    assert "`case.upsert-batch`" in text
     assert "参数字段一律以对应 MCP prompt 的 schema contract 为准" in text
 
 
