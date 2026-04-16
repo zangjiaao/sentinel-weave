@@ -417,6 +417,128 @@ def test_mcp_tail_calls_after_ack_inherit_recent_auto_run_id(tmp_path) -> None:
     conn.close()
 
 
+def test_mcp_case_update_risk_auto_escalates_on_persistence_with_continuity_signal(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_auto_escalate_001",
+            "title": "auto escalation persistence case",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "evidence.upsert",
+        {
+            "evidence_id": "evi_auto_escalate_webshell_001",
+            "case_id": "case_auto_escalate_001",
+            "occurred_at": "2026-04-11T14:20:00+08:00",
+            "evidence_type": "webshell",
+            "summary": "webshell evidence for continuity signal",
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_auto_escalate_001",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+
+    notification_row = conn.execute(
+        """
+        select case_id, channel, template, status
+        from notification_outbox
+        where case_id = ?
+        order by created_at desc
+        limit 1
+        """,
+        ("case_auto_escalate_001",),
+    ).fetchone()
+    assert notification_row is not None
+    assert notification_row["channel"] == "email"
+    assert notification_row["template"] == "high_severity"
+    assert notification_row["status"] == "sent_simulated"
+
+    escalation_row = conn.execute(
+        """
+        select triggered, reason
+        from escalation_decisions
+        where case_id = ?
+        order by occurred_at desc
+        limit 1
+        """,
+        ("case_auto_escalate_001",),
+    ).fetchone()
+    assert escalation_row is not None
+    assert escalation_row["triggered"] == 1
+    assert escalation_row["reason"] == "threshold_met"
+    conn.close()
+
+
+def test_mcp_case_update_risk_does_not_auto_escalate_without_continuity_signal(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_auto_escalate_002",
+            "title": "auto escalation should not trigger",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_auto_escalate_002",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+
+    notification_count = conn.execute(
+        "select count(*) from notification_outbox where case_id = ?",
+        ("case_auto_escalate_002",),
+    ).fetchone()[0]
+    escalation_count = conn.execute(
+        "select count(*) from escalation_decisions where case_id = ?",
+        ("case_auto_escalate_002",),
+    ).fetchone()[0]
+    assert notification_count == 0
+    assert escalation_count == 0
+    conn.close()
+
+
 def test_entity_assessments_audit_filters_high_risk_attackers(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

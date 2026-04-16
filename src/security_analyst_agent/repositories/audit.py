@@ -11,6 +11,18 @@ _UNSET = object()
 _BOUND_RUN_ID: ContextVar[object] = ContextVar("audit_bound_run_id", default=_UNSET)
 _BOUND_ANALYSIS_CUTOFF_AT: ContextVar[object] = ContextVar("audit_bound_analysis_cutoff_at", default=_UNSET)
 _RECENT_FINISHED_MCP_AUTO_RUN_GRACE_SECONDS = 120
+_AUTO_ESCALATION_STAGE_ORDER = {
+    "recon": 1,
+    "exploit": 2,
+    "persistence": 3,
+    "command_execution": 4,
+    "lateral_prep": 5,
+}
+_AUTO_ESCALATION_MIN_STAGE = "persistence"
+_AUTO_ESCALATION_CHANNEL = "email"
+_AUTO_ESCALATION_TEMPLATE = "high_severity"
+_AUTO_ESCALATION_MIN_ALERT_CONFIDENCE = 0.8
+_AUTO_ESCALATION_CONTINUITY_EVIDENCE_TYPES = ("webshell", "webshell_exploitation", "shell_connection")
 
 
 def now_iso() -> str:
@@ -147,6 +159,181 @@ def _finish_auto_patrol_run(conn: sqlite3.Connection, *, run_id: str, summary: s
     )
 
 
+def _stage_rank(stage: str | None) -> int:
+    if not stage:
+        return 0
+    return _AUTO_ESCALATION_STAGE_ORDER.get(str(stage).lower(), 0)
+
+
+def _extract_case_ids_from_result(result: dict[str, Any]) -> list[str]:
+    case_ids: list[str] = []
+    refs = result.get("refs")
+    if isinstance(refs, dict):
+        refs_case_ids = refs.get("case_ids")
+        if isinstance(refs_case_ids, list):
+            case_ids.extend(str(item) for item in refs_case_ids if item)
+
+    data = result.get("data")
+    if isinstance(data, dict):
+        case_obj = data.get("case")
+        if isinstance(case_obj, dict):
+            case_id = case_obj.get("case_id")
+            if case_id:
+                case_ids.append(str(case_id))
+
+    return list(dict.fromkeys(case_ids))
+
+
+def _case_has_continuity_signal(conn: sqlite3.Connection, *, case_id: str) -> bool:
+    has_webshell_evidence = (
+        conn.execute(
+            f"""
+            select 1
+            from evidence
+            where case_id = ?
+              and evidence_type in ({", ".join("?" for _ in _AUTO_ESCALATION_CONTINUITY_EVIDENCE_TYPES)})
+            limit 1
+            """,
+            (case_id, *_AUTO_ESCALATION_CONTINUITY_EVIDENCE_TYPES),
+        ).fetchone()
+        is not None
+    )
+    if has_webshell_evidence:
+        return True
+
+    has_timeline_event = (
+        conn.execute(
+            """
+            select 1
+            from timeline_events
+            where case_id = ?
+            limit 1
+            """,
+            (case_id,),
+        ).fetchone()
+        is not None
+    )
+    if has_timeline_event:
+        return True
+
+    has_strong_alert_link = (
+        conn.execute(
+            """
+            select 1
+            from case_alert_links
+            where case_id = ?
+              and is_active = 1
+              and confidence >= ?
+            limit 1
+            """,
+            (case_id, _AUTO_ESCALATION_MIN_ALERT_CONFIDENCE),
+        ).fetchone()
+        is not None
+    )
+    return has_strong_alert_link
+
+
+def _should_auto_escalate_case(conn: sqlite3.Connection, *, case_id: str) -> bool:
+    row = conn.execute(
+        """
+        select status, overall_severity, current_stage, merge_state
+        from cases
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    status = str(row["status"]).lower()
+    severity = str(row["overall_severity"]).lower()
+    stage = str(row["current_stage"]).lower()
+    merge_state = str(row["merge_state"]).lower() if row["merge_state"] else ""
+    if status == "closed" or merge_state == "merged":
+        return False
+    if severity not in {"high", "critical"}:
+        return False
+    if _stage_rank(stage) < _stage_rank(_AUTO_ESCALATION_MIN_STAGE):
+        return False
+    return _case_has_continuity_signal(conn, case_id=case_id)
+
+
+def _send_auto_escalation_notification(conn: sqlite3.Connection, *, case_id: str) -> None:
+    from security_analyst_agent.repositories.cases import load_case
+    from security_analyst_agent.services.output import build_notify_preview
+
+    case = load_case(conn, case_id)
+    if case is None:
+        return
+
+    dedupe_key = f"{case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}"
+    existing = conn.execute(
+        """
+        select notification_id
+        from notification_outbox
+        where dedupe_key = ? and status in ('queued', 'sent_simulated')
+        order by created_at desc
+        limit 1
+        """,
+        (dedupe_key,),
+    ).fetchone()
+    if existing is not None:
+        insert_escalation_log(
+            conn,
+            case_id=case_id,
+            triggered=False,
+            channel=_AUTO_ESCALATION_CHANNEL,
+            template=_AUTO_ESCALATION_TEMPLATE,
+            notification_id=existing["notification_id"],
+            dedupe_key=dedupe_key,
+            reason="dedupe_hit",
+            detail={"status": "deduped", "auto_policy": "stage_persistence_with_continuity"},
+        )
+        return
+
+    preview = build_notify_preview(case, _AUTO_ESCALATION_CHANNEL)
+    created_at = now_iso()
+    notification_id = f"notif_{uuid4().hex[:12]}"
+    conn.execute(
+        """
+        insert into notification_outbox (
+          notification_id, case_id, channel, template, title, body, dedupe_key, status, created_at, sent_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            notification_id,
+            case_id,
+            _AUTO_ESCALATION_CHANNEL,
+            _AUTO_ESCALATION_TEMPLATE,
+            preview["title"],
+            preview["body"],
+            dedupe_key,
+            "sent_simulated",
+            created_at,
+            created_at,
+        ),
+    )
+    insert_escalation_log(
+        conn,
+        case_id=case_id,
+        triggered=True,
+        channel=_AUTO_ESCALATION_CHANNEL,
+        template=_AUTO_ESCALATION_TEMPLATE,
+        notification_id=notification_id,
+        dedupe_key=dedupe_key,
+        reason="threshold_met",
+        detail={"status": "sent_simulated", "auto_policy": "stage_persistence_with_continuity"},
+    )
+
+
+def _auto_escalate_after_case_update(conn: sqlite3.Connection, *, result: dict[str, Any]) -> None:
+    if not result.get("ok"):
+        return
+    for case_id in _extract_case_ids_from_result(result):
+        if _should_auto_escalate_case(conn, case_id=case_id):
+            _send_auto_escalation_notification(conn, case_id=case_id)
+
+
 def finalize_mcp_auto_run_after_tool(
     conn: sqlite3.Connection,
     *,
@@ -155,7 +342,13 @@ def finalize_mcp_auto_run_after_tool(
     tool_name: str,
     result: dict[str, Any],
 ) -> None:
-    if source != "mcp" or not run_id:
+    if source != "mcp":
+        return
+
+    if tool_name == "case.update-risk":
+        _auto_escalate_after_case_update(conn, result=result)
+
+    if not run_id:
         return
 
     row = conn.execute(
