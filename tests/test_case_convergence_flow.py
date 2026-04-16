@@ -134,7 +134,7 @@ def test_mcp_auto_run_triggers_case_convergence_after_ack(tmp_path) -> None:
     ).fetchone()
     assert relation is not None
     assert relation["status"] == "confirmed"
-    assert relation["streak_count"] >= 3
+    assert relation["streak_count"] >= 1
 
     merge_event = conn.execute(
         """
@@ -159,6 +159,26 @@ def test_mcp_auto_run_triggers_case_convergence_after_ack(tmp_path) -> None:
     assert case_b["canonical_case_id"] == "case_conv_a"
     assert case_b["merged_into_case_id"] == "case_conv_a"
     assert case_b["merge_state"] == "merged"
+    retargeted = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = 'case_conv_a'
+          and alert_id like 'alt_conv_b_r%'
+          and is_active = 1
+        """
+    ).fetchone()[0]
+    stale_child_links = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = 'case_conv_b'
+          and alert_id like 'alt_conv_b_r%'
+          and is_active = 1
+        """
+    ).fetchone()[0]
+    assert retargeted == 3
+    assert stale_child_links == 0
     conn.close()
 
 
@@ -245,7 +265,7 @@ def test_case_convergence_ignores_low_confidence_noise_links_for_relation_score(
     ).fetchone()
     assert relation is not None
     assert relation["score"] >= 0.78
-    assert relation["status"] == "candidate"
+    assert relation["status"] == "confirmed"
     assert relation["streak_count"] == 1
     conn.close()
 
@@ -355,4 +375,177 @@ def test_case_convergence_promotes_bridge_candidate_from_confirmed_cluster(tmp_p
     assert case_c is not None
     assert case_c["status"] == "closed"
     assert case_c["merge_state"] == "merged"
+    conn.close()
+
+
+def test_case_convergence_fast_tracks_obvious_reactivation_chain(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_fast_a",
+            "title": "fast chain A",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_fast_a",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_fast_b",
+            "title": "fast chain B",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_fast_b",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_fast_anchor",
+            "case_fast_a",
+            "2026-04-12T10:00:00+08:00",
+            "webshell",
+            "fast-track anchor evidence",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_fast_a",
+        case_id="case_fast_a",
+        occurred_at="2026-04-12T11:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_fast_b",
+        case_id="case_fast_b",
+        occurred_at="2026-04-12T11:30:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    open_alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    relation = conn.execute(
+        """
+        select status, streak_count
+        from case_relations
+        where left_case_id = ? and right_case_id = ?
+        """,
+        ("case_fast_a", "case_fast_b"),
+    ).fetchone()
+    assert relation is not None
+    assert relation["status"] == "confirmed"
+    assert relation["streak_count"] == 1
+
+    canonical_rows = conn.execute(
+        """
+        select case_id, canonical_case_id, merge_state
+        from cases
+        where case_id in ('case_fast_a', 'case_fast_b')
+        order by case_id
+        """
+    ).fetchall()
+    canonical_ids = {row["canonical_case_id"] for row in canonical_rows}
+    assert len(canonical_ids) == 1
+    assert any(row["merge_state"] == "merged" for row in canonical_rows)
+    conn.close()
+
+
+def test_case_convergence_skips_noise_only_recon_cases(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_noise_only",
+            "title": "noise-only case",
+            "status": "open",
+            "overall_severity": "low",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_noise_only",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_signal_high",
+            "title": "signal case",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_signal_high",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_noise_only_01",
+        case_id="case_noise_only",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="recon",
+        src_ip="203.0.113.200",
+        severity="low",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_signal_high_01",
+        case_id="case_signal_high",
+        occurred_at="2026-04-12T10:30:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    open_alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    relation = conn.execute(
+        """
+        select relation_id
+        from case_relations
+        where (left_case_id = 'case_noise_only' and right_case_id = 'case_signal_high')
+           or (left_case_id = 'case_signal_high' and right_case_id = 'case_noise_only')
+        """
+    ).fetchone()
+    assert relation is None
     conn.close()

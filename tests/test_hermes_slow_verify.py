@@ -8,6 +8,7 @@ from security_analyst_agent.db import connect_db, create_schema
 from security_analyst_agent.hermes_slow_verify import (
     HermesSlowVerificationError,
     _verify_final_db_state,
+    _verify_chat_output,
     build_chat_command,
     load_integration_manifest,
     prepare_isolated_hermes_home,
@@ -74,6 +75,44 @@ def test_round_05_silent_period_keeps_default_output_contract() -> None:
     ]
     assert "required_exact_output" not in round_05
     assert round_05["max_turns"] == 18
+
+
+def test_verify_chat_output_accepts_exact_silent_marker(tmp_path: Path) -> None:
+    round_spec = {
+        "round_id": "round_05_silent_period",
+        "required_output_headers": [
+            "## Patrol Action Summary",
+            "## Remaining Uncertainty",
+            "## Memory Summary",
+        ],
+    }
+    _verify_chat_output(chat_stdout="[SILENT]", round_spec=round_spec, artifact_dir=tmp_path)
+
+
+def test_verify_chat_output_still_requires_headers_for_non_silent_output(tmp_path: Path) -> None:
+    round_spec = {
+        "round_id": "round_05_silent_period",
+        "required_output_headers": [
+            "## Patrol Action Summary",
+            "## Remaining Uncertainty",
+            "## Memory Summary",
+        ],
+    }
+    with pytest.raises(HermesSlowVerificationError, match="missing output header"):
+        _verify_chat_output(chat_stdout="No updates", round_spec=round_spec, artifact_dir=tmp_path)
+
+
+def test_verify_chat_output_accepts_silent_marker_with_wrapper_text(tmp_path: Path) -> None:
+    round_spec = {
+        "round_id": "round_01_recon",
+        "required_output_headers": [
+            "## Patrol Action Summary",
+            "## Remaining Uncertainty",
+            "## Memory Summary",
+        ],
+    }
+    wrapped_output = "╭─ ⚕ Hermes ─╮\n[SILENT]\n\nsession_id: test_001"
+    _verify_chat_output(chat_stdout=wrapped_output, round_spec=round_spec, artifact_dir=tmp_path)
 
 
 def test_load_integration_manifest_requires_zero_failed_tools_and_compromised_host() -> None:
@@ -236,6 +275,182 @@ def test_verify_final_db_state_ignores_case_get_not_found_failures(tmp_path: Pat
             "未找到案件 case_missing_001",
             "{\"ok\":false,\"warnings\":[\"case_not_found:case_missing_001\"]}",
             12,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["failed_tool_calls_count"] == 0
+    conn.close()
+
+
+def test_verify_final_db_state_ignores_actor_candidate_not_found_failures(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_test_001c",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_ok_001c",
+            "2026-04-14T10:00:10+08:00",
+            "run_test_001c",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_fail_001c",
+            "2026-04-14T10:00:20+08:00",
+            "run_test_001c",
+            "mcp",
+            "actor.case-find-candidates",
+            "{\"case_id\":\"\",\"alert_id\":\"alt_missing\"}",
+            0,
+            "未找到案件 ",
+            "{\"ok\":false,\"warnings\":[\"case_not_found:\"]}",
+            12,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["failed_tool_calls_count"] == 0
+    conn.close()
+
+
+def test_verify_final_db_state_ignores_failed_tool_call_if_same_run_later_succeeds(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_test_retry_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_ok_retry_fetch",
+            "2026-04-14T10:00:10+08:00",
+            "run_test_retry_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_fail_retry_001",
+            "2026-04-14T10:00:20+08:00",
+            "run_test_retry_001",
+            "mcp",
+            "actor.case-upsert",
+            "{}",
+            0,
+            "tool execution exception",
+            "{}",
+            12,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_ok_retry_001",
+            "2026-04-14T10:00:30+08:00",
+            "run_test_retry_001",
+            "mcp",
+            "actor.case-upsert",
+            "{\"payload\":{\"case_actor_id\":\"actor_demo\"}}",
+            1,
+            "ok",
+            "{}",
+            14,
         ),
     )
     conn.commit()

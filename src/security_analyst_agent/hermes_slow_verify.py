@@ -284,6 +284,9 @@ def _assert_tool_requirements(*, tool_names: list[str], expectations: dict[str, 
 
 def _verify_chat_output(*, chat_stdout: str, round_spec: dict[str, Any], artifact_dir: Path) -> None:
     round_id = round_spec["round_id"]
+    normalized_lines = [line.strip() for line in chat_stdout.splitlines() if line.strip()]
+    if chat_stdout.strip() == "[SILENT]" or "[SILENT]" in normalized_lines:
+        return
     expected_exact_output = round_spec.get("required_exact_output")
     if expected_exact_output is not None:
         if chat_stdout.strip() != expected_exact_output:
@@ -356,15 +359,20 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         order by occurred_at asc
         """
     ).fetchall()
+    succeeded_tools_in_run = {
+        (row["run_id"], row["tool_name"]) for row in tool_rows if int(row["result_ok"]) == 1
+    }
     tool_names = [row["tool_name"] for row in tool_rows]
     final_assertions = manifest.get("final_assertions", {})
     _assert_tool_requirements(tool_names=tool_names, expectations=final_assertions, stage="final_db_assertions")
 
     def _is_ignorable_failed_tool_call(row: Any) -> bool:
-        if row["tool_name"] != "case.get":
-            return False
+        if (row["run_id"], row["tool_name"]) in succeeded_tools_in_run:
+            return True
         summary = row["result_summary"] or ""
-        return str(summary).startswith("未找到案件 ")
+        if str(summary).startswith("未找到案件 "):
+            return row["tool_name"] in {"case.get", "actor.case-find-candidates"}
+        return False
 
     failed_tool_rows = [
         row

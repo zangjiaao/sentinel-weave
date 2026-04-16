@@ -17,12 +17,21 @@ from security_analyst_agent.services.case_relation_scoring import score_case_rel
 _MIN_LINK_CONFIDENCE_FOR_RELATION = 0.6
 _ALLOWED_ALERT_SEVERITIES_FOR_RELATION = {"medium", "high", "critical"}
 _CLUSTER_BRIDGE_PROMOTION_SCORE = 0.82
+_FAST_TRACK_MERGE_SCORE = 0.78
+_FAST_TRACK_MIN_STAGE_RANK = 3
+_FAST_TRACK_MIN_SEVERITY_RANK = 3
 _STAGE_ORDER = {
     "recon": 1,
     "exploit": 2,
     "persistence": 3,
     "command_execution": 4,
     "lateral_prep": 5,
+}
+_SEVERITY_ORDER = {
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
 }
 
 
@@ -33,7 +42,13 @@ def _now_iso() -> str:
 def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        select case_id, current_stage, coalesce(canonical_case_id, case_id) as canonical_case_id, merge_state, status
+        select
+          case_id,
+          current_stage,
+          overall_severity,
+          coalesce(canonical_case_id, case_id) as canonical_case_id,
+          merge_state,
+          status
         from cases
         where status in ('open', 'investigating', 'observing')
         """
@@ -77,6 +92,13 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             """,
             (case_id,),
         ).fetchall()
+        if (
+            not high_signal_alert_rows
+            and str(row["current_stage"]).lower() == "recon"
+            and all(_SEVERITY_ORDER.get(str(item["severity"]).lower(), 0) <= 1 for item in alert_rows)
+            and not evidence_rows
+        ):
+            continue
         timeline_last_row = conn.execute(
             """
             select max(occurred_at) as last_event_at
@@ -96,6 +118,11 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "src_ips": {item["src_ip"] for item in scored_alert_rows if item["src_ip"]},
                 "alert_ids": {item["alert_id"] for item in scored_alert_rows},
                 "evidence_ids": {item["evidence_id"] for item in evidence_rows},
+                "overall_severity": row["overall_severity"],
+                "max_alert_severity_rank": max(
+                    (_SEVERITY_ORDER.get(str(item["severity"]).lower(), 0) for item in scored_alert_rows),
+                    default=0,
+                ),
                 "last_event_at": last_event_at,
             }
         )
@@ -223,6 +250,118 @@ def _promote_cluster_bridge_relations(
             return promoted
 
 
+def _should_fast_track_relation(
+    left_context: dict[str, Any],
+    right_context: dict[str, Any],
+    *,
+    score: Any,
+) -> bool:
+    factor_map = {item["factor_type"]: float(item["score"]) for item in score.factors}
+    left_stage_rank = _STAGE_ORDER.get(str(left_context.get("current_stage", "")).lower(), 0)
+    right_stage_rank = _STAGE_ORDER.get(str(right_context.get("current_stage", "")).lower(), 0)
+    left_severity_rank = int(left_context.get("max_alert_severity_rank") or 0)
+    right_severity_rank = int(right_context.get("max_alert_severity_rank") or 0)
+    return (
+        float(score.total) >= _FAST_TRACK_MERGE_SCORE
+        and factor_map.get("asset_overlap", 0.0) >= 1.0
+        and factor_map.get("stage_continuity", 0.0) >= 0.85
+        and factor_map.get("temporal_continuity", 0.0) >= 0.8
+        and min(left_stage_rank, right_stage_rank) >= _FAST_TRACK_MIN_STAGE_RANK
+        and min(left_severity_rank, right_severity_rank) >= _FAST_TRACK_MIN_SEVERITY_RANK
+    )
+
+
+def _normalize_cluster_case_links_and_artifacts(
+    conn: sqlite3.Connection,
+    *,
+    canonical_case_id: str,
+    case_ids: list[str],
+) -> dict[str, int]:
+    child_case_ids = [case_id for case_id in case_ids if case_id != canonical_case_id]
+    if not child_case_ids:
+        return {"retargeted_links_count": 0, "evidence_migrated_count": 0, "timeline_migrated_count": 0}
+
+    now = _now_iso()
+    placeholders = ", ".join("?" for _ in child_case_ids)
+    link_rows = conn.execute(
+        f"""
+        select case_id, alert_id, linked_at, confidence, reason
+        from case_alert_links
+        where is_active = 1
+          and case_id in ({placeholders})
+        order by linked_at asc, rowid asc
+        """,
+        tuple(child_case_ids),
+    ).fetchall()
+
+    for row in link_rows:
+        conn.execute(
+            """
+            update case_alert_links
+            set is_active = 0, unlinked_at = ?
+            where alert_id = ? and is_active = 1 and case_id <> ?
+            """,
+            (now, row["alert_id"], canonical_case_id),
+        )
+        conn.execute(
+            """
+            insert into case_alert_links (
+              case_id, alert_id, linked_at, confidence, reason, is_active, unlinked_at
+            ) values (?, ?, ?, ?, ?, 1, null)
+            on conflict(case_id, alert_id) do update set
+              linked_at = excluded.linked_at,
+              confidence = excluded.confidence,
+              reason = excluded.reason,
+              is_active = 1,
+              unlinked_at = null
+            """,
+            (
+                canonical_case_id,
+                row["alert_id"],
+                row["linked_at"],
+                row["confidence"],
+                f"{row['reason']}; auto_retarget_to_canonical",
+            ),
+        )
+
+    evidence_migrated_count = conn.execute(
+        f"""
+        update evidence
+        set case_id = ?
+        where case_id in ({placeholders})
+        """,
+        (canonical_case_id, *tuple(child_case_ids)),
+    ).rowcount
+    timeline_migrated_count = conn.execute(
+        f"""
+        update timeline_events
+        set case_id = ?
+        where case_id in ({placeholders})
+        """,
+        (canonical_case_id, *tuple(child_case_ids)),
+    ).rowcount
+
+    conn.execute(
+        """
+        delete from case_digests
+        where case_id = ?
+        """,
+        (canonical_case_id,),
+    )
+    conn.execute(
+        f"""
+        delete from case_digests
+        where case_id in ({placeholders})
+        """,
+        tuple(child_case_ids),
+    )
+    return {
+        "retargeted_links_count": len(link_rows),
+        "evidence_migrated_count": int(evidence_migrated_count or 0),
+        "timeline_migrated_count": int(timeline_migrated_count or 0),
+    }
+
+
 def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: list[str]) -> dict[str, Any]:
     canonical_case_id = reselect_cluster_canonical_case(conn, case_ids, run_id=run_id)
     now = _now_iso()
@@ -272,6 +411,11 @@ def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: lis
         )
         changed_case_ids.append(case_id)
 
+    normalize_stats = _normalize_cluster_case_links_and_artifacts(
+        conn,
+        canonical_case_id=canonical_case_id,
+        case_ids=case_ids,
+    )
     if not changed_case_ids:
         return {"event_created": False, "canonical_case_id": canonical_case_id, "affected_case_ids": case_ids}
 
@@ -308,7 +452,7 @@ def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: lis
             canonical_case_id,
             json.dumps(case_ids, ensure_ascii=False),
             "auto_case_convergence",
-            json.dumps({"changed_case_ids": changed_case_ids}, ensure_ascii=False),
+            json.dumps({"changed_case_ids": changed_case_ids, **normalize_stats}, ensure_ascii=False),
         ),
     )
     return {"event_created": True, "canonical_case_id": canonical_case_id, "affected_case_ids": case_ids}
@@ -327,6 +471,9 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
             for item in score.factors
             if item["score"] >= 0.5
         ) or "weak_case_relation"
+        fast_track = _should_fast_track_relation(left_context, right_context, score=score)
+        if fast_track:
+            reason = f"{reason}; fast_track_same_asset_chain"
         relation = upsert_case_relation_candidate(
             conn,
             run_id,
@@ -336,6 +483,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
             reason,
             score.supporting_alert_ids,
             score.supporting_evidence_ids,
+            required_streak=1 if fast_track else 3,
         )
         relation_updates.append(relation)
 
