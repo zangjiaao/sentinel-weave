@@ -10,7 +10,7 @@ from security_analyst_agent.repositories.actors import (
     load_case_actor_profile,
     upsert_case_actor_profile,
 )
-from security_analyst_agent.repositories.cases import load_alert, load_case
+from security_analyst_agent.repositories.cases import load_alert, load_case, resolve_canonical_case_id
 from security_analyst_agent.schemas.actor_tools import (
     ActorCaseAddObservationRequest,
     ActorCaseAddObservationBatchRequest,
@@ -59,12 +59,20 @@ def actor_case_get(conn: sqlite3.Connection, payload: dict) -> dict:
 
 def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
     request = ActorCaseFindCandidatesRequest.model_validate(payload)
-    case = load_case(conn, request.case_id)
+    warnings: list[str] = []
     alert = load_alert(conn, request.alert_id)
+    effective_case_id = request.case_id.strip()
+    if not effective_case_id and alert is not None and alert.get("case_id"):
+        effective_case_id = resolve_canonical_case_id(conn, alert["case_id"])
+        warnings.append("case_id_inferred_from_alert")
+    elif effective_case_id:
+        effective_case_id = resolve_canonical_case_id(conn, effective_case_id)
+
+    case = load_case(conn, effective_case_id) if effective_case_id else None
     if case is None:
         response = ToolResponse(
             ok=False,
-            summary=f"未找到案件 {request.case_id}",
+            summary=f"未找到案件 {request.case_id or effective_case_id}",
             data={"candidates": []},
             warnings=[f"case_not_found:{request.case_id}"],
         )
@@ -77,7 +85,7 @@ def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
             warnings=[f"alert_not_found:{request.alert_id}"],
         )
         return response.model_dump(mode="json", by_alias=True)
-    contexts = load_case_actor_candidate_contexts(conn, case_id=request.case_id, alert_id=request.alert_id)
+    contexts = load_case_actor_candidate_contexts(conn, case_id=effective_case_id, alert_id=request.alert_id)
     candidates = sorted(
         [score_case_actor_candidate(context) for context in contexts],
         key=lambda item: item["relation_score"],
@@ -88,10 +96,11 @@ def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
         summary=f"返回案内画像候选 {len(candidates)} 个",
         data={"case": case, "alert": alert, "candidates": candidates},
         refs={
-            "case_ids": [request.case_id],
+            "case_ids": [effective_case_id],
             "alert_ids": [request.alert_id],
             "case_actor_ids": [item["case_actor_id"] for item in candidates],
         },
+        warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)
 

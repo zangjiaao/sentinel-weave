@@ -17,13 +17,16 @@ def search_assets(
     indicator_terms = [item.strip() for item in indicators if item.strip()]
     if indicator_terms:
         placeholders = ", ".join("?" for _ in indicator_terms)
-        conditions.append(f"(public_ip in ({placeholders}) or domain in ({placeholders}))")
+        conditions.append(
+            f"(asset_id in ({placeholders}) or public_ip in ({placeholders}) or domain in ({placeholders}))"
+        )
+        params.extend(indicator_terms)
         params.extend(indicator_terms)
         params.extend(indicator_terms)
 
     if query:
-        conditions.append("(asset_name like ? or system_name like ?)")
-        params.extend([f"%{query}%", f"%{query}%"])
+        conditions.append("(asset_id like ? or asset_name like ? or system_name like ? or public_ip like ? or domain like ?)")
+        params.extend([f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"])
 
     where_clause = f"where {' and '.join(conditions)}" if conditions else ""
     params.append(limit)
@@ -38,4 +41,3 @@ def search_assets(
         tuple(params),
     ).fetchall()
     return [dict(row) for row in rows]
-
