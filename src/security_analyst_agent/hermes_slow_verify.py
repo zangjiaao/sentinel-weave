@@ -264,6 +264,9 @@ def _assert_tool_requirements(*, tool_names: list[str], expectations: dict[str, 
     min_tool_calls = int(expectations.get("min_tool_calls", 0))
     if len(tool_names) < min_tool_calls:
         raise HermesSlowVerificationError(stage, f"expected at least {min_tool_calls} tool calls, got {tool_names}")
+    max_tool_calls = expectations.get("max_tool_calls")
+    if max_tool_calls is not None and len(tool_names) > int(max_tool_calls):
+        raise HermesSlowVerificationError(stage, f"expected at most {max_tool_calls} tool calls, got {tool_names}")
 
     required_tool_names = expectations.get("required_tool_names", [])
     for tool_name in required_tool_names:

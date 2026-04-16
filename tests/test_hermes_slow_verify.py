@@ -29,6 +29,7 @@ def test_load_integration_manifest_returns_expected_scenario() -> None:
         "round_06_reactivation",
     ]
     assert manifest["round_defaults"]["required_tool_names"][0] == "alert.fetch"
+    assert manifest["round_defaults"]["max_tool_calls"] == 16
 
 
 def test_resolve_round_specs_merges_defaults_and_round_overrides() -> None:
@@ -214,6 +215,85 @@ def test_verify_final_db_state_fails_when_failed_tool_calls_exist(tmp_path: Path
         }
     }
     with pytest.raises(HermesSlowVerificationError, match="failed tool calls"):
+        _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    conn.close()
+
+
+def test_verify_final_db_state_fails_when_tool_calls_exceed_max(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_max_calls.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_test_max_calls_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_ok_max_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_test_max_calls_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_ok_max_002",
+            "2026-04-14T10:00:20+08:00",
+            "run_test_max_calls_001",
+            "mcp",
+            "alert.ack",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            12,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "max_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+        }
+    }
+    with pytest.raises(HermesSlowVerificationError, match="expected at most 1 tool calls"):
         _verify_final_db_state(conn, manifest=manifest, round_count=1)
     conn.close()
 

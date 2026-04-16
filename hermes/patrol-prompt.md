@@ -2,13 +2,18 @@ Run patrol loop for the security analyst spike.
 
 Execution rules:
 - First call `alert.fetch` with payload `{"status":["new","open"],"limit":20}`.
-- Keep the run budget-aware: target `<=12` tool calls when `max_turns=18`, and reserve turns for final output.
+- Keep the run budget-aware with tiered limits:
+  - recon/noise-only round: target `<=8` tool calls
+  - high-signal round (persistence/command_execution/lateral_prep): target `<=15` tool calls
+  - absolute hard cap: `<=16` tool calls
+  - reserve turns for final output.
 - Process at most `10` alerts this run.
 - Treat only `alerts`, `assets`, and `intel_cache` as preloaded facts in the spike; `cases`, `case_alert_links`, `timeline_events`, and `evidence` must be created or refreshed by your tool calls.
 - Use `case.get`, `case.timeline`, and `case.explain-link` to reconstruct evidence and attack flow.
 - If no case exists yet for the current attack chain, call `alert.detail-batch` with at least one representative alert before creating a new case.
 - Use `alert.detail-batch` for both single-alert and multi-alert detail lookup; for one alert, send a one-item `alert_ids` array.
 - For homogeneous alerts in the same stage/case, use representative sampling instead of one-call-per-alert fan-out.
+- Do not call `alert.detail-batch` repeatedly for the same `alert_id` in one run.
 - If the attack chain warrants a new case and `case.get` cannot find it, create it first with `case.upsert-batch` (single case also uses one-item batch).
 - Use exact `case.upsert-batch` schema keys only.
 - Do not send extra `case.upsert-batch` fields such as `description`, `severity`, `created_at`, or `updated_at`.
@@ -19,10 +24,12 @@ Execution rules:
 - For same-stage events in one case, prefer one aggregated `timeline.upsert` node over per-alert timeline fan-out.
 - Use `case.update-risk` to persist case-level assessment snapshots into `case_assessments`, even when the case header already reflects the current stage/severity.
 - Use `assessment.upsert-batch` to persist entity-level conclusions (`attacker`, `compromised_host`, `noise`, `unknown`); single entity also uses one-item batch.
+- Prefer one consolidated `assessment.upsert-batch` call per run when practical.
 - Do not downgrade `current_stage` by default; only pass `force_downgrade=true` when evidence clearly invalidates previous stage.
 - For alerts triaged in this run, call `alert.ack` to set status to `triaged` (or `closed` when fully handled) so they leave the `new/open` queue.
 - Prefer one batched `alert.ack` call for all triaged alerts in the run.
 - Only call `intel.lookup` when evidence is insufficient.
+- For low-signal recon/noise alerts, skip `intel.lookup` unless it materially changes case judgment.
 - Never use evidence beyond the current run `analysis_cutoff_at`.
 - Do not mark an IP/entity as `high + attacker` on scan-only signals; require exploit/persistence/command/lateral evidence.
 - Call `notify.send` only when case risk reaches escalation threshold.
