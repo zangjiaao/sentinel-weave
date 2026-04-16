@@ -9,14 +9,16 @@ from security_analyst_agent.repositories.audit import (
     reset_bound_run_context,
     resolve_run_context_for_dispatch,
 )
-from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_fetch
-from security_analyst_agent.tools.assessment_tools import assessment_upsert
+from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_detail_batch, alert_fetch
+from security_analyst_agent.tools.assessment_tools import assessment_upsert, assessment_upsert_batch
 from security_analyst_agent.tools.asset_tools import asset_search
 from security_analyst_agent.tools.actor_tools import (
     actor_case_add_observation,
+    actor_case_add_observation_batch,
     actor_case_find_candidates,
     actor_case_get,
     actor_case_link,
+    actor_case_link_batch,
     actor_case_list,
     actor_case_upsert,
 )
@@ -24,8 +26,10 @@ from security_analyst_agent.tools.case_tools import (
     case_explain_link,
     case_get,
     case_link_alert,
+    case_link_alert_batch,
     case_timeline,
     case_update_risk,
+    case_upsert_batch,
     case_upsert,
 )
 from security_analyst_agent.tools.derived_tools import evidence_upsert, timeline_upsert
@@ -37,6 +41,7 @@ ToolHandler = Callable[[sqlite3.Connection, dict], dict]
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.fetch": alert_fetch,
     "alert.detail": alert_detail,
+    "alert.detail-batch": alert_detail_batch,
     "alert.ack": alert_ack,
     "asset.search": asset_search,
     "actor.case-list": actor_case_list,
@@ -44,16 +49,21 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "actor.case-find-candidates": actor_case_find_candidates,
     "actor.case-upsert": actor_case_upsert,
     "actor.case-add-observation": actor_case_add_observation,
+    "actor.case-add-observation-batch": actor_case_add_observation_batch,
     "actor.case-link": actor_case_link,
+    "actor.case-link-batch": actor_case_link_batch,
     "case.get": case_get,
     "case.timeline": case_timeline,
     "case.explain-link": case_explain_link,
     "case.upsert": case_upsert,
+    "case.upsert-batch": case_upsert_batch,
     "case.link-alert": case_link_alert,
+    "case.link-alert-batch": case_link_alert_batch,
     "case.update-risk": case_update_risk,
     "evidence.upsert": evidence_upsert,
     "timeline.upsert": timeline_upsert,
     "assessment.upsert": assessment_upsert,
+    "assessment.upsert-batch": assessment_upsert_batch,
     "intel.lookup": intel_lookup,
     "notify.send": notify_send,
     "notify.preview": notify_preview,

@@ -16,3 +16,7 @@ class AssessmentUpsertRequest(BaseModel):
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     first_seen_at: str | None = None
     last_seen_at: str | None = None
+
+
+class AssessmentUpsertBatchRequest(BaseModel):
+    items: list[AssessmentUpsertRequest] = Field(min_length=1)

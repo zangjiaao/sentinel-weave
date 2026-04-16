@@ -2,8 +2,10 @@ from security_analyst_agent.tools.case_tools import (
     case_explain_link,
     case_get,
     case_link_alert,
+    case_link_alert_batch,
     case_timeline,
     case_update_risk,
+    case_upsert_batch,
     case_upsert,
 )
 
@@ -60,6 +62,35 @@ def test_case_upsert_creates_new_case(db_conn) -> None:
     assert result["ok"] is True
     assert result["data"]["case"]["case_id"] == "case_new_001"
     assert result["data"]["case"]["overall_severity"] == "medium"
+
+
+def test_case_upsert_batch_creates_multiple_cases(db_conn) -> None:
+    result = case_upsert_batch(
+        db_conn,
+        {
+            "items": [
+                {
+                    "case_id": "case_batch_upsert_001",
+                    "title": "批量案件一",
+                    "status": "open",
+                    "overall_severity": "medium",
+                    "current_stage": "recon",
+                    "primary_actor_id": "actor_batch_001",
+                },
+                {
+                    "case_id": "case_batch_upsert_002",
+                    "title": "批量案件二",
+                    "status": "investigating",
+                    "overall_severity": "high",
+                    "current_stage": "persistence",
+                    "primary_actor_id": "actor_batch_002",
+                },
+            ]
+        },
+    )
+    assert result["ok"] is True
+    assert len(result["data"]["cases"]) == 2
+    assert result["data"]["failures"] == []
 
 
 def test_case_link_alert_updates_active_case_link(db_conn) -> None:
@@ -247,6 +278,43 @@ def test_case_link_alert_writes_link_decision_in_dedicated_table(db_conn) -> Non
         """
     ).fetchone()[0]
     assert old_style == 0
+
+
+def test_case_link_alert_batch_links_multiple_alerts(db_conn) -> None:
+    case_upsert(
+        db_conn,
+        {
+            "case_id": "case_batch_001",
+            "title": "批量关联测试案件",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_batch_001",
+        },
+    )
+    result = case_link_alert_batch(
+        db_conn,
+        {
+            "items": [
+                {
+                    "case_id": "case_batch_001",
+                    "alert_id": "alt_day1_scan_01",
+                    "confidence": 0.8,
+                    "reason": "batch-link-1",
+                },
+                {
+                    "case_id": "case_batch_001",
+                    "alert_id": "alt_day2_webshell_01",
+                    "confidence": 0.9,
+                    "reason": "batch-link-2",
+                },
+            ]
+        },
+    )
+
+    assert result["ok"] is True
+    assert len(result["data"]["links"]) == 2
+    assert result["data"]["failures"] == []
 
 
 def test_case_update_risk_updates_case_fields(db_conn) -> None:

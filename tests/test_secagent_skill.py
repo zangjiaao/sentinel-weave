@@ -44,34 +44,23 @@ def test_secagent_skill_contains_output_contract() -> None:
 def test_secagent_skill_contains_assessment_upsert_contract() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
-    assert "`related_case_id`" in text
-    assert "`assessment_confidence`" in text
-    assert "`supporting_alert_ids`" in text
-    assert "`supporting_evidence_ids`" in text
-    assert "`entity_id`" in text
-    assert "`case_ids`" in text
-    assert "不要使用字符串置信度" in text
+    assert "`assessment.upsert`" in text
+    assert "`attacker` / `compromised_host` / `noise`" in text
+    assert "参数字段一律以对应 MCP prompt 的 schema contract 为准" in text
 
 
 def test_secagent_skill_contains_case_link_alert_contract() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
     assert "`case.link-alert`" in text
-    assert "`confidence`" in text
-    assert "`reason`" in text
-    assert "必须带 `confidence`" in text
+    assert "参数字段一律以对应 MCP prompt 的 schema contract 为准" in text
 
 
 def test_secagent_skill_contains_exact_case_upsert_contract() -> None:
     text = Path("skills/secagent-patrol/SKILL.md").read_text(encoding="utf-8")
 
     assert "`case.upsert`" in text
-    assert "`overall_severity`" in text
-    assert "`primary_actor_id`" in text
-    assert "`description`" in text
-    assert "`created_at`" in text
-    assert "`updated_at`" in text
-    assert "不要传额外字段" in text
+    assert "参数字段一律以对应 MCP prompt 的 schema contract 为准" in text
 
 
 def test_secagent_skill_requires_case_update_risk_for_case_level_assessment() -> None:

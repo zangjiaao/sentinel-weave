@@ -15,21 +15,27 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 2. 优先复用 MCP prompt 提供的参数说明；只有在 prompt 不存在时才回退到本 Skill 里的默认 payload。
 3. Start every patrol run with `alert.fetch` and a queue-style payload such as `{"status":["new","open"],"limit":20}`.
 4. Keep the patrol bounded. Process at most 10 alerts per run and stop when `no_more_alerts`, `time_budget_exceeded`, or `high_risk_case_found`.
-5. For each material alert, call `case.get` and `case.timeline`, then `case.explain-link` when explicit linkage evidence is needed.
-6. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
-7. If a case record is missing or stale, create or refresh it with `case.upsert`, then maintain it with `case.link-alert` and `case.update-risk`.
-8. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
-9. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
-10. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert`.
-11. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
-12. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
-13. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
-14. Call `report.draft` only when the user explicitly requests a report.
-15. If there is genuinely nothing new to report, return exactly `[SILENT]`.
+5. 预算优先：若 run 有 `max_turns`（例如 18），目标控制在 `<=12` 次 tool 调用，并预留至少 3 次回合用于输出最终总结。
+6. 对同一攻击链内“同阶段、同类型、同来源”的告警，优先做代表性取样，避免逐条 fan-out 调用。
+7. 对同一案件同一阶段，优先写 1 条聚合 `timeline.upsert`，不要为每条同质告警各写一条时间线。
+8. `alert.ack` 尽量批量一次提交本轮已处理告警，避免拆成多次调用。
+9. 需要查看多条告警详情时，优先一次调用 `alert.detail-batch`，避免连续多次 `alert.detail`。
+10. For each material alert, call `case.get` and `case.timeline`, then `case.explain-link` when explicit linkage evidence is needed.
+11. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
+12. If a case record is missing or stale, create or refresh it with `case.upsert`, then maintain it with `case.link-alert` and `case.update-risk`.
+13. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
+14. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
+15. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert`.
+16. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
+17. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
+18. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
+19. Call `report.draft` only when the user explicitly requests a report.
+20. If there is genuinely nothing new to report, return exactly `[SILENT]`.
 
 ## Tool Usage Rules
 
 - Use `alert.fetch` as the first tool in every patrol run.
+- 需要查看多条详情时，优先 `alert.detail-batch`，只在单条补证时使用 `alert.detail`。
 - Use `case.get` before writing a severity or current-stage conclusion.
 - Use `case.timeline` before describing the attack chain across multiple days, IPs, or targets.
 - Use `case.explain-link` with payload `{"case_id":"<case_id>","target_type":"alert","target_id":"<alert_id>"}`.
@@ -45,22 +51,19 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - 如果属于已有画像，使用 `actor.case-add-observation` 追加新的 IP、资产、URI、C2 或 webshell 线索，并用 `actor.case-link` 关联告警/证据/时间线。
 - 如果没有合格候选，且该告警代表独立高信号攻击活动，使用 `actor.case-upsert` 创建新的案内画像。
 - 噪音告警不创建案内画像。
-- `case.upsert` 只允许这些字段：`case_id`、`title`、`status`、`overall_severity`、`current_stage`、`primary_actor_id`。
-- 调用 `case.upsert` 时不要传额外字段，例如：`description`、`severity`、`created_at`、`updated_at`。
+- 对所有写工具（尤其 `actor.case-upsert` / `actor.case-add-observation` / `actor.case-add-observation-batch` / `actor.case-link` / `actor.case-link-batch` / `case.upsert` / `case.upsert-batch` / `case.link-alert` / `case.link-alert-batch` / `assessment.upsert` / `assessment.upsert-batch`），参数字段一律以对应 MCP prompt 的 schema contract 为准；不要凭记忆猜字段名，也不要使用旧别名字段。
 - Use `case.link-alert` when an alert should be linked to an existing case.
-- `case.link-alert` 必须带 `confidence` 与 `reason`；只使用 `{"case_id":"<case_id>","alert_id":"<alert_id>","confidence":0.8,"reason":"<why_linked>"}` 这种结构。
+- 需要一次关联多条告警时，优先 `case.link-alert-batch`。
+- 需要一次创建/刷新多个案件时，优先 `case.upsert-batch`。
 - Use `case.update-risk` when severity/stage/status should change.
-- Use `evidence.upsert` to write derived evidence: `{"evidence_id":"<evidence_id>","case_id":"<case_id>","occurred_at":"<iso_time>","evidence_type":"webshell","summary":"<summary>"}`。
-- Use `timeline.upsert` to write a timeline node: `{"timeline_event_id":"<timeline_event_id>","case_id":"<case_id>","occurred_at":"<iso_time>","stage":"persistence","title":"<title>","related_alert_ids":["<alert_id>"],"related_evidence_ids":["<evidence_id>"]}`。
+- Use `evidence.upsert` to write derived evidence.
+- Use `timeline.upsert` to write a timeline node.
 - `case.update-risk` 除了更新案件头字段，还用于沉淀“案件级评估”到 `case_assessments`；当本轮出现阶段推进、风险升级，或形成新的案件级判断时必须调用。
 - 即使案件头字段已经同步到最新状态，只要本轮新增了 exploit / persistence / command_execution / lateral_prep / reactivation 这类关键证据，仍要调用一次 `case.update-risk` 来写入案件级评估快照。
 - 使用 `assessment.upsert` 沉淀实体级结论（例如 `attacker` / `compromised_host` / `noise`）。
-- `assessment.upsert` 只使用以下字段：`entity_type`、`entity_key`、`entity_label`、`related_case_id`、`risk_level`、`assessment_confidence`、`verdict`、`reason_summary`、`supporting_alert_ids`、`supporting_evidence_ids`、`first_seen_at`、`last_seen_at`。
-- `assessment.upsert` 示例：
-  `{"entity_type":"ip","entity_key":"198.51.100.23","entity_label":"198.51.100.23","related_case_id":"case_demo_001","risk_level":"high","assessment_confidence":0.93,"verdict":"attacker","reason_summary":"多阶段攻击链核心来源","supporting_alert_ids":["alt_r2_webshell"],"supporting_evidence_ids":["evi_webshell_01"]}`
+- 需要一次写入多条实体结论时，优先 `assessment.upsert-batch`。
 - 若主机已出现漏洞利用、webshell 落地、持久化或控制证据，额外写一条 `entity_type="asset"`、`verdict="compromised_host"` 的 `assessment.upsert`。
-- 不要使用旧别名字段：`entity_id`、`case_id`、`case_ids`、`confidence`、`reason`、`first_seen`、`last_seen`。
-- `assessment_confidence` 必须是 `0.0` 到 `1.0` 的数字；不要使用字符串置信度，例如 `"high"` / `"medium"`。
+- 需要为同一画像追加多条观测或关联多条目标时，优先 `actor.case-add-observation-batch` / `actor.case-link-batch`。
 - 默认不要让 `current_stage` 回退；只有证据明确推翻原判断时，才使用 `force_downgrade=true` 显式降级。
 - Use `intel.lookup` with payload `{"indicator":"<ip_or_indicator>","indicator_type":"ip"}`.
 - 不要对同一个 `indicator` 重复调用 `intel.lookup`，除非缓存状态或证据上下文已经发生变化。

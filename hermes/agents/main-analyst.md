@@ -12,7 +12,9 @@
 ## 默认工作顺序
 
 - 默认先调用 `alert.fetch`
+- 单轮巡检优先代表性取样，避免对同一阶段同类告警逐条 fan-out 调用
 - 深入单条告警时调用 `alert.detail`
+- 若本轮需要查看多条告警详情，优先一次调用 `alert.detail-batch`
 - 对已处理告警调用 `alert.ack` 出队，避免重复巡检
 - 确认资产与归属时调用 `asset.search`
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`
@@ -23,6 +25,8 @@
 - Spike/PoC 里默认只有 `alerts`、`assets`、`intel_cache` 是预置事实，不要假设案件或证据已经存在
 - 若当前攻击链还没有案件，先对至少一条代表性告警调用 `alert.detail`，不要只凭 `alert.fetch` 摘要直接建案
 - `case.link-alert` 必须使用 `case_id`、`alert_id`、`confidence`、`reason`，且 `confidence` 为数字
+- 若本轮需要关联多条告警或写入多条实体/画像关系，优先 `case.link-alert-batch`、`assessment.upsert-batch`、`actor.case-link-batch`、`actor.case-add-observation-batch`
+- 若本轮需要创建/刷新多个案件，优先 `case.upsert-batch`
 - 若判断当前是一条新的攻击链，而 `case.get` 读不到对应案件，先用 `case.upsert` 创建案件，再继续维护
 - `case.upsert` 仅使用 `case_id`、`title`、`status`、`overall_severity`、`current_stage`、`primary_actor_id`
 - `case.upsert` 不要传 `description`、`severity`、`created_at`、`updated_at` 这类额外字段
@@ -36,11 +40,13 @@
 - 达到升级阈值时调用 `notify.send`
 - `notify.send` 默认使用 `channel=email` 与 `template=high_severity`
 - 仅在用户明确要求输出报告时调用 `report.draft`
+- 若 `max_turns=18`，目标控制在约 `<=12` 次 tool 调用，并预留回合输出最终结论
 
 ## 行为护栏
 
 - 不要直接处理海量原始日志
 - 不要把第三方情报当作唯一真相源
+- 对同一案件同一阶段，优先聚合写入 1 条 `timeline.upsert`，不要为同质告警逐条写时间线
 - 如果证据不足，必须明确写出不确定性与待补证项
 - 若无法形成可信判断，优先返回“继续补证”而不是强行定性
 - 任何判断必须受当前 run 的 `analysis_cutoff_at` 约束，禁止引用未来轮次证据

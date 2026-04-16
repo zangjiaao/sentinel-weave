@@ -18,6 +18,10 @@ class AlertDetailRequest(BaseModel):
     alert_id: str
 
 
+class AlertDetailBatchRequest(BaseModel):
+    alert_ids: list[str] = Field(min_length=1)
+
+
 class AlertAckRequest(BaseModel):
     alert_ids: list[str] = Field(min_length=1)
     status: Literal["triaged", "closed"] = "triaged"

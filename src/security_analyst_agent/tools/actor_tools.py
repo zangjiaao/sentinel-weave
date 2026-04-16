@@ -13,9 +13,11 @@ from security_analyst_agent.repositories.actors import (
 from security_analyst_agent.repositories.cases import load_alert, load_case
 from security_analyst_agent.schemas.actor_tools import (
     ActorCaseAddObservationRequest,
+    ActorCaseAddObservationBatchRequest,
     ActorCaseFindCandidatesRequest,
     ActorCaseGetRequest,
     ActorCaseLinkRequest,
+    ActorCaseLinkBatchRequest,
     ActorCaseListRequest,
     ActorCaseUpsertRequest,
 )
@@ -138,6 +140,42 @@ def actor_case_add_observation(conn: sqlite3.Connection, payload: dict) -> dict:
     return response.model_dump(mode="json", by_alias=True)
 
 
+def actor_case_add_observation_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseAddObservationBatchRequest.model_validate(payload)
+    observations: list[dict] = []
+    failures: list[dict] = []
+    warnings: list[str] = []
+    refs_case_actor_ids: list[str] = []
+
+    for index, item in enumerate(request.items):
+        result = actor_case_add_observation(conn, item.model_dump(mode="python"))
+        if result.get("ok"):
+            observation = result.get("data", {}).get("observation")
+            if isinstance(observation, dict):
+                observations.append(observation)
+            refs_case_actor_ids.extend(result.get("refs", {}).get("case_actor_ids", []))
+            continue
+
+        failures.append(
+            {
+                "index": index,
+                "item": item.model_dump(mode="python"),
+                "summary": result.get("summary", "actor.case-add-observation failed"),
+                "warnings": result.get("warnings", []),
+            }
+        )
+        warnings.extend(result.get("warnings", []))
+
+    response = ToolResponse(
+        ok=len(failures) == 0,
+        summary=f"批量写入案内画像观测：成功 {len(observations)} 条，失败 {len(failures)} 条",
+        data={"observations": observations, "failures": failures},
+        refs={"case_actor_ids": list(dict.fromkeys(refs_case_actor_ids))},
+        warnings=list(dict.fromkeys(warnings)),
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
 def actor_case_link(conn: sqlite3.Connection, payload: dict) -> dict:
     request = ActorCaseLinkRequest.model_validate(payload)
     actor = load_case_actor_profile(conn, request.case_actor_id)
@@ -156,5 +194,47 @@ def actor_case_link(conn: sqlite3.Connection, payload: dict) -> dict:
         summary=f"已关联案内画像 {request.case_actor_id} 到 {request.target_type}:{request.target_id}",
         data={"link": link},
         refs={"case_actor_ids": [request.case_actor_id], f"{request.target_type}_ids": [request.target_id]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def actor_case_link_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = ActorCaseLinkBatchRequest.model_validate(payload)
+    links: list[dict] = []
+    failures: list[dict] = []
+    warnings: list[str] = []
+    refs_case_actor_ids: list[str] = []
+    refs_target_ids: list[str] = []
+
+    for index, item in enumerate(request.items):
+        result = actor_case_link(conn, item.model_dump(mode="python"))
+        if result.get("ok"):
+            link = result.get("data", {}).get("link")
+            if isinstance(link, dict):
+                links.append(link)
+            refs = result.get("refs", {})
+            refs_case_actor_ids.extend(refs.get("case_actor_ids", []))
+            refs_target_ids.append(item.target_id)
+            continue
+
+        failures.append(
+            {
+                "index": index,
+                "item": item.model_dump(mode="python"),
+                "summary": result.get("summary", "actor.case-link failed"),
+                "warnings": result.get("warnings", []),
+            }
+        )
+        warnings.extend(result.get("warnings", []))
+
+    response = ToolResponse(
+        ok=len(failures) == 0,
+        summary=f"批量关联案内画像：成功 {len(links)} 条，失败 {len(failures)} 条",
+        data={"links": links, "failures": failures},
+        refs={
+            "case_actor_ids": list(dict.fromkeys(refs_case_actor_ids)),
+            "target_ids": list(dict.fromkeys(refs_target_ids)),
+        },
+        warnings=list(dict.fromkeys(warnings)),
     )
     return response.model_dump(mode="json", by_alias=True)

@@ -11,6 +11,8 @@
 ## 默认工作顺序
 
 - 默认先调用 `alert.fetch`
+- 单轮巡检优先代表性取样，避免对同一阶段同类告警逐条 fan-out 调用
+- 若本轮需要查看多条告警详情，优先一次调用 `alert.detail-batch`
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`
 - 解释关联依据时调用 `case.explain-link`
 - 需要维护案件时调用 `case.upsert`、`case.link-alert`、`case.update-risk`
@@ -21,16 +23,20 @@
 - 只在证据不足时调用 `intel.lookup`
 - 达到升级阈值时调用 `notify.send`（默认 `channel=email` 与 `template=high_severity`）
 - 仅在用户明确要求输出报告时调用 `report.draft`
+- 若 `max_turns=18`，目标控制在约 `<=12` 次 tool 调用，并预留回合输出最终结论
 
 ## 行为护栏
 
 - 巡检无实质变化时输出 `[SILENT]`
 - 不要直接处理海量原始日志
 - 不要把第三方情报当作唯一真相源
+- 对同一案件同一阶段，优先聚合写入 1 条 `timeline.upsert`，不要为同质告警逐条写时间线
 - 所有时间默认使用 `Asia/Shanghai` 输出，优先展示 `(Asia/Shanghai)`，不要简写 `CST`
 - 避免使用绝对措辞；除非证据非常充分，否则不要直接写 “confirmed”
 - 调用 `assessment.upsert` 时，优先复用 MCP prompt 的示例，并严格使用这些字段：`entity_type`、`entity_key`、`entity_label`、`related_case_id`、`risk_level`、`assessment_confidence`、`verdict`、`reason_summary`、`supporting_alert_ids`、`supporting_evidence_ids`、`first_seen_at`、`last_seen_at`
 - 调用 `case.link-alert` 时，严格使用 `case_id`、`alert_id`、`confidence`、`reason`；`confidence` 必须是数字
+- 若本轮需要关联多条告警或写入多条实体/画像关系，优先 `case.link-alert-batch`、`assessment.upsert-batch`、`actor.case-link-batch`、`actor.case-add-observation-batch`
+- 若本轮需要创建/刷新多个案件，优先 `case.upsert-batch`
 - 若当前攻击链需要新案件而库里还没有对应记录，先调用 `case.upsert` 创建，再继续 `case.link-alert` / `case.update-risk`
 - `case.upsert` 只能使用这些字段：`case_id`、`title`、`status`、`overall_severity`、`current_stage`、`primary_actor_id`
 - `case.upsert` 不要传额外字段，例如 `description`、`severity`、`created_at`、`updated_at`

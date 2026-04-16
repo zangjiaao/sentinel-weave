@@ -2,7 +2,7 @@ import sqlite3
 
 from security_analyst_agent.repositories.assessments import upsert_entity_assessment
 from security_analyst_agent.repositories.audit import load_active_analysis_cutoff, load_active_patrol_run_id
-from security_analyst_agent.schemas.assessment_tools import AssessmentUpsertRequest
+from security_analyst_agent.schemas.assessment_tools import AssessmentUpsertBatchRequest, AssessmentUpsertRequest
 from security_analyst_agent.schemas.common import ToolResponse
 
 
@@ -38,5 +38,50 @@ def assessment_upsert(conn: sqlite3.Connection, payload: dict) -> dict:
             "alert_ids": request.supporting_alert_ids,
             "evidence_ids": request.supporting_evidence_ids,
         },
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def assessment_upsert_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = AssessmentUpsertBatchRequest.model_validate(payload)
+    assessments: list[dict] = []
+    failures: list[dict] = []
+    warnings: list[str] = []
+    refs_case_ids: list[str] = []
+    refs_alert_ids: list[str] = []
+    refs_evidence_ids: list[str] = []
+
+    for index, item in enumerate(request.items):
+        result = assessment_upsert(conn, item.model_dump(mode="python"))
+        if result.get("ok"):
+            assessment = result.get("data", {}).get("assessment")
+            if isinstance(assessment, dict):
+                assessments.append(assessment)
+            refs = result.get("refs", {})
+            refs_case_ids.extend(refs.get("case_ids", []))
+            refs_alert_ids.extend(refs.get("alert_ids", []))
+            refs_evidence_ids.extend(refs.get("evidence_ids", []))
+            continue
+
+        failures.append(
+            {
+                "index": index,
+                "item": item.model_dump(mode="python"),
+                "summary": result.get("summary", "assessment.upsert failed"),
+                "warnings": result.get("warnings", []),
+            }
+        )
+        warnings.extend(result.get("warnings", []))
+
+    response = ToolResponse(
+        ok=len(failures) == 0,
+        summary=f"批量写入实体评估：成功 {len(assessments)} 条，失败 {len(failures)} 条",
+        data={"assessments": assessments, "failures": failures},
+        refs={
+            "case_ids": list(dict.fromkeys(refs_case_ids)),
+            "alert_ids": list(dict.fromkeys(refs_alert_ids)),
+            "evidence_ids": list(dict.fromkeys(refs_evidence_ids)),
+        },
+        warnings=list(dict.fromkeys(warnings)),
     )
     return response.model_dump(mode="json", by_alias=True)

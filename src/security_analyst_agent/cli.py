@@ -103,6 +103,14 @@ def alert_detail_command(
     _run_tool("alert.detail", db_path, payload)
 
 
+@app.command("alert.detail-batch")
+def alert_detail_batch_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("alert.detail-batch", db_path, payload)
+
+
 @app.command("alert.ack")
 def alert_ack_command(
     db_path: Path = typer.Option(..., "--db-path"),
@@ -159,12 +167,28 @@ def actor_case_add_observation_command(
     _run_tool("actor.case-add-observation", db_path, payload)
 
 
+@app.command("actor.case-add-observation-batch")
+def actor_case_add_observation_batch_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-add-observation-batch", db_path, payload)
+
+
 @app.command("actor.case-link")
 def actor_case_link_command(
     db_path: Path = typer.Option(..., "--db-path"),
     payload: str = typer.Option("{}", "--payload"),
 ) -> None:
     _run_tool("actor.case-link", db_path, payload)
+
+
+@app.command("actor.case-link-batch")
+def actor_case_link_batch_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("actor.case-link-batch", db_path, payload)
 
 
 @app.command("case.get")
@@ -199,12 +223,28 @@ def case_upsert_command(
     _run_tool("case.upsert", db_path, payload)
 
 
+@app.command("case.upsert-batch")
+def case_upsert_batch_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("case.upsert-batch", db_path, payload)
+
+
 @app.command("case.link-alert")
 def case_link_alert_command(
     db_path: Path = typer.Option(..., "--db-path"),
     payload: str = typer.Option("{}", "--payload"),
 ) -> None:
     _run_tool("case.link-alert", db_path, payload)
+
+
+@app.command("case.link-alert-batch")
+def case_link_alert_batch_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("case.link-alert-batch", db_path, payload)
 
 
 @app.command("case.update-risk")
@@ -237,6 +277,14 @@ def assessment_upsert_command(
     payload: str = typer.Option("{}", "--payload"),
 ) -> None:
     _run_tool("assessment.upsert", db_path, payload)
+
+
+@app.command("assessment.upsert-batch")
+def assessment_upsert_batch_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("assessment.upsert-batch", db_path, payload)
 
 
 @app.command("intel.lookup")

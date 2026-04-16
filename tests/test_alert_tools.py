@@ -1,6 +1,6 @@
 from security_analyst_agent.schemas.alert_tools import AlertFetchRequest
 from security_analyst_agent.schemas.common import ToolResponse
-from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_fetch
+from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_detail_batch, alert_fetch
 
 
 def test_alert_fetch_request_defaults_limit_to_20() -> None:
@@ -24,6 +24,15 @@ def test_alert_detail_returns_parser_and_evidence_refs(db_conn) -> None:
     result = alert_detail(db_conn, {"alert_id": "alt_day2_webshell_01"})
     assert result["data"]["alert"]["attack_stage"] == "persistence"
     assert "parser_profile_version_id" in result["data"]["alert"]
+
+
+def test_alert_detail_batch_returns_multiple_alerts(db_conn) -> None:
+    result = alert_detail_batch(db_conn, {"alert_ids": ["alt_day2_webshell_01", "alt_day1_scan_01"]})
+
+    assert result["ok"] is True
+    assert len(result["data"]["alerts"]) == 2
+    assert result["data"]["missing_alert_ids"] == []
+    assert all("parser_profile_version_id" in alert for alert in result["data"]["alerts"])
 
 
 def test_alert_ack_updates_status_and_removes_from_queue(db_conn) -> None:
@@ -82,3 +91,12 @@ def test_alert_detail_respects_active_analysis_cutoff(db_conn) -> None:
     evidence_ids = result["refs"]["evidence_ids"]
     assert "evi_webshell_01" not in evidence_ids
     assert "evi_shell_conn_01" not in evidence_ids
+
+
+def test_alert_detail_batch_reports_missing_ids(db_conn) -> None:
+    result = alert_detail_batch(db_conn, {"alert_ids": ["alt_day2_webshell_01", "alt_missing_001"]})
+
+    assert result["ok"] is True
+    assert len(result["data"]["alerts"]) == 1
+    assert result["data"]["missing_alert_ids"] == ["alt_missing_001"]
+    assert "alert_not_found:alt_missing_001" in result["warnings"]

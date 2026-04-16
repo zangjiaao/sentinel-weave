@@ -42,9 +42,17 @@ class ActorCaseAddObservationRequest(BaseModel):
     source_count: int = 1
 
 
+class ActorCaseAddObservationBatchRequest(BaseModel):
+    items: list[ActorCaseAddObservationRequest] = Field(min_length=1)
+
+
 class ActorCaseLinkRequest(BaseModel):
     case_actor_id: str
     target_type: Literal["alert", "evidence", "timeline_event", "artifact", "entity_assessment"]
     target_id: str
     link_confidence: float = Field(ge=0.0, le=1.0)
     link_reason: str
+
+
+class ActorCaseLinkBatchRequest(BaseModel):
+    items: list[ActorCaseLinkRequest] = Field(min_length=1)

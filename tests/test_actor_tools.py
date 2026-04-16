@@ -10,9 +10,11 @@ from security_analyst_agent.repositories.actors import (
 from security_analyst_agent.services.case_actor_scoring import score_case_actor_candidate
 from security_analyst_agent.tools.actor_tools import (
     actor_case_add_observation,
+    actor_case_add_observation_batch,
     actor_case_find_candidates,
     actor_case_get,
     actor_case_link,
+    actor_case_link_batch,
     actor_case_list,
     actor_case_upsert,
 )
@@ -229,3 +231,71 @@ def test_actor_case_find_candidates_returns_scored_actor(db_conn) -> None:
 
     assert result["ok"] is True
     assert result["data"]["candidates"][0]["case_actor_id"] == "cactor_tool_002"
+
+
+def test_actor_case_batch_tools_write_multiple_items(db_conn) -> None:
+    actor_case_upsert(
+        db_conn,
+        {
+            "case_actor_id": "cactor_batch_001",
+            "case_id": "case_demo_001",
+            "label": "batch actor",
+            "status": "active",
+            "profile_confidence": 0.9,
+            "risk_level": "high",
+            "is_primary": True,
+            "current_stage": "command_execution",
+            "first_seen_at": "2026-04-11T14:20:00+08:00",
+            "last_seen_at": "2026-04-11T14:20:00+08:00",
+            "summary": "batch actor profile",
+        },
+    )
+    obs_result = actor_case_add_observation_batch(
+        db_conn,
+        {
+            "items": [
+                {
+                    "case_actor_id": "cactor_batch_001",
+                    "observation_type": "src_ip",
+                    "observation_key": "198.51.100.23",
+                    "observation_value": "198.51.100.23",
+                    "confidence": 0.93,
+                },
+                {
+                    "case_actor_id": "cactor_batch_001",
+                    "observation_type": "asset_id",
+                    "observation_key": "asset_api_prod",
+                    "observation_value": "asset_api_prod",
+                    "confidence": 0.8,
+                },
+            ]
+        },
+    )
+    link_result = actor_case_link_batch(
+        db_conn,
+        {
+            "items": [
+                {
+                    "case_actor_id": "cactor_batch_001",
+                    "target_type": "alert",
+                    "target_id": "alt_day2_webshell_01",
+                    "link_confidence": 0.9,
+                    "link_reason": "batch-link-1",
+                },
+                {
+                    "case_actor_id": "cactor_batch_001",
+                    "target_type": "alert",
+                    "target_id": "alt_day3_shell_01",
+                    "link_confidence": 0.88,
+                    "link_reason": "batch-link-2",
+                },
+            ]
+        },
+    )
+
+    assert obs_result["ok"] is True
+    assert len(obs_result["data"]["observations"]) == 2
+    assert obs_result["data"]["failures"] == []
+    assert link_result["ok"] is True
+    assert len(link_result["data"]["links"]) == 2
+    assert link_result["data"]["failures"] == []

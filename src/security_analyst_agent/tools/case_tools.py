@@ -23,8 +23,10 @@ from security_analyst_agent.repositories.context_memory import build_case_digest
 from security_analyst_agent.schemas.case_tools import (
     CaseExplainLinkRequest,
     CaseGetRequest,
+    CaseLinkAlertBatchRequest,
     CaseLinkAlertRequest,
     CaseTimelineRequest,
+    CaseUpsertBatchRequest,
     CaseUpdateRiskRequest,
     CaseUpsertRequest,
 )
@@ -202,6 +204,42 @@ def case_upsert(conn: sqlite3.Connection, payload: dict) -> dict:
     return response.model_dump(mode="json", by_alias=True)
 
 
+def case_upsert_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = CaseUpsertBatchRequest.model_validate(payload)
+    cases: list[dict] = []
+    failures: list[dict] = []
+    warnings: list[str] = []
+    refs_case_ids: list[str] = []
+
+    for index, item in enumerate(request.items):
+        result = case_upsert(conn, item.model_dump(mode="python"))
+        if result.get("ok"):
+            case = result.get("data", {}).get("case")
+            if isinstance(case, dict):
+                cases.append(case)
+            refs_case_ids.extend(result.get("refs", {}).get("case_ids", []))
+            continue
+
+        failures.append(
+            {
+                "index": index,
+                "item": item.model_dump(mode="python"),
+                "summary": result.get("summary", "case.upsert failed"),
+                "warnings": result.get("warnings", []),
+            }
+        )
+        warnings.extend(result.get("warnings", []))
+
+    response = ToolResponse(
+        ok=len(failures) == 0,
+        summary=f"批量写入案件：成功 {len(cases)} 条，失败 {len(failures)} 条",
+        data={"cases": cases, "failures": failures},
+        refs={"case_ids": list(dict.fromkeys(refs_case_ids))},
+        warnings=list(dict.fromkeys(warnings)),
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
 def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
     request = CaseLinkAlertRequest.model_validate(payload)
     case = load_case(conn, request.case_id)
@@ -275,6 +313,51 @@ def case_link_alert(conn: sqlite3.Connection, payload: dict) -> dict:
             "alert_ids": [request.alert_id],
             "timeline_event_ids": [timeline_event_id],
         },
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def case_link_alert_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = CaseLinkAlertBatchRequest.model_validate(payload)
+    links: list[dict] = []
+    failures: list[dict] = []
+    warnings: list[str] = []
+    refs_case_ids: list[str] = []
+    refs_alert_ids: list[str] = []
+    refs_timeline_event_ids: list[str] = []
+
+    for index, item in enumerate(request.items):
+        result = case_link_alert(conn, item.model_dump(mode="python"))
+        if result.get("ok"):
+            link = result.get("data", {}).get("link")
+            if isinstance(link, dict):
+                links.append(link)
+            refs = result.get("refs", {})
+            refs_case_ids.extend(refs.get("case_ids", []))
+            refs_alert_ids.extend(refs.get("alert_ids", []))
+            refs_timeline_event_ids.extend(refs.get("timeline_event_ids", []))
+            continue
+
+        failures.append(
+            {
+                "index": index,
+                "item": item.model_dump(mode="python"),
+                "summary": result.get("summary", "case.link-alert failed"),
+                "warnings": result.get("warnings", []),
+            }
+        )
+        warnings.extend(result.get("warnings", []))
+
+    response = ToolResponse(
+        ok=len(failures) == 0,
+        summary=f"批量关联告警：成功 {len(links)} 条，失败 {len(failures)} 条",
+        data={"links": links, "failures": failures},
+        refs={
+            "case_ids": list(dict.fromkeys(refs_case_ids)),
+            "alert_ids": list(dict.fromkeys(refs_alert_ids)),
+            "timeline_event_ids": list(dict.fromkeys(refs_timeline_event_ids)),
+        },
+        warnings=list(dict.fromkeys(warnings)),
     )
     return response.model_dump(mode="json", by_alias=True)
 

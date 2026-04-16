@@ -8,7 +8,12 @@ from security_analyst_agent.repositories.alerts import (
     get_case_evidence_summaries,
 )
 from security_analyst_agent.repositories.audit import insert_alert_decision_log, load_active_analysis_cutoff
-from security_analyst_agent.schemas.alert_tools import AlertAckRequest, AlertDetailRequest, AlertFetchRequest
+from security_analyst_agent.schemas.alert_tools import (
+    AlertAckRequest,
+    AlertDetailBatchRequest,
+    AlertDetailRequest,
+    AlertFetchRequest,
+)
 from security_analyst_agent.schemas.common import ToolResponse
 
 
@@ -31,18 +36,14 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     return response.model_dump(mode="json", by_alias=True)
 
 
-def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
-    request = AlertDetailRequest.model_validate(payload)
-    analysis_cutoff_at = load_active_analysis_cutoff(conn)
-    alert = get_alert_by_id(conn, request.alert_id, analysis_cutoff_at=analysis_cutoff_at)
+def _load_alert_detail(
+    conn: sqlite3.Connection,
+    alert_id: str,
+    analysis_cutoff_at: str | None,
+) -> tuple[dict | None, list[dict]]:
+    alert = get_alert_by_id(conn, alert_id, analysis_cutoff_at=analysis_cutoff_at)
     if alert is None:
-        response = ToolResponse(
-            ok=False,
-            summary=f"未找到告警 {request.alert_id}",
-            data={"alert": None},
-            warnings=[f"alert_not_found:{request.alert_id}"],
-        )
-        return response.model_dump(mode="json", by_alias=True)
+        return None, []
 
     evidence_rows = get_alert_evidence_summaries(
         conn,
@@ -58,6 +59,22 @@ def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
         )
     alert["parser_profile_version_id"] = "waf_nginx_v1"
     alert["evidence_summary"] = "；".join(item["summary"] for item in evidence_rows) if evidence_rows else "暂无证据摘要"
+    return alert, evidence_rows
+
+
+def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = AlertDetailRequest.model_validate(payload)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    alert, evidence_rows = _load_alert_detail(conn, request.alert_id, analysis_cutoff_at=analysis_cutoff_at)
+    if alert is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到告警 {request.alert_id}",
+            data={"alert": None},
+            warnings=[f"alert_not_found:{request.alert_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+
     response = ToolResponse(
         ok=True,
         summary=f"读取告警 {alert['alert_id']}",
@@ -66,6 +83,40 @@ def alert_detail(conn: sqlite3.Connection, payload: dict) -> dict:
             "alert_ids": [alert["alert_id"]],
             "evidence_ids": [item["evidence_id"] for item in evidence_rows],
         },
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def alert_detail_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = AlertDetailBatchRequest.model_validate(payload)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    alert_ids = list(dict.fromkeys(request.alert_ids))
+
+    alerts: list[dict] = []
+    missing_alert_ids: list[str] = []
+    evidence_ids: list[str] = []
+
+    for alert_id in alert_ids:
+        alert, evidence_rows = _load_alert_detail(conn, alert_id, analysis_cutoff_at=analysis_cutoff_at)
+        if alert is None:
+            missing_alert_ids.append(alert_id)
+            continue
+        alerts.append(alert)
+        evidence_ids.extend(item["evidence_id"] for item in evidence_rows)
+
+    warnings = [f"alert_not_found:{alert_id}" for alert_id in missing_alert_ids]
+    response = ToolResponse(
+        ok=len(alerts) > 0,
+        summary=f"批量读取告警详情：成功 {len(alerts)} 条，缺失 {len(missing_alert_ids)} 条",
+        data={
+            "alerts": alerts,
+            "missing_alert_ids": missing_alert_ids,
+        },
+        refs={
+            "alert_ids": [item["alert_id"] for item in alerts],
+            "evidence_ids": list(dict.fromkeys(evidence_ids)),
+        },
+        warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)
 
