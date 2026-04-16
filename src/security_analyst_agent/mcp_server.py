@@ -260,10 +260,30 @@ def invoke_tool(tool_name: str, payload: dict[str, Any] | None, db_path: Path | 
 def get_tool_callable(tool_name: str, db_path: Path | None = None) -> Callable[..., dict[str, Any]]:
     request_model = TOOL_REQUEST_MODELS.get(tool_name)
 
-    def _tool(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        body = payload
-        if isinstance(payload, BaseModel):
-            body = payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+    def _normalize_payload(raw_payload: Any) -> dict[str, Any]:
+        if isinstance(raw_payload, BaseModel):
+            return raw_payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if isinstance(raw_payload, str):
+            try:
+                decoded = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                return {}
+            return _normalize_payload(decoded)
+        if isinstance(raw_payload, dict):
+            if set(raw_payload.keys()) == {"kwargs"}:
+                return _normalize_payload(raw_payload.get("kwargs"))
+            if set(raw_payload.keys()) == {"payload"}:
+                return _normalize_payload(raw_payload.get("payload"))
+            return raw_payload
+        return {}
+
+    def _tool(payload: dict[str, Any] | BaseModel | str | None = None, **kwargs: Any) -> dict[str, Any]:
+        body = _normalize_payload(payload)
+        if not body and kwargs:
+            if set(kwargs.keys()) == {"payload"}:
+                body = _normalize_payload(kwargs.get("payload"))
+            else:
+                body = _normalize_payload(kwargs)
         return invoke_tool(tool_name, body, db_path=db_path)
 
     safe_name = tool_name.replace(".", "_").replace("-", "_")
@@ -278,7 +298,12 @@ def get_tool_callable(tool_name: str, db_path: Path | None = None) -> Callable[.
                     kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
                     default=None,
                     annotation=request_model | None,
-                )
+                ),
+                inspect.Parameter(
+                    "kwargs",
+                    kind=inspect.Parameter.VAR_KEYWORD,
+                    annotation=Any,
+                ),
             ],
             return_annotation=dict[str, Any],
         )

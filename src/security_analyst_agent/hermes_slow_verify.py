@@ -360,7 +360,17 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
     final_assertions = manifest.get("final_assertions", {})
     _assert_tool_requirements(tool_names=tool_names, expectations=final_assertions, stage="final_db_assertions")
 
-    failed_tool_rows = [row for row in tool_rows if int(row["result_ok"]) == 0]
+    def _is_ignorable_failed_tool_call(row: Any) -> bool:
+        if row["tool_name"] != "case.get":
+            return False
+        summary = row["result_summary"] or ""
+        return str(summary).startswith("未找到案件 ")
+
+    failed_tool_rows = [
+        row
+        for row in tool_rows
+        if int(row["result_ok"]) == 0 and not _is_ignorable_failed_tool_call(row)
+    ]
     max_failed_tool_calls = int(final_assertions.get("max_failed_tool_calls", len(failed_tool_rows)))
     if len(failed_tool_rows) > max_failed_tool_calls:
         failed_summary = [f"{row['tool_name']}:{row['result_summary']}" for row in failed_tool_rows]

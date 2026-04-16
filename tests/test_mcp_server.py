@@ -59,6 +59,25 @@ def test_mcp_tools_return_dict(tmp_path) -> None:
     assert body["data"]["case"]["case_id"] == "case_demo_001"
 
 
+def test_mcp_tool_callable_accepts_direct_kwargs_without_payload(tmp_path) -> None:
+    from security_analyst_agent.mcp_server import get_tool_callable
+
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+
+    tool = get_tool_callable("evidence.upsert", db_path=db_path)
+    body = tool(
+        evidence_id="evd_direct_kwargs_001",
+        case_id="case_demo_001",
+        evidence_type="note",
+        summary="direct kwargs fallback",
+    )
+
+    assert body["ok"] is True
+    assert body["data"]["evidence"]["evidence_id"] == "evd_direct_kwargs_001"
+
+
 def test_mcp_server_exposes_guidance_prompts() -> None:
     from security_analyst_agent.mcp_server import create_mcp_server
 
