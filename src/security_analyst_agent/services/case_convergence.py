@@ -40,6 +40,54 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_id: str) -> str | None:
+    allowed_severities = tuple(sorted(_ALLOWED_ALERT_SEVERITIES_FOR_RELATION))
+    placeholders = ", ".join("?" for _ in allowed_severities)
+    stage_rank_sql = """
+    case lower(alerts.attack_stage)
+      when 'recon' then 1
+      when 'exploit' then 2
+      when 'persistence' then 3
+      when 'command_execution' then 4
+      when 'lateral_prep' then 5
+      else 0
+    end
+    """
+    row = conn.execute(
+        f"""
+        select alerts.attack_stage
+        from case_alert_links
+        join alerts on alerts.alert_id = case_alert_links.alert_id
+        where case_alert_links.case_id = ?
+          and case_alert_links.is_active = 1
+          and case_alert_links.confidence >= ?
+          and lower(alerts.severity) in ({placeholders})
+        order by alerts.occurred_at desc, {stage_rank_sql} desc, case_alert_links.linked_at desc, case_alert_links.rowid desc
+        limit 1
+        """,
+        (case_id, _MIN_LINK_CONFIDENCE_FOR_RELATION, *allowed_severities),
+    ).fetchone()
+    if row is not None and row["attack_stage"]:
+        return str(row["attack_stage"])
+
+    fallback_row = conn.execute(
+        f"""
+        select alerts.attack_stage
+        from case_alert_links
+        join alerts on alerts.alert_id = case_alert_links.alert_id
+        where case_alert_links.case_id = ?
+          and case_alert_links.is_active = 1
+          and lower(alerts.severity) in ({placeholders})
+        order by alerts.occurred_at desc, {stage_rank_sql} desc, case_alert_links.linked_at desc, case_alert_links.rowid desc
+        limit 1
+        """,
+        (case_id, *allowed_severities),
+    ).fetchone()
+    if fallback_row is not None and fallback_row["attack_stage"]:
+        return str(fallback_row["attack_stage"])
+    return None
+
+
 def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -395,6 +443,15 @@ def _normalize_cluster_case_links_and_artifacts(
         (canonical_case_id, *tuple(child_case_ids)),
     ).rowcount
 
+    actor_migrated_count = conn.execute(
+        f"""
+        update case_actor_profiles
+        set case_id = ?, is_primary = 0, updated_at = ?
+        where case_id in ({placeholders})
+        """,
+        (canonical_case_id, now, *tuple(child_case_ids)),
+    ).rowcount
+
     conn.execute(
         """
         delete from case_digests
@@ -414,6 +471,7 @@ def _normalize_cluster_case_links_and_artifacts(
         "evidence_migrated_count": int(evidence_migrated_count or 0),
         "timeline_migrated_count": int(timeline_migrated_count or 0),
         "filtered_low_signal_links_count": filtered_low_signal_links_count,
+        "actor_migrated_count": int(actor_migrated_count or 0),
     }
 
 
@@ -681,15 +739,21 @@ def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
         if str(canonical_row.get("merge_state") or "").lower() == "merged":
             continue
 
-        target_stage = canonical_row["current_stage"]
-        target_stage_rank = _STAGE_ORDER.get(str(target_stage or "").lower(), 0)
+        observed_stage = _select_latest_high_signal_stage_for_case(conn, case_id=canonical_case_id)
+        observed_stage_rank = _STAGE_ORDER.get(str(observed_stage or "").lower(), 0)
+        if observed_stage and observed_stage_rank > 0:
+            target_stage = observed_stage
+            target_stage_rank = observed_stage_rank
+        else:
+            target_stage = canonical_row["current_stage"]
+            target_stage_rank = _STAGE_ORDER.get(str(target_stage or "").lower(), 0)
         target_severity = canonical_row["overall_severity"]
         target_severity_rank = _SEVERITY_ORDER.get(str(target_severity or "").lower(), 0)
         has_active_member = False
         for member in members:
             member_stage = member["current_stage"]
             member_stage_rank = _STAGE_ORDER.get(str(member_stage or "").lower(), 0)
-            if member_stage_rank > target_stage_rank:
+            if observed_stage is None and member_stage_rank > target_stage_rank:
                 target_stage = member_stage
                 target_stage_rank = member_stage_rank
             member_severity = member["overall_severity"]
@@ -719,6 +783,70 @@ def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
             (target_stage, target_severity, status_target, canonical_case_id),
         )
         updates += 1
+    return updates
+
+
+def _rollup_canonical_primary_actor_state(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        """
+        select case_id, primary_actor_id
+        from cases
+        where coalesce(merge_state, 'standalone') <> 'merged'
+        """
+    ).fetchall()
+    if not rows:
+        return 0
+
+    updates = 0
+    now = _now_iso()
+    for row in rows:
+        case_id = row["case_id"]
+        actor_rows = conn.execute(
+            """
+            select case_actor_id, status, profile_confidence, is_primary, current_stage, updated_at
+            from case_actor_profiles
+            where case_id = ?
+            """,
+            (case_id,),
+        ).fetchall()
+        if not actor_rows:
+            continue
+
+        def _actor_score(item: sqlite3.Row) -> tuple[int, float, int, int, str, str]:
+            status = str(item["status"] or "").lower()
+            status_rank = 2 if status == "active" else (1 if status in {"suspected", "watch"} else 0)
+            return (
+                status_rank,
+                float(item["profile_confidence"] or 0.0),
+                _STAGE_ORDER.get(str(item["current_stage"] or "").lower(), 0),
+                int(item["is_primary"] or 0),
+                str(item["updated_at"] or ""),
+                str(item["case_actor_id"] or ""),
+            )
+
+        winner = max(actor_rows, key=_actor_score)["case_actor_id"]
+        current_primary_ids = {item["case_actor_id"] for item in actor_rows if int(item["is_primary"] or 0) == 1}
+        if current_primary_ids != {winner}:
+            conn.execute(
+                """
+                update case_actor_profiles
+                set is_primary = case when case_actor_id = ? then 1 else 0 end,
+                    updated_at = ?
+                where case_id = ?
+                """,
+                (winner, now, case_id),
+            )
+            updates += 1
+        if row["primary_actor_id"] != winner:
+            conn.execute(
+                """
+                update cases
+                set primary_actor_id = ?
+                where case_id = ?
+                """,
+                (winner, case_id),
+            )
+            updates += 1
     return updates
 
 
@@ -772,6 +900,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         clustered_case_ids=clustered_case_ids,
     )
     rolled_up_cases_count = _rollup_canonical_case_state(conn)
+    rolled_up_case_actors_count = _rollup_canonical_primary_actor_state(conn)
     confirmed_relations_after = list_confirmed_case_relations(conn)
 
     return {
@@ -783,4 +912,5 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "merge_events_count": len(merge_events),
         "detached_cases_count": len(detached_case_ids),
         "rolled_up_cases_count": rolled_up_cases_count,
+        "rolled_up_case_actors_count": rolled_up_case_actors_count,
     }

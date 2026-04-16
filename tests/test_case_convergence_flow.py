@@ -1,5 +1,6 @@
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 from security_analyst_agent.db import connect_db
+from security_analyst_agent.services.case_convergence import run_case_convergence_for_run
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
 
@@ -637,6 +638,152 @@ def test_case_convergence_rolls_up_canonical_stage_and_severity(tmp_path) -> Non
     assert canonical_case["current_stage"] == "command_execution"
     assert canonical_case["overall_severity"] == "critical"
     assert canonical_case["status"] == "open"
+    conn.close()
+
+
+def test_case_convergence_rolls_up_case_actor_and_primary_actor_to_canonical(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_actor_rollup_anchor",
+            "title": "actor rollup anchor",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "lateral_prep",
+            "primary_actor_id": "legacy_anchor_actor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_actor_rollup_child",
+            "title": "actor rollup child",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "legacy_child_actor",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_actor_rollup_anchor",
+            "case_actor_rollup_anchor",
+            "2026-04-11T14:20:00+08:00",
+            "webshell",
+            "anchor evidence",
+        ),
+    )
+
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_rollup_anchor_lateral",
+        case_id="case_actor_rollup_anchor",
+        occurred_at="2026-04-12T11:20:00+08:00",
+        stage="lateral_prep",
+        src_ip="198.51.100.77",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_rollup_child_reactivation",
+        case_id="case_actor_rollup_child",
+        occurred_at="2026-04-14T08:30:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+
+    dispatch_tool(
+        conn,
+        "actor.case-upsert",
+        {
+            "case_actor_id": "actor_rollup_anchor",
+            "case_id": "case_actor_rollup_anchor",
+            "label": "198.51.100.77",
+            "status": "active",
+            "profile_confidence": 0.7,
+            "risk_level": "high",
+            "is_primary": True,
+            "current_stage": "lateral_prep",
+            "summary": "anchor actor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "actor.case-upsert",
+        {
+            "case_actor_id": "actor_rollup_child",
+            "case_id": "case_actor_rollup_child",
+            "label": "198.51.100.91",
+            "status": "active",
+            "profile_confidence": 0.85,
+            "risk_level": "high",
+            "is_primary": True,
+            "current_stage": "command_execution",
+            "summary": "child actor",
+        },
+        source="cli",
+    )
+    conn.commit()
+
+    run_case_convergence_for_run(conn, run_id="run_actor_rollup_1")
+    run_case_convergence_for_run(conn, run_id="run_actor_rollup_2")
+    run_case_convergence_for_run(conn, run_id="run_actor_rollup_3")
+
+    canonical_case = conn.execute(
+        """
+        select case_id, current_stage, primary_actor_id
+        from cases
+        where case_id = 'case_actor_rollup_anchor'
+        """
+    ).fetchone()
+    assert canonical_case is not None
+    assert canonical_case["current_stage"] == "command_execution"
+    assert canonical_case["primary_actor_id"] == "actor_rollup_child"
+
+    child_case = conn.execute(
+        """
+        select merge_state, merged_into_case_id, status
+        from cases
+        where case_id = 'case_actor_rollup_child'
+        """
+    ).fetchone()
+    assert child_case is not None
+    assert child_case["merge_state"] == "merged"
+    assert child_case["merged_into_case_id"] == "case_actor_rollup_anchor"
+    assert child_case["status"] == "closed"
+
+    actor_rows = conn.execute(
+        """
+        select case_actor_id, case_id, is_primary
+        from case_actor_profiles
+        where case_actor_id in ('actor_rollup_anchor', 'actor_rollup_child')
+        order by case_actor_id asc
+        """
+    ).fetchall()
+    assert len(actor_rows) == 2
+    assert {row["case_id"] for row in actor_rows} == {"case_actor_rollup_anchor"}
+    primary_actor_ids = [row["case_actor_id"] for row in actor_rows if row["is_primary"] == 1]
+    assert primary_actor_ids == ["actor_rollup_child"]
     conn.close()
 
 
