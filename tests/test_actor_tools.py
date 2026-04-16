@@ -260,6 +260,33 @@ def test_actor_case_find_candidates_infers_case_from_alert_when_case_id_empty(db
     assert result["refs"]["case_ids"] == ["case_demo_001"]
 
 
+def test_actor_case_find_candidates_infers_case_when_case_id_missing(db_conn) -> None:
+    actor_case_upsert(
+        db_conn,
+        {
+            "case_actor_id": "cactor_tool_002_missing_case",
+            "case_id": "case_demo_001",
+            "label": "candidate actor fallback missing case id",
+            "status": "active",
+            "profile_confidence": 0.9,
+            "risk_level": "high",
+            "is_primary": True,
+            "current_stage": "persistence",
+            "first_seen_at": "2026-04-11T14:20:00+08:00",
+            "last_seen_at": "2026-04-11T14:20:00+08:00",
+            "summary": "candidate actor fallback missing case id",
+        },
+    )
+    result = actor_case_find_candidates(
+        db_conn,
+        {"alert_id": "alt_day3_shell_01", "limit": 3},
+    )
+
+    assert result["ok"] is True
+    assert "case_id_inferred_from_alert" in result["warnings"]
+    assert result["refs"]["case_ids"] == ["case_demo_001"]
+
+
 def test_actor_case_batch_tools_write_multiple_items(db_conn) -> None:
     actor_case_upsert(
         db_conn,

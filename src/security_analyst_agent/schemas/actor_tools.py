@@ -12,7 +12,7 @@ class ActorCaseGetRequest(BaseModel):
 
 
 class ActorCaseFindCandidatesRequest(BaseModel):
-    case_id: str
+    case_id: str | None = ""
     alert_id: str
     limit: int = 5
 

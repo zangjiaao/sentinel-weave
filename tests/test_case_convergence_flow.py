@@ -824,3 +824,243 @@ def test_case_convergence_can_reattach_case_after_stronger_new_relation(tmp_path
     assert case_a["merge_state"] == "standalone"
     assert case_a["status"] == "open"
     conn.close()
+
+
+def test_case_convergence_filters_low_signal_noise_when_retargeting_to_canonical(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_clean_anchor",
+            "title": "clean anchor",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_clean_anchor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_clean_child",
+            "title": "clean child",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_clean_child",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_clean_anchor",
+            "case_clean_anchor",
+            "2026-04-12T09:50:00+08:00",
+            "webshell",
+            "anchor evidence for canonical reselect",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_clean_anchor_high",
+        case_id="case_clean_anchor",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_clean_child_high",
+        case_id="case_clean_child",
+        occurred_at="2026-04-12T10:10:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_clean_child_noise",
+        case_id="case_clean_child",
+        occurred_at="2026-04-12T10:11:00+08:00",
+        stage="recon",
+        src_ip="192.0.2.56",
+        severity="low",
+        confidence=0.5,
+        asset_id="asset_admin_portal",
+        dst_ip="203.0.113.11",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    open_alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    canonical_case_id = conn.execute(
+        """
+        select canonical_case_id
+        from cases
+        where case_id = ?
+        """,
+        ("case_clean_anchor",),
+    ).fetchone()["canonical_case_id"]
+    active_high_links = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ?
+          and alert_id in ('alt_clean_anchor_high', 'alt_clean_child_high')
+          and is_active = 1
+        """,
+        (canonical_case_id,),
+    ).fetchone()[0]
+    active_noise_links = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where alert_id = 'alt_clean_child_noise'
+          and is_active = 1
+        """
+    ).fetchone()[0]
+    assert active_high_links == 2
+    assert active_noise_links == 0
+    conn.close()
+
+
+def test_case_convergence_absorbs_recon_case_into_followup_attack_chain(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_absorb_recon",
+            "title": "absorb recon",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_absorb_recon",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_absorb_attack",
+            "title": "absorb attack",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_absorb_attack",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_absorb_anchor",
+            "case_absorb_attack",
+            "2026-04-11T14:20:00+08:00",
+            "webshell",
+            "attack chain anchor",
+        ),
+    )
+    conn.commit()
+
+    for round_idx in range(1, 4):
+        base_ts = f"2026-04-1{round_idx}T10:0{round_idx}:00+08:00"
+        _insert_open_alert_for_case(
+            conn,
+            alert_id=f"alt_absorb_recon_api_r{round_idx}",
+            case_id="case_absorb_recon",
+            occurred_at=base_ts,
+            stage="recon",
+            src_ip="198.51.100.23",
+            severity="medium",
+            confidence=0.9,
+            asset_id="asset_api_prod",
+            dst_ip="203.0.113.10",
+        )
+        _insert_open_alert_for_case(
+            conn,
+            alert_id=f"alt_absorb_recon_admin_r{round_idx}",
+            case_id="case_absorb_recon",
+            occurred_at=base_ts,
+            stage="recon",
+            src_ip="198.51.100.23",
+            severity="medium",
+            confidence=0.9,
+            asset_id="asset_admin_portal",
+            dst_ip="203.0.113.11",
+        )
+        _insert_open_alert_for_case(
+            conn,
+            alert_id=f"alt_absorb_attack_r{round_idx}",
+            case_id="case_absorb_attack",
+            occurred_at=base_ts,
+            stage="persistence",
+            src_ip="198.51.100.23",
+            severity="high",
+            confidence=0.9,
+            asset_id="asset_api_prod",
+            dst_ip="203.0.113.10",
+        )
+        conn.commit()
+
+        dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+        open_alert_ids = [
+            row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")
+        ]
+        dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    relation = conn.execute(
+        """
+        select status, streak_count, score
+        from case_relations
+        where left_case_id = ? and right_case_id = ?
+        """,
+        ("case_absorb_attack", "case_absorb_recon"),
+    ).fetchone()
+    assert relation is not None
+    assert relation["status"] == "confirmed"
+    assert relation["streak_count"] >= 3
+    assert relation["score"] >= 0.78
+
+    recon_case = conn.execute(
+        """
+        select merge_state, canonical_case_id, merged_into_case_id, status
+        from cases
+        where case_id = ?
+        """,
+        ("case_absorb_recon",),
+    ).fetchone()
+    assert recon_case is not None
+    assert recon_case["merge_state"] == "merged"
+    assert recon_case["canonical_case_id"] == "case_absorb_attack"
+    assert recon_case["merged_into_case_id"] == "case_absorb_attack"
+    assert recon_case["status"] == "closed"
+    conn.close()

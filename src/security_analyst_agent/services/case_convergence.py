@@ -308,16 +308,46 @@ def _normalize_cluster_case_links_and_artifacts(
     placeholders = ", ".join("?" for _ in child_case_ids)
     link_rows = conn.execute(
         f"""
-        select case_id, alert_id, linked_at, confidence, reason
+        select
+          case_alert_links.case_id,
+          case_alert_links.alert_id,
+          case_alert_links.linked_at,
+          case_alert_links.confidence,
+          case_alert_links.reason,
+          alerts.severity as alert_severity,
+          alerts.attack_stage as alert_stage
         from case_alert_links
+        join alerts on alerts.alert_id = case_alert_links.alert_id
         where is_active = 1
           and case_id in ({placeholders})
-        order by linked_at asc, rowid asc
+        order by linked_at asc, case_alert_links.rowid asc
         """,
         tuple(child_case_ids),
     ).fetchall()
+    clustered_case_ids = set(case_ids)
+    in_scope_placeholders = ", ".join("?" for _ in clustered_case_ids)
+    in_scope_case_ids = tuple(sorted(clustered_case_ids))
+    retargeted_links_count = 0
+    filtered_low_signal_links_count = 0
 
     for row in link_rows:
+        if (
+            float(row["confidence"]) < _MIN_LINK_CONFIDENCE_FOR_RELATION
+            and str(row["alert_severity"] or "").lower() == "low"
+            and str(row["alert_stage"] or "").lower() in {"recon", "reconnaissance"}
+        ):
+            conn.execute(
+                f"""
+                update case_alert_links
+                set is_active = 0, unlinked_at = ?
+                where alert_id = ?
+                  and is_active = 1
+                  and case_id in ({in_scope_placeholders})
+                """,
+                (now, row["alert_id"], *in_scope_case_ids),
+            )
+            filtered_low_signal_links_count += 1
+            continue
         conn.execute(
             """
             update case_alert_links
@@ -346,6 +376,7 @@ def _normalize_cluster_case_links_and_artifacts(
                 f"{row['reason']}; auto_retarget_to_canonical",
             ),
         )
+        retargeted_links_count += 1
 
     evidence_migrated_count = conn.execute(
         f"""
@@ -379,9 +410,10 @@ def _normalize_cluster_case_links_and_artifacts(
         tuple(child_case_ids),
     )
     return {
-        "retargeted_links_count": len(link_rows),
+        "retargeted_links_count": retargeted_links_count,
         "evidence_migrated_count": int(evidence_migrated_count or 0),
         "timeline_migrated_count": int(timeline_migrated_count or 0),
+        "filtered_low_signal_links_count": filtered_low_signal_links_count,
     }
 
 

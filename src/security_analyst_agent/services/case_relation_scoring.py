@@ -6,11 +6,19 @@ from typing import Any
 
 _STAGE_ORDER = {
     "recon": 1,
+    "reconnaissance": 1,
     "exploit": 2,
     "persistence": 3,
     "command_execution": 4,
     "lateral_prep": 5,
 }
+_SEVERITY_ORDER = {
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+_RECON_TO_ATTACK_BRIDGE_BONUS_WEIGHT = 0.24
 
 
 @dataclass
@@ -32,8 +40,8 @@ def _normalize_set(value: Any) -> set[str]:
 
 
 def _stage_continuity_score(left_stage: str | None, right_stage: str | None) -> float:
-    left_rank = _STAGE_ORDER.get(left_stage or "")
-    right_rank = _STAGE_ORDER.get(right_stage or "")
+    left_rank = _STAGE_ORDER.get(str(left_stage or "").lower())
+    right_rank = _STAGE_ORDER.get(str(right_stage or "").lower())
     if left_rank is None or right_rank is None:
         return 0.5
     distance = abs(left_rank - right_rank)
@@ -68,6 +76,35 @@ def _temporal_continuity_score(left: dict[str, Any], right: dict[str, Any]) -> f
     return 0.25
 
 
+def _recon_to_attack_bridge_score(
+    *,
+    left: dict[str, Any],
+    right: dict[str, Any],
+    shared_assets: set[str],
+    shared_src_ips: set[str],
+    temporal_score: float,
+) -> float:
+    if not shared_assets or not shared_src_ips:
+        return 0.0
+    if temporal_score < 0.8:
+        return 0.0
+
+    left_stage = str(left.get("current_stage") or "").lower()
+    right_stage = str(right.get("current_stage") or "").lower()
+    left_rank = _STAGE_ORDER.get(left_stage, 0)
+    right_rank = _STAGE_ORDER.get(right_stage, 0)
+    if min(left_rank, right_rank) != _STAGE_ORDER["recon"]:
+        return 0.0
+    if max(left_rank, right_rank) < _STAGE_ORDER["persistence"]:
+        return 0.0
+
+    left_severity = _SEVERITY_ORDER.get(str(left.get("overall_severity") or "").lower(), 0)
+    right_severity = _SEVERITY_ORDER.get(str(right.get("overall_severity") or "").lower(), 0)
+    if max(left_severity, right_severity) < _SEVERITY_ORDER["high"]:
+        return 0.0
+    return 1.0
+
+
 def score_case_relation(left: dict[str, Any], right: dict[str, Any]) -> CaseRelationScore:
     left_assets = _normalize_set(left.get("asset_ids"))
     right_assets = _normalize_set(right.get("asset_ids"))
@@ -83,6 +120,13 @@ def score_case_relation(left: dict[str, Any], right: dict[str, Any]) -> CaseRela
 
     stage_score = _stage_continuity_score(left.get("current_stage"), right.get("current_stage"))
     temporal_score = _temporal_continuity_score(left, right)
+    recon_bridge_score = _recon_to_attack_bridge_score(
+        left=left,
+        right=right,
+        shared_assets=asset_overlap,
+        shared_src_ips=ip_overlap,
+        temporal_score=temporal_score,
+    )
 
     weights = {
         "asset_overlap": 0.42,
@@ -115,6 +159,12 @@ def score_case_relation(left: dict[str, Any], right: dict[str, Any]) -> CaseRela
             "weight": weights["temporal_continuity"],
             "score": round(temporal_score, 4),
             "summary": "event recency continuity",
+        },
+        {
+            "factor_type": "recon_to_attack_bridge",
+            "weight": _RECON_TO_ATTACK_BRIDGE_BONUS_WEIGHT,
+            "score": round(recon_bridge_score, 4),
+            "summary": "recon continuation into high-signal attack chain",
         },
     ]
 

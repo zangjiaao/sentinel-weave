@@ -61,7 +61,8 @@ def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
     request = ActorCaseFindCandidatesRequest.model_validate(payload)
     warnings: list[str] = []
     alert = load_alert(conn, request.alert_id)
-    effective_case_id = request.case_id.strip()
+    raw_case_id = str(request.case_id or "")
+    effective_case_id = raw_case_id.strip()
     if not effective_case_id and alert is not None and alert.get("case_id"):
         effective_case_id = resolve_canonical_case_id(conn, alert["case_id"])
         warnings.append("case_id_inferred_from_alert")
@@ -70,11 +71,12 @@ def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
 
     case = load_case(conn, effective_case_id) if effective_case_id else None
     if case is None:
+        case_id_for_warning = request.case_id or effective_case_id or ""
         response = ToolResponse(
             ok=False,
-            summary=f"未找到案件 {request.case_id or effective_case_id}",
+            summary=f"未找到案件 {case_id_for_warning}",
             data={"candidates": []},
-            warnings=[f"case_not_found:{request.case_id}"],
+            warnings=[f"case_not_found:{case_id_for_warning}"],
         )
         return response.model_dump(mode="json", by_alias=True)
     if alert is None:
