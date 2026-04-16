@@ -130,15 +130,6 @@ def alert_ack(conn: sqlite3.Connection, payload: dict) -> dict:
     if ack["missing_count"] > 0:
         warnings.append("alert_not_found")
 
-    for alert_id in ack["updated_alert_ids"]:
-        insert_alert_decision_log(
-            conn,
-            alert_id=alert_id,
-            decision=f"ack_{request.status}",
-            case_id=None,
-            confidence=None,
-            reason="tool:alert.ack",
-        )
     for alert_id in ack["already_status_alert_ids"]:
         insert_alert_decision_log(
             conn,

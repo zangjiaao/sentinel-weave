@@ -20,10 +20,14 @@ def _reset_tables(conn: sqlite3.Connection) -> None:
         delete from entity_assessments;
         delete from case_assessments;
         delete from link_decisions;
+        delete from link_decisions_archive;
         delete from escalation_decisions;
         delete from case_changes;
+        delete from case_changes_archive;
         delete from alert_decisions;
+        delete from alert_decisions_archive;
         delete from agent_tool_calls;
+        delete from agent_tool_calls_archive;
         delete from patrol_state;
         delete from case_digests;
         delete from notification_outbox;
@@ -32,6 +36,7 @@ def _reset_tables(conn: sqlite3.Connection) -> None:
         delete from case_alert_links;
         delete from patrol_runs;
         delete from alert_ingest_events;
+        delete from verify_spike_round_runs;
         delete from spike_round_runs;
         delete from intel_cache;
         delete from evidence;

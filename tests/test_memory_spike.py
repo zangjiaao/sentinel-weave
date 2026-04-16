@@ -33,7 +33,7 @@ def test_bootstrap_memory_spike_loads_base_bundle(tmp_path) -> None:
     assert conn.execute("select count(*) from assets").fetchone()[0] == 3
     assert conn.execute("select count(*) from alerts").fetchone()[0] == 0
     assert conn.execute("select count(*) from cases").fetchone()[0] == 0
-    assert conn.execute("select count(*) from spike_round_runs").fetchone()[0] == 0
+    assert conn.execute("select count(*) from verify_spike_round_runs").fetchone()[0] == 0
 
 
 def test_apply_memory_spike_rounds_are_incremental_and_idempotent(tmp_path) -> None:

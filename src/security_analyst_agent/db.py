@@ -130,6 +130,52 @@ def _ensure_evidence_shape(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_verify_spike_round_runs_shape(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        create table if not exists verify_spike_round_runs (
+          round_id text primary key,
+          applied_at text not null
+        )
+        """
+    )
+    legacy_exists = (
+        conn.execute(
+            """
+            select 1
+            from sqlite_master
+            where type = 'table' and name = 'spike_round_runs'
+            """
+        ).fetchone()
+        is not None
+    )
+    if not legacy_exists:
+        return
+    conn.execute(
+        """
+        insert or ignore into verify_spike_round_runs (round_id, applied_at)
+        select round_id, applied_at
+        from spike_round_runs
+        """
+    )
+    conn.execute(
+        """
+        update verify_spike_round_runs
+        set applied_at = (
+          select spike_round_runs.applied_at
+          from spike_round_runs
+          where spike_round_runs.round_id = verify_spike_round_runs.round_id
+        )
+        where exists (
+          select 1
+          from spike_round_runs
+          where spike_round_runs.round_id = verify_spike_round_runs.round_id
+            and spike_round_runs.applied_at <> verify_spike_round_runs.applied_at
+        )
+        """
+    )
+
+
 def _backfill_case_links_from_legacy_alert_case_id(conn: sqlite3.Connection) -> None:
     alert_columns = {row["name"] for row in conn.execute("pragma table_info(alerts)").fetchall()}
     if "case_id" not in alert_columns:
@@ -376,6 +422,19 @@ def create_schema(conn: sqlite3.Connection) -> None:
           result_json text not null,
           latency_ms integer not null
         );
+        create table if not exists agent_tool_calls_archive (
+          call_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          source text not null,
+          tool_name text not null,
+          payload_json text not null,
+          result_ok integer not null,
+          result_summary text not null,
+          result_json text not null,
+          latency_ms integer not null,
+          archived_at text not null
+        );
         create table if not exists alert_decisions (
           decision_id text primary key,
           occurred_at text not null,
@@ -386,6 +445,18 @@ def create_schema(conn: sqlite3.Connection) -> None:
           confidence real,
           reason text not null,
           detail_json text not null
+        );
+        create table if not exists alert_decisions_archive (
+          decision_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          alert_id text not null,
+          decision text not null,
+          case_id text,
+          confidence real,
+          reason text not null,
+          detail_json text not null,
+          archived_at text not null
         );
         create table if not exists link_decisions (
           decision_id text primary key,
@@ -400,6 +471,21 @@ def create_schema(conn: sqlite3.Connection) -> None:
           uncertainties_json text not null,
           supporting_evidence_ids_json text not null,
           analysis_cutoff_at text
+        );
+        create table if not exists link_decisions_archive (
+          decision_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          alert_id text not null,
+          case_id text not null,
+          link_confidence real not null,
+          reason_summary text not null,
+          positive_factors_json text not null,
+          negative_factors_json text not null,
+          uncertainties_json text not null,
+          supporting_evidence_ids_json text not null,
+          analysis_cutoff_at text,
+          archived_at text not null
         );
         create table if not exists case_assessments (
           assessment_id text primary key,
@@ -444,6 +530,17 @@ def create_schema(conn: sqlite3.Connection) -> None:
           after_json text not null,
           reason text not null
         );
+        create table if not exists case_changes_archive (
+          change_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          case_id text not null,
+          action text not null,
+          before_json text not null,
+          after_json text not null,
+          reason text not null,
+          archived_at text not null
+        );
         create table if not exists escalation_decisions (
           escalation_id text primary key,
           occurred_at text not null,
@@ -458,6 +555,10 @@ def create_schema(conn: sqlite3.Connection) -> None:
           detail_json text not null
         );
         create table if not exists spike_round_runs (
+          round_id text primary key,
+          applied_at text not null
+        );
+        create table if not exists verify_spike_round_runs (
           round_id text primary key,
           applied_at text not null
         );
@@ -505,4 +606,5 @@ def create_schema(conn: sqlite3.Connection) -> None:
     _ensure_patrol_runs_shape(conn)
     _ensure_cases_convergence_shape(conn)
     _ensure_evidence_shape(conn)
+    _ensure_verify_spike_round_runs_shape(conn)
     _backfill_case_links_from_legacy_alert_case_id(conn)

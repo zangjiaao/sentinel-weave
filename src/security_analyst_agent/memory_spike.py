@@ -12,14 +12,19 @@ from security_analyst_agent.db import connect_db, create_schema
 
 
 RESET_TABLES = (
+    "verify_spike_round_runs",
     "spike_round_runs",
     "entity_assessments",
     "case_assessments",
     "link_decisions",
+    "link_decisions_archive",
     "escalation_decisions",
     "case_changes",
+    "case_changes_archive",
     "alert_decisions",
+    "alert_decisions_archive",
     "agent_tool_calls",
+    "agent_tool_calls_archive",
     "patrol_state",
     "case_digests",
     "notification_outbox",
@@ -156,7 +161,7 @@ def _load_round_map(fixture_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _round_is_applied(conn: sqlite3.Connection, round_id: str) -> bool:
-    row = conn.execute("select 1 from spike_round_runs where round_id = ?", (round_id,)).fetchone()
+    row = conn.execute("select 1 from verify_spike_round_runs where round_id = ?", (round_id,)).fetchone()
     return row is not None
 
 
@@ -187,7 +192,7 @@ def apply_memory_spike_round(
     _insert_many(conn, "case_alert_links", link_rows)
     _upsert_many(conn, "intel_cache", batch["intel_cache_upsert"], ["indicator", "indicator_type"])
     conn.execute(
-        "insert into spike_round_runs (round_id, applied_at) values (?, ?)",
+        "insert into verify_spike_round_runs (round_id, applied_at) values (?, ?)",
         (round_id, datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()

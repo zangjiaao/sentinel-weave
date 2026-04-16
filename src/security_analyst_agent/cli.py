@@ -8,6 +8,7 @@ from security_analyst_agent.db import connect_db
 from security_analyst_agent.ingest import ingest_alert_bundle
 from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
 from security_analyst_agent.schemas.common import ToolResponse
+from security_analyst_agent.services.audit_retention import compact_audit_logs
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
 app = typer.Typer(help="Hermes security analyst spike CLI")
@@ -661,6 +662,36 @@ def audit_escalations_command(
     typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
 
 
+@app.command("audit.compact")
+def audit_compact_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    vacuum: bool = typer.Option(False, "--vacuum"),
+    now_iso: str | None = typer.Option(None, "--now-iso"),
+    agent_tool_calls_days: int = typer.Option(30, "--agent-tool-calls-days"),
+    case_changes_days: int = typer.Option(90, "--case-changes-days"),
+    link_decisions_days: int = typer.Option(90, "--link-decisions-days"),
+    alert_decisions_days: int = typer.Option(90, "--alert-decisions-days"),
+) -> None:
+    conn = connect_db(db_path)
+    try:
+        body = compact_audit_logs(
+            conn,
+            retention_days={
+                "agent_tool_calls": agent_tool_calls_days,
+                "case_changes": case_changes_days,
+                "link_decisions": link_decisions_days,
+                "alert_decisions": alert_decisions_days,
+            },
+            dry_run=dry_run,
+            vacuum=vacuum,
+            now_iso=now_iso,
+        )
+    finally:
+        conn.close()
+    typer.echo(json.dumps(body, ensure_ascii=False))
+
+
 @app.command("context.case-digest")
 def context_case_digest_command(
     db_path: Path = typer.Option(..., "--db-path"),
@@ -683,25 +714,50 @@ def context_patrol_state_command(
     db_path: Path = typer.Option(..., "--db-path"),
     key: str | None = typer.Option(None, "--key"),
 ) -> None:
-    if key:
-        rows = _query_rows(
-            db_path,
+    conn = connect_db(db_path)
+    try:
+        latest_run = conn.execute(
             """
-            select state_key, state_value_json, updated_at
-            from patrol_state
-            where state_key = ?
-            """,
-            (key,),
-        )
-    else:
-        rows = _query_rows(
-            db_path,
+            select run_id, status, started_at, finished_at, trigger_source
+            from patrol_runs
+            order by started_at desc
+            limit 1
             """
-            select state_key, state_value_json, updated_at
-            from patrol_state
-            order by state_key asc
-            """,
-        )
+        ).fetchone()
+        rows: list[dict] = []
+        if latest_run is not None:
+            run_id = latest_run["run_id"]
+            finished_at = latest_run["finished_at"]
+            started_at = latest_run["started_at"]
+            updated_at = finished_at or started_at
+            processed_events = 0
+            if latest_run["trigger_source"] == "ingest_event" and finished_at:
+                processed_events = int(
+                    conn.execute(
+                        """
+                        select count(*)
+                        from alert_ingest_events
+                        where processed_at = ?
+                        """,
+                        (finished_at,),
+                    ).fetchone()[0]
+                )
+            derived_rows = [
+                {"state_key": "last_patrol_run_id", "state_value_json": run_id, "updated_at": updated_at},
+                {"state_key": "last_patrol_status", "state_value_json": latest_run["status"], "updated_at": updated_at},
+                {"state_key": "last_patrol_finished_at", "state_value_json": finished_at, "updated_at": updated_at},
+                {
+                    "state_key": "last_patrol_processed_events",
+                    "state_value_json": processed_events,
+                    "updated_at": updated_at,
+                },
+            ]
+            if key:
+                rows = [row for row in derived_rows if row["state_key"] == key]
+            else:
+                rows = derived_rows
+    finally:
+        conn.close()
     typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
 
 

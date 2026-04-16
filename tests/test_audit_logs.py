@@ -118,7 +118,7 @@ def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     escalation_count = conn.execute("select count(*) from escalation_decisions").fetchone()[0]
 
     assert tool_call_count >= 8
-    assert alert_decision_count >= 1
+    assert alert_decision_count == 0
     assert link_decision_count >= 1
     assert case_assessment_count >= 1
     assert entity_assessment_count >= 1
@@ -192,6 +192,24 @@ def test_context_cli_commands_return_rows(tmp_path) -> None:
     assert state_result.exit_code == 0
     assert "rows" in json.loads(digest_result.stdout)
     assert "rows" in json.loads(state_result.stdout)
+
+
+def test_context_patrol_state_is_derived_from_patrol_runs(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": alert_ids, "status": "triaged"}, source="mcp")
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["context.patrol-state", "--db-path", str(db_path)])
+    assert result.exit_code == 0
+    rows = json.loads(result.stdout)["rows"]
+    values = {row["state_key"]: row["state_value_json"] for row in rows}
+    assert "last_patrol_run_id" in values
+    assert values["last_patrol_status"] == "success"
 
 
 def test_alert_decisions_no_longer_store_link_or_risk_semantics(tmp_path) -> None:
@@ -287,9 +305,37 @@ def test_cli_alert_ack_not_bound_to_mcp_auto_run_id(tmp_path) -> None:
         """,
         ("alt_day2_webshell_01",),
     ).fetchone()
-    assert decision_row["decision"] == "ack_triaged"
-    assert decision_row["reason"] == "tool:alert.ack"
-    assert decision_row["run_id"] is None
+    assert decision_row is None
+    conn.close()
+
+
+def test_alert_ack_logs_only_noop_and_missing_decisions(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged' where alert_id = 'alt_day2_webshell_01'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "alert.ack",
+        {"alert_ids": ["alt_day2_webshell_01", "alt_missing_001"], "status": "triaged"},
+        source="cli",
+    )
+
+    decisions = conn.execute(
+        """
+        select alert_id, decision, reason
+        from alert_decisions
+        order by occurred_at asc
+        """
+    ).fetchall()
+    assert len(decisions) == 2
+    assert {row["decision"] for row in decisions} == {"ack_triaged_noop", "ack_missing_alert"}
+    assert {row["reason"] for row in decisions} == {
+        "tool:alert.ack_already_status",
+        "tool:alert.ack_alert_not_found",
+    }
     conn.close()
 
 
@@ -597,3 +643,66 @@ def test_entity_assessments_audit_filters_high_risk_attackers(tmp_path) -> None:
     keys = {row["entity_key"] for row in rows}
     assert "198.51.100.23" in keys
     assert "192.0.2.91" not in keys
+
+
+def test_audit_compact_archives_old_rows_and_keeps_recent_rows(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.executescript(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values
+          ('call_old_001', '2025-01-01T00:00:00+00:00', null, 'cli', 'alert.fetch', '{}', 1, 'ok', '{}', 1),
+          ('call_new_001', '2099-01-01T00:00:00+00:00', null, 'cli', 'alert.fetch', '{}', 1, 'ok', '{}', 1);
+
+        insert into case_changes (
+          change_id, occurred_at, run_id, case_id, action, before_json, after_json, reason
+        ) values
+          ('cchg_old_001', '2025-01-01T00:00:00+00:00', null, 'case_demo_001', 'case_update_risk', '{}', '{}', 'old'),
+          ('cchg_new_001', '2099-01-01T00:00:00+00:00', null, 'case_demo_001', 'case_update_risk', '{}', '{}', 'new');
+
+        insert into link_decisions (
+          decision_id, occurred_at, run_id, alert_id, case_id, link_confidence, reason_summary,
+          positive_factors_json, negative_factors_json, uncertainties_json, supporting_evidence_ids_json, analysis_cutoff_at
+        ) values
+          ('ldec_old_001', '2025-01-01T00:00:00+00:00', null, 'alt_day1_scan_01', 'case_demo_001', 0.7, 'old', '[]', '[]', '[]', '[]', null),
+          ('ldec_new_001', '2099-01-01T00:00:00+00:00', null, 'alt_day1_scan_01', 'case_demo_001', 0.7, 'new', '[]', '[]', '[]', '[]', null);
+
+        insert into alert_decisions (
+          decision_id, occurred_at, run_id, alert_id, decision, case_id, confidence, reason, detail_json
+        ) values
+          ('adec_old_001', '2025-01-01T00:00:00+00:00', null, 'alt_day1_scan_01', 'ack_missing_alert', null, null, 'old', '{}'),
+          ('adec_new_001', '2099-01-01T00:00:00+00:00', null, 'alt_day1_scan_01', 'ack_missing_alert', null, null, 'new', '{}');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "audit.compact",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    moved = {item["table"]: item["archived_rows"] for item in body["tables"]}
+    assert moved["agent_tool_calls"] == 1
+    assert moved["case_changes"] == 1
+    assert moved["link_decisions"] == 1
+    assert moved["alert_decisions"] == 1
+
+    conn = connect_db(db_path)
+    assert conn.execute("select count(*) from agent_tool_calls where call_id = 'call_old_001'").fetchone()[0] == 0
+    assert conn.execute("select count(*) from agent_tool_calls where call_id = 'call_new_001'").fetchone()[0] == 1
+    assert conn.execute("select count(*) from agent_tool_calls_archive where call_id = 'call_old_001'").fetchone()[0] == 1
+    assert conn.execute("select count(*) from case_changes_archive where change_id = 'cchg_old_001'").fetchone()[0] == 1
+    assert conn.execute("select count(*) from link_decisions_archive where decision_id = 'ldec_old_001'").fetchone()[0] == 1
+    assert conn.execute("select count(*) from alert_decisions_archive where decision_id = 'adec_old_001'").fetchone()[0] == 1
+    conn.close()

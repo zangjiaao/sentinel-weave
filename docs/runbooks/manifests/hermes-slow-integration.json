@@ -45,7 +45,7 @@
       }
     ],
     "min_entity_assessments": 1,
-    "min_alert_decisions": 1,
+    "min_alert_decisions": 0,
     "require_primary_case_actor_for_single_chain": true
   }
 }

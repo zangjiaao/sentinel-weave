@@ -310,7 +310,7 @@ def run_scenario(scenario: str, db_path: Path | None = None) -> dict[str, Any]:
     try:
         create_schema(conn)
         _assert_final_state(conn, scenario=scenario, assertions=manifest["final_assertions"], summary=summary)
-        summary["rounds_applied"] = conn.execute("select count(*) from spike_round_runs").fetchone()[0]
+        summary["rounds_applied"] = conn.execute("select count(*) from verify_spike_round_runs").fetchone()[0]
         summary["link_decisions_count"] = conn.execute("select count(*) from link_decisions").fetchone()[0]
         summary["case_assessments_count"] = conn.execute("select count(*) from case_assessments").fetchone()[0]
         summary["entity_assessments_count"] = conn.execute("select count(*) from entity_assessments").fetchone()[0]

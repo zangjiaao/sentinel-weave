@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from security_analyst_agent.config import DEFAULT_HERMES_CRON_JOB_ID
 from security_analyst_agent.db import connect_db, create_schema
-from security_analyst_agent.repositories.context_memory import set_patrol_state
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -113,11 +112,6 @@ def trigger_patrol_from_ingest(
         """,
         (status, detail, finished_at, run_id),
     )
-    set_patrol_state(conn, "last_patrol_run_id", run_id)
-    set_patrol_state(conn, "last_patrol_status", status)
-    set_patrol_state(conn, "last_patrol_finished_at", finished_at)
-    set_patrol_state(conn, "last_patrol_processed_events", len(event_ids))
-    set_patrol_state(conn, "last_patrol_job_id", job_id)
     conn.commit()
     conn.close()
 
