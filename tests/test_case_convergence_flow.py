@@ -549,3 +549,278 @@ def test_case_convergence_skips_noise_only_recon_cases(tmp_path) -> None:
     ).fetchone()
     assert relation is None
     conn.close()
+
+
+def test_case_convergence_rolls_up_canonical_stage_and_severity(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_rollup_anchor",
+            "title": "rollup anchor",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_rollup_anchor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_rollup_child",
+            "title": "rollup child",
+            "status": "open",
+            "overall_severity": "critical",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_rollup_child",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_rollup_anchor",
+            "case_rollup_anchor",
+            "2026-04-12T10:00:00+08:00",
+            "webshell",
+            "canonical anchor",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_rollup_anchor",
+        case_id="case_rollup_anchor",
+        occurred_at="2026-04-12T11:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_rollup_child",
+        case_id="case_rollup_child",
+        occurred_at="2026-04-12T11:30:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="critical",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    open_alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    canonical_case = conn.execute(
+        """
+        select current_stage, overall_severity, status
+        from cases
+        where case_id = ?
+        """,
+        ("case_rollup_anchor",),
+    ).fetchone()
+    assert canonical_case is not None
+    assert canonical_case["current_stage"] == "command_execution"
+    assert canonical_case["overall_severity"] == "critical"
+    assert canonical_case["status"] == "open"
+    conn.close()
+
+
+def test_case_convergence_can_reattach_case_after_stronger_new_relation(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_reassign_a",
+            "title": "reassign A",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_reassign_a",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_reassign_c",
+            "title": "reassign C",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_reassign_c",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_reassign_b",
+            "title": "reassign B",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_reassign_b",
+        },
+        source="cli",
+    )
+
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_reassign_anchor_a",
+            "case_reassign_a",
+            "2026-04-12T09:50:00+08:00",
+            "webshell",
+            "round1 canonical anchor",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_reassign_a_r1",
+        case_id="case_reassign_a",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_reassign_c_r1",
+        case_id="case_reassign_c",
+        occurred_at="2026-04-12T10:20:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.77",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    open_alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    round1_case_c = conn.execute(
+        """
+        select canonical_case_id, merged_into_case_id, merge_state, status
+        from cases
+        where case_id = ?
+        """,
+        ("case_reassign_c",),
+    ).fetchone()
+    assert round1_case_c is not None
+    assert round1_case_c["canonical_case_id"] == "case_reassign_a"
+    assert round1_case_c["merged_into_case_id"] == "case_reassign_a"
+    assert round1_case_c["merge_state"] == "merged"
+
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_reassign_anchor_b",
+            "case_reassign_b",
+            "2026-04-13T10:50:00+08:00",
+            "webshell",
+            "round2 canonical anchor",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_reassign_c_r2",
+        case_id="case_reassign_c",
+        occurred_at="2026-04-13T11:00:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.66",
+        severity="critical",
+        confidence=0.9,
+        asset_id="asset_admin_portal",
+        dst_ip="203.0.113.80",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_reassign_b_r2",
+        case_id="case_reassign_b",
+        occurred_at="2026-04-13T11:05:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.66",
+        severity="critical",
+        confidence=0.9,
+        asset_id="asset_admin_portal",
+        dst_ip="203.0.113.80",
+    )
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+    open_alert_ids = [row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")]
+    dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    stale_relation = conn.execute(
+        """
+        select status, last_reason
+        from case_relations
+        where left_case_id = ? and right_case_id = ?
+        """,
+        ("case_reassign_a", "case_reassign_c"),
+    ).fetchone()
+    assert stale_relation is not None
+    assert stale_relation["status"] == "candidate"
+    assert "superseded_by_newer_relation" in str(stale_relation["last_reason"])
+
+    round2_case_c = conn.execute(
+        """
+        select canonical_case_id, merged_into_case_id, merge_state, status
+        from cases
+        where case_id = ?
+        """,
+        ("case_reassign_c",),
+    ).fetchone()
+    assert round2_case_c is not None
+    assert round2_case_c["canonical_case_id"] == "case_reassign_b"
+    assert round2_case_c["merged_into_case_id"] == "case_reassign_b"
+    assert round2_case_c["merge_state"] == "merged"
+    assert round2_case_c["status"] == "closed"
+
+    case_a = conn.execute(
+        """
+        select canonical_case_id, merged_into_case_id, merge_state, status
+        from cases
+        where case_id = ?
+        """,
+        ("case_reassign_a",),
+    ).fetchone()
+    assert case_a is not None
+    assert case_a["canonical_case_id"] == "case_reassign_a"
+    assert case_a["merged_into_case_id"] is None
+    assert case_a["merge_state"] == "standalone"
+    assert case_a["status"] == "open"
+    conn.close()

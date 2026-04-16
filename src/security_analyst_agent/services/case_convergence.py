@@ -20,6 +20,7 @@ _CLUSTER_BRIDGE_PROMOTION_SCORE = 0.82
 _FAST_TRACK_MERGE_SCORE = 0.78
 _FAST_TRACK_MIN_STAGE_RANK = 3
 _FAST_TRACK_MIN_SEVERITY_RANK = 3
+_SUPERSEDED_RELATION_SCORE_MARGIN = 0.08
 _STAGE_ORDER = {
     "recon": 1,
     "exploit": 2,
@@ -51,12 +52,13 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
           status
         from cases
         where status in ('open', 'investigating', 'observing')
+           or merge_state = 'merged'
         """
     ).fetchall()
     contexts: list[dict[str, Any]] = []
     for row in rows:
         case_id = row["case_id"]
-        alert_rows = conn.execute(
+        active_alert_rows = conn.execute(
             """
             select
               alerts.alert_id,
@@ -71,6 +73,26 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             """,
             (case_id,),
         ).fetchall()
+        alert_rows = list(active_alert_rows)
+        if not alert_rows and str(row["merge_state"] or "").lower() == "merged":
+            alert_rows = conn.execute(
+                """
+                select
+                  alerts.alert_id,
+                  alerts.asset_id,
+                  alerts.src_ip,
+                  alerts.occurred_at,
+                  alerts.severity,
+                  case_alert_links.confidence as link_confidence
+                from case_alert_links
+                join alerts on alerts.alert_id = case_alert_links.alert_id
+                where case_alert_links.case_id = ?
+                order by coalesce(case_alert_links.unlinked_at, case_alert_links.linked_at) desc,
+                         case_alert_links.rowid desc
+                limit 8
+                """,
+                (case_id,),
+            ).fetchall()
         if not alert_rows:
             continue
         high_signal_alert_rows = [
@@ -95,6 +117,7 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         if (
             not high_signal_alert_rows
             and str(row["current_stage"]).lower() == "recon"
+            and str(row["merge_state"] or "").lower() != "merged"
             and all(_SEVERITY_ORDER.get(str(item["severity"]).lower(), 0) <= 1 for item in alert_rows)
             and not evidence_rows
         ):
@@ -458,6 +481,215 @@ def _apply_cluster_merge(conn: sqlite3.Connection, *, run_id: str, case_ids: lis
     return {"event_created": True, "canonical_case_id": canonical_case_id, "affected_case_ids": case_ids}
 
 
+def _relation_counterparty(relation: dict[str, Any], case_id: str) -> str:
+    if relation["left_case_id"] == case_id:
+        return relation["right_case_id"]
+    return relation["left_case_id"]
+
+
+def _demote_superseded_confirmed_relations(conn: sqlite3.Connection, *, run_id: str) -> int:
+    rows = conn.execute(
+        """
+        select relation_id, left_case_id, right_case_id, score, last_run_id, last_reason, last_seen_at
+        from case_relations
+        where status = 'confirmed'
+        """
+    ).fetchall()
+    by_case_id: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        relation = dict(row)
+        by_case_id.setdefault(relation["left_case_id"], []).append(relation)
+        by_case_id.setdefault(relation["right_case_id"], []).append(relation)
+
+    demotions: dict[str, str] = {}
+    for case_id, relations in by_case_id.items():
+        if len(relations) < 2:
+            continue
+        fresh_relations = [item for item in relations if item["last_run_id"] == run_id]
+        if not fresh_relations:
+            continue
+        best_relation = max(
+            fresh_relations,
+            key=lambda item: (
+                float(item["score"]),
+                str(item.get("last_seen_at") or ""),
+                str(item["relation_id"]),
+            ),
+        )
+        best_score = float(best_relation["score"])
+        best_counterparty = _relation_counterparty(best_relation, case_id)
+
+        for relation in relations:
+            if relation["relation_id"] == best_relation["relation_id"]:
+                continue
+            if relation["last_run_id"] == run_id:
+                continue
+            if float(relation["score"]) + _SUPERSEDED_RELATION_SCORE_MARGIN >= best_score:
+                continue
+            demotions.setdefault(
+                relation["relation_id"],
+                f"{relation['last_reason']}; superseded_by_newer_relation={best_counterparty}",
+            )
+
+    if not demotions:
+        return 0
+    now = _now_iso()
+    updated = 0
+    for relation_id, reason in demotions.items():
+        result = conn.execute(
+            """
+            update case_relations
+            set status = 'candidate',
+                streak_count = 0,
+                last_run_id = ?,
+                last_reason = ?,
+                last_seen_at = ?
+            where relation_id = ? and status = 'confirmed'
+            """,
+            (run_id, reason, now, relation_id),
+        )
+        updated += int(result.rowcount or 0)
+    return updated
+
+
+def _reconcile_detached_cases(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    clustered_case_ids: set[str],
+) -> list[str]:
+    rows = conn.execute(
+        """
+        select case_id, status, canonical_case_id, merged_into_case_id, merge_state
+        from cases
+        where merge_state = 'merged'
+           or (canonical_case_id is not null and canonical_case_id <> case_id)
+        """
+    ).fetchall()
+    if not rows:
+        return []
+
+    detached_case_ids: list[str] = []
+    now = _now_iso()
+    for row in rows:
+        case_id = row["case_id"]
+        if case_id in clustered_case_ids:
+            continue
+
+        status_target = row["status"]
+        if str(row["merge_state"] or "").lower() == "merged" and str(row["status"] or "").lower() == "closed":
+            status_target = "open"
+        conn.execute(
+            """
+            update cases
+            set status = ?,
+                canonical_case_id = ?,
+                merged_into_case_id = null,
+                merge_state = 'standalone',
+                merge_updated_at = ?
+            where case_id = ?
+            """,
+            (status_target, case_id, now, case_id),
+        )
+        detached_case_ids.append(case_id)
+        conn.execute(
+            """
+            insert into case_merge_events (
+              event_id,
+              occurred_at,
+              run_id,
+              cluster_id,
+              old_canonical_case_id,
+              new_canonical_case_id,
+              affected_case_ids_json,
+              reason,
+              detail_json
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"merge_{uuid4().hex[:12]}",
+                now,
+                run_id,
+                case_id,
+                row["canonical_case_id"],
+                case_id,
+                json.dumps([case_id], ensure_ascii=False),
+                "auto_case_convergence_detach",
+                json.dumps({"detached_case_id": case_id}, ensure_ascii=False),
+            ),
+        )
+
+    return detached_case_ids
+
+
+def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        """
+        select case_id, canonical_case_id, merge_state, status, current_stage, overall_severity
+        from cases
+        """
+    ).fetchall()
+    if not rows:
+        return 0
+
+    case_row_by_id: dict[str, dict[str, Any]] = {}
+    members_by_canonical: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        item = dict(row)
+        case_id = item["case_id"]
+        canonical_case_id = item["canonical_case_id"] or case_id
+        case_row_by_id[case_id] = item
+        members_by_canonical.setdefault(canonical_case_id, []).append(item)
+
+    updates = 0
+    for canonical_case_id, members in members_by_canonical.items():
+        canonical_row = case_row_by_id.get(canonical_case_id)
+        if canonical_row is None:
+            continue
+        if str(canonical_row.get("merge_state") or "").lower() == "merged":
+            continue
+
+        target_stage = canonical_row["current_stage"]
+        target_stage_rank = _STAGE_ORDER.get(str(target_stage or "").lower(), 0)
+        target_severity = canonical_row["overall_severity"]
+        target_severity_rank = _SEVERITY_ORDER.get(str(target_severity or "").lower(), 0)
+        has_active_member = False
+        for member in members:
+            member_stage = member["current_stage"]
+            member_stage_rank = _STAGE_ORDER.get(str(member_stage or "").lower(), 0)
+            if member_stage_rank > target_stage_rank:
+                target_stage = member_stage
+                target_stage_rank = member_stage_rank
+            member_severity = member["overall_severity"]
+            member_severity_rank = _SEVERITY_ORDER.get(str(member_severity or "").lower(), 0)
+            if member_severity_rank > target_severity_rank:
+                target_severity = member_severity
+                target_severity_rank = member_severity_rank
+            if str(member["status"] or "").lower() in {"open", "investigating", "observing"}:
+                has_active_member = True
+
+        status_target = canonical_row["status"]
+        if has_active_member and str(status_target or "").lower() == "closed":
+            status_target = "open"
+
+        if (
+            canonical_row["current_stage"] == target_stage
+            and canonical_row["overall_severity"] == target_severity
+            and canonical_row["status"] == status_target
+        ):
+            continue
+        conn.execute(
+            """
+            update cases
+            set current_stage = ?, overall_severity = ?, status = ?
+            where case_id = ?
+            """,
+            (target_stage, target_severity, status_target, canonical_case_id),
+        )
+        updates += 1
+    return updates
+
+
 def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     contexts = _load_case_contexts(conn)
     case_context_by_id = {context["case_id"]: context for context in contexts}
@@ -492,18 +724,31 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         run_id=run_id,
         case_context_by_id=case_context_by_id,
     )
+    superseded_relations_count = _demote_superseded_confirmed_relations(conn, run_id=run_id)
     confirmed_relations = list_confirmed_case_relations(conn)
     clusters = _build_confirmed_clusters(confirmed_relations)
     merge_events: list[dict[str, Any]] = []
+    clustered_case_ids: set[str] = set()
     for cluster in clusters:
+        clustered_case_ids.update(cluster)
         applied = _apply_cluster_merge(conn, run_id=run_id, case_ids=cluster)
         if applied["event_created"]:
             merge_events.append(applied)
+    detached_case_ids = _reconcile_detached_cases(
+        conn,
+        run_id=run_id,
+        clustered_case_ids=clustered_case_ids,
+    )
+    rolled_up_cases_count = _rollup_canonical_case_state(conn)
+    confirmed_relations_after = list_confirmed_case_relations(conn)
 
     return {
         "run_id": run_id,
         "scored_relation_pairs": len(relation_updates),
         "promoted_relations_count": len(promoted_relations),
-        "confirmed_relations_count": len(confirmed_relations),
+        "superseded_relations_count": superseded_relations_count,
+        "confirmed_relations_count": len(confirmed_relations_after),
         "merge_events_count": len(merge_events),
+        "detached_cases_count": len(detached_case_ids),
+        "rolled_up_cases_count": rolled_up_cases_count,
     }
