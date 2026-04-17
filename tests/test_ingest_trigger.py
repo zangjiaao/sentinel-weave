@@ -44,18 +44,34 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
     ingest_alert_bundle(db_path, [_build_alert("alt_ingest_002"), _build_alert("alt_ingest_003")], source="siem")
+    source_home = tmp_path / "source-hermes-home"
+    patrol_home = tmp_path / "patrol-hermes-home"
+    source_home.mkdir(parents=True, exist_ok=True)
+    (source_home / "auth.json").write_text('{"token":"demo"}', encoding="utf-8")
 
     commands: list[list[str]] = []
+    envs: list[dict[str, str]] = []
 
-    def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fake_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         commands.append(command)
+        envs.append(env or {})
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
 
-    result = trigger_patrol_from_ingest(db_path, job_id="job_demo_001", command_runner=fake_runner)
+    result = trigger_patrol_from_ingest(
+        db_path,
+        job_id="job_demo_001",
+        command_runner=fake_runner,
+        hermes_home=patrol_home,
+        source_hermes_home=source_home,
+    )
     assert result["triggered"] is True
     assert result["processed_events"] == 2
     assert result["status"] == "success"
     assert commands == [["hermes", "cron", "run", "job_demo_001"], ["hermes", "cron", "tick"]]
+    assert envs and all(item["HERMES_HOME"] == str(patrol_home) for item in envs)
+    assert (patrol_home / "SOUL.md").exists()
+    assert (patrol_home / "auth.json").exists()
+    assert (patrol_home / "skills" / "secagent-patrol" / "SKILL.md").exists()
 
     conn = connect_db(db_path)
     pending_count = conn.execute(
@@ -78,7 +94,7 @@ def test_trigger_patrol_marks_failed_and_retries(tmp_path) -> None:
     bootstrap_spike_database(db_path)
     ingest_alert_bundle(db_path, [_build_alert("alt_ingest_004")], source="siem")
 
-    def fail_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def fail_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="boom")
 
     failed = trigger_patrol_from_ingest(db_path, job_id="job_demo_002", command_runner=fail_runner)
@@ -92,7 +108,7 @@ def test_trigger_patrol_marks_failed_and_retries(tmp_path) -> None:
     assert failed_state["trigger_state"] == "failed"
     conn.close()
 
-    def success_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def success_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
 
     retried = trigger_patrol_from_ingest(db_path, job_id="job_demo_002", command_runner=success_runner)

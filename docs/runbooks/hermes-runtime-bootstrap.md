@@ -8,6 +8,7 @@
 - 不包含自动发送通知
 - Hermes 仅作为当前 Spike 的 `Runner Adapter`，不是业务核心或唯一状态源
 - 仓库文件是 Skill / Prompt / Tool 配置真源，`~/.hermes` 下的内容只视为本机运行态产物
+- 为降低 patrol 轮询 token 成本，推荐为巡检任务单独使用 `~/.hermes-patrol`
 
 ## Prerequisites
 
@@ -17,6 +18,7 @@
 4. 已设置环境变量（建议绝对路径）：`export SPIKE_DB_PATH=/Users/zangjiaao/Codebase/ai-pentester/spike.db`
 5. 确认 CLI 可调用：`uv run python -m security_analyst_agent.cli alert.fetch --db-path ./spike.db --payload '{}'`
 6. 确认 Hermes 全局提示词文件存在：`/Users/zangjiaao/.hermes/SOUL.md`
+7. 建议设置巡检运行态目录：`export HERMES_PATROL_HOME=/Users/zangjiaao/.hermes-patrol`
 
 ## Verify MCP Tool Discovery
 
@@ -68,6 +70,23 @@
 4. 确认 `secagent-patrol` 已出现在 Hermes 可用技能列表
 5. 将 Skill 绑定到 patrol cron：
    - `hermes cron edit d27a82c0fa79 --add-skill secagent-patrol`
+
+## Recommended: Isolated Patrol Runtime (Lower Token Overhead)
+
+为了避免 cron 每轮启动都复用整套全局技能与长提示词，建议把巡检任务放到专用运行态目录中：
+
+1. 一键同步专用运行态（推荐）：
+   - `make sync-hermes-patrol`
+2. 上述命令会执行：
+   - 将 `hermes/SOUL.patrol.template.md` 同步到 `~/.hermes-patrol/SOUL.md`
+   - 仅同步 `skills/secagent-patrol` 到 `~/.hermes-patrol/skills`
+   - 将 `~/.hermes` 中 `config.yaml/.env/auth.json`（若存在）复制到 `~/.hermes-patrol`
+   - 对 patrol job 执行 `--clear-skills`，再只添加 `secagent-patrol`
+   - 用 `hermes/patrol-prompt.md` 覆盖 patrol job prompt
+3. 运行触发器时，系统会自动使用 `HERMES_PATROL_HOME`（默认 `~/.hermes-patrol`）执行：
+   - `hermes cron run <job_id>`
+   - `hermes cron tick`
+4. 如需兼容旧路径，仍可保留 `make sync-hermes` + `~/.hermes` 流程
 
 ## Create Main Analyst Agent
 

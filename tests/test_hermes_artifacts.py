@@ -46,10 +46,13 @@ def test_runtime_runbook_contains_smoke_loop_steps() -> None:
     assert "Verify MCP Tool Discovery" in text
     assert "hermes/agents/main-analyst.md" in text
     assert "hermes/SOUL.template.md" in text
+    assert "hermes/SOUL.patrol.template.md" in text
     assert "make mcp-server" in text
+    assert "make sync-hermes-patrol" in text
     assert "make sync-hermes-mcp-url" in text
     assert "hermes mcp test secagent" in text
     assert "/Users/zangjiaao/.hermes/SOUL.md" in text
+    assert "/Users/zangjiaao/.hermes-patrol" in text
     assert "secagent-patrol" in text
     assert "hermes/patrol-loop.json" in text
     assert "Confirm `alert.fetch` is called first" in text
@@ -95,6 +98,18 @@ def test_repo_soul_template_contains_runtime_guardrails() -> None:
     assert "timeline.upsert" in text
     assert "confidence" in text
     assert "case_assessments" in text or "案件级评估" in text
+
+
+def test_patrol_soul_template_is_lightweight_and_skill_first() -> None:
+    text = Path("hermes/SOUL.patrol.template.md").read_text(encoding="utf-8")
+
+    assert "secagent-patrol" in text
+    assert "alert.fetch" in text
+    assert "intel.lookup" in text
+    assert "notify.send" in text
+    assert "report.draft" in text
+    assert "[SILENT]" in text
+    assert "Asia/Shanghai" in text
 
 
 def test_patrol_prompt_contains_output_contract() -> None:

@@ -8,4 +8,6 @@ FIXTURE_DIR = PROJECT_ROOT / "fixtures" / "spike"
 SPIKE_MEMORY_DIR = PROJECT_ROOT / "fixtures" / "spike_memory"
 DEFAULT_DB_PATH = PROJECT_ROOT / "spike.db"
 DEFAULT_MEMORY_SPIKE_DB_PATH = PROJECT_ROOT / "memory-spike.db"
+DEFAULT_HERMES_HOME = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes")))
+DEFAULT_HERMES_PATROL_HOME = Path(os.getenv("HERMES_PATROL_HOME", str(Path.home() / ".hermes-patrol")))
 DEFAULT_HERMES_CRON_JOB_ID = os.getenv("HERMES_PATROL_JOB_ID", "d27a82c0fa79")

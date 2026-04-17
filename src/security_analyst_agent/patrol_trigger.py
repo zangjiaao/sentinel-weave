@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import inspect
+import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
-from typing import Callable
+from typing import Callable, cast
 from uuid import uuid4
 
-from security_analyst_agent.config import DEFAULT_HERMES_CRON_JOB_ID
+from security_analyst_agent.config import (
+    DEFAULT_HERMES_CRON_JOB_ID,
+    DEFAULT_HERMES_HOME,
+    DEFAULT_HERMES_PATROL_HOME,
+    PROJECT_ROOT,
+)
 from security_analyst_agent.db import connect_db, create_schema
 
-CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+CommandRunner = Callable[[list[str], dict[str, str] | None], subprocess.CompletedProcess[str]]
+LegacyCommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+RUNTIME_FILES_TO_COPY = ("config.yaml", ".env", "auth.json")
 
 
-def _default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+def _default_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False, env=env)
 
 
 def _now_iso() -> str:
@@ -46,11 +57,53 @@ def _create_patrol_run(conn: sqlite3.Connection, trigger_source: str, summary: s
     return run_id
 
 
+def _ensure_patrol_hermes_home(patrol_home: Path, source_home: Path) -> None:
+    patrol_home.mkdir(parents=True, exist_ok=True)
+    for filename in RUNTIME_FILES_TO_COPY:
+        source_path = source_home / filename
+        if source_path.exists():
+            shutil.copy2(source_path, patrol_home / filename)
+
+    soul_template = PROJECT_ROOT / "hermes" / "SOUL.patrol.template.md"
+    if not soul_template.exists():
+        soul_template = PROJECT_ROOT / "hermes" / "SOUL.template.md"
+    shutil.copy2(soul_template, patrol_home / "SOUL.md")
+
+    source_skill_dir = PROJECT_ROOT / "skills" / "secagent-patrol"
+    target_skill_dir = patrol_home / "skills" / "secagent-patrol"
+    target_skill_dir.parent.mkdir(parents=True, exist_ok=True)
+    if target_skill_dir.exists():
+        shutil.rmtree(target_skill_dir)
+    shutil.copytree(source_skill_dir, target_skill_dir)
+
+
+def _build_hermes_env(patrol_home: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(patrol_home)
+    return env
+
+
+def _run_with_compat_runner(
+    runner: CommandRunner | LegacyCommandRunner,
+    command: list[str],
+    env: dict[str, str] | None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        signature = inspect.signature(runner)
+    except (TypeError, ValueError):
+        signature = None
+    if signature and len(signature.parameters) >= 2:
+        return cast(CommandRunner, runner)(command, env)
+    return cast(LegacyCommandRunner, runner)(command)
+
+
 def trigger_patrol_from_ingest(
     db_path: Path,
     job_id: str = DEFAULT_HERMES_CRON_JOB_ID,
-    command_runner: CommandRunner | None = None,
+    command_runner: CommandRunner | LegacyCommandRunner | None = None,
     dry_run: bool = False,
+    hermes_home: Path | None = None,
+    source_hermes_home: Path | None = None,
 ) -> dict[str, object]:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -82,8 +135,13 @@ def trigger_patrol_from_ingest(
             status = "dry_run_success"
             detail = "dry run completed without hermes commands"
         else:
-            run_result = runner(["hermes", "cron", "run", job_id])
-            tick_result = runner(["hermes", "cron", "tick"])
+            patrol_runtime_home = hermes_home or DEFAULT_HERMES_PATROL_HOME
+            source_runtime_home = source_hermes_home or DEFAULT_HERMES_HOME
+            _ensure_patrol_hermes_home(patrol_runtime_home, source_runtime_home)
+            env = _build_hermes_env(patrol_runtime_home)
+
+            run_result = _run_with_compat_runner(runner, ["hermes", "cron", "run", job_id], env)
+            tick_result = _run_with_compat_runner(runner, ["hermes", "cron", "tick"], env)
             if run_result.returncode == 0 and tick_result.returncode == 0:
                 status = "success"
                 detail = "hermes cron run/tick completed"
