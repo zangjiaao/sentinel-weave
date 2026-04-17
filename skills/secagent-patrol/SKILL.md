@@ -19,6 +19,8 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
    - 纯 recon/noise 轮次：目标 `<=8` 次 tool 调用
    - 高信号轮次（含 persistence/command_execution/lateral_prep）：目标 `<=15` 次 tool 调用
    - 绝对硬上限：`<=16` 次 tool 调用
+   - 单轮默认“单次写入”策略：`assessment.upsert-batch` 至多 1 次、`case.update-risk` 至多 1 次、`alert.ack` 至多 1 次；除非前一次写入失败才重试
+   - `evidence.upsert` 只写关键代表性证据，禁止按同质告警逐条 fan-out 写入
 6. 对同一攻击链内“同阶段、同类型、同来源”的告警，优先做代表性取样，避免逐条 fan-out 调用。
 7. 对同一案件同一阶段，优先写 1 条聚合 `timeline.upsert`，不要为每条同质告警各写一条时间线。
 8. `alert.ack` 尽量批量一次提交本轮已处理告警，避免拆成多次调用。
@@ -51,7 +53,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - 画像不等于单个 IP；IP 只是 `observation`。
 - 不要因为源 IP 变化就创建新的案内画像。
 - 当告警已归入案件后，使用 `actor.case-list` 查看该案已有画像。
-- 对代表性告警使用 `actor.case-find-candidates` 判断是否属于已有案内画像。
+- 对代表性告警优先使用 `actor.case-find-candidates` 判断是否属于已有案内画像；仅在候选不足或存在冲突时再调用 `actor.case-list`。
 - 如果属于已有画像，使用 `actor.case-add-observation-batch` 追加新的 IP、资产、URI、C2 或 webshell 线索，并用 `actor.case-link-batch` 关联告警/证据/时间线（单条也用 batch）。
 - 如果没有合格候选，且该告警代表独立高信号攻击活动，使用 `actor.case-upsert` 创建新的案内画像。
 - 噪音告警不创建案内画像。
@@ -67,7 +69,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - 即使案件头字段已经同步到最新状态，只要本轮新增了 exploit / persistence / command_execution / lateral_prep / reactivation 这类关键证据，仍要调用一次 `case.update-risk` 来写入案件级评估快照。
 - 使用 `assessment.upsert-batch` 沉淀实体级结论（例如 `attacker` / `compromised_host` / `noise`）。
 - 需要一次写入多条实体结论时，优先 `assessment.upsert-batch`。
-- 能合并时尽量每轮只调用一次 `assessment.upsert-batch`。
+- 默认每轮只调用一次 `assessment.upsert-batch`；若需补充，优先在同一次 payload 合并写入。
 - 若主机已出现漏洞利用、webshell 落地、持久化或控制证据，额外写一条 `entity_type="asset"`、`verdict="compromised_host"` 的 `assessment.upsert-batch` item。
 - 需要为同一画像追加多条观测或关联多条目标时，优先 `actor.case-add-observation-batch` / `actor.case-link-batch`。
 - 默认不要让 `current_stage` 回退；只有证据明确推翻原判断时，才使用 `force_downgrade=true` 显式降级。

@@ -24,6 +24,11 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "hermes-slow-verify.db"
 DEFAULT_SOURCE_HERMES_HOME = Path.home() / ".hermes"
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_SOURCE_TAG = "tool"
+DEFAULT_FINALIZE_QUERY = (
+    "Do not call any tools. Based only on evidence already collected in this session, "
+    "output final answer with exact Markdown headers: "
+    "'## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'."
+)
 ProgressReporter = Callable[[int, int, str], None]
 
 
@@ -71,8 +76,11 @@ def build_chat_command(
     model: str | None = None,
     provider: str | None = None,
     skills: list[str] | None = None,
+    continue_latest: bool = False,
 ) -> list[str]:
     command = ["hermes", "chat", "-q", query, "-Q", "--max-turns", str(max_turns), "--source", DEFAULT_SOURCE_TAG]
+    if continue_latest:
+        command.append("--continue")
     if model:
         command.extend(["-m", model])
     if provider:
@@ -89,7 +97,10 @@ def prepare_isolated_hermes_home(source_home: Path, dest_home: Path, repo_skill_
         if source_path.exists():
             shutil.copy2(source_path, dest_home / filename)
 
-    shutil.copy2(PROJECT_ROOT / "hermes" / "SOUL.template.md", dest_home / "SOUL.md")
+    soul_template = PROJECT_ROOT / "hermes" / "SOUL.patrol.template.md"
+    if not soul_template.exists():
+        soul_template = PROJECT_ROOT / "hermes" / "SOUL.template.md"
+    shutil.copy2(soul_template, dest_home / "SOUL.md")
 
     (dest_home / "skills").mkdir(parents=True, exist_ok=True)
     target_skill_dir = dest_home / "skills" / repo_skill_dir.name
@@ -307,6 +318,10 @@ def _verify_chat_output(*, chat_stdout: str, round_spec: dict[str, Any], artifac
                 f"round {round_id} missing output header: {header}",
                 artifact_dir=str(artifact_dir),
             )
+
+
+def _is_missing_header_error(error: HermesSlowVerificationError, *, round_id: str) -> bool:
+    return error.stage == "chat_output" and f"round {round_id} missing output header:" in error.detail
 
 
 def _verify_round_db_state(conn, *, round_spec: dict[str, Any], started_at: str) -> dict[str, Any]:
@@ -689,7 +704,33 @@ def run_slow_integration(
                     artifact_dir=str(artifact_root),
                 )
 
-            _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_root)
+            try:
+                _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_root)
+            except HermesSlowVerificationError as exc:
+                if not _is_missing_header_error(exc, round_id=round_id):
+                    raise
+                finalize_result = _run_command(
+                    build_chat_command(
+                        query=str(round_spec.get("finalize_query", DEFAULT_FINALIZE_QUERY)),
+                        max_turns=int(round_spec.get("finalize_max_turns", 2)),
+                        model=model,
+                        provider=provider,
+                        continue_latest=True,
+                    ),
+                    env=env,
+                    cwd=PROJECT_ROOT,
+                    timeout_sec=120,
+                )
+                finalize_output = f"{finalize_result.stdout}\n{finalize_result.stderr}".strip()
+                if finalize_result.returncode != 0:
+                    raise HermesSlowVerificationError(
+                        "hermes_chat_finalize",
+                        f"round {round_id}: {finalize_output or 'Hermes chat finalize failed'}",
+                        artifact_dir=str(artifact_root),
+                    ) from exc
+                chat_stdout = finalize_result.stdout.strip()
+                chat_output = finalize_output
+                _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_root)
 
             conn = connect_db(target_db_path)
             try:

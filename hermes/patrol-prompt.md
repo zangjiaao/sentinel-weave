@@ -20,6 +20,8 @@ Execution rules:
 - Use `case.upsert-batch`, `case.link-alert-batch`, and `case.update-risk` to maintain case state when new evidence appears.
 - When linking multiple alerts/entities/actor-relations in one run, prefer `case.link-alert-batch`, `assessment.upsert-batch`, `actor.case-link-batch`, and `actor.case-add-observation-batch`.
 - Use `evidence.upsert` to persist derived evidence records.
+- Keep write tools consolidated: default to at most one `assessment.upsert-batch`, one `case.update-risk`, and one batched `alert.ack` per run unless a previous write failed.
+- Do not fan-out `evidence.upsert` one call per homogeneous alert; write only representative high-signal evidence.
 - Use `timeline.upsert` to persist attack-chain timeline nodes.
 - For same-stage events in one case, prefer one aggregated `timeline.upsert` node over per-alert timeline fan-out.
 - Use `case.update-risk` to persist case-level assessment snapshots into `case_assessments`, even when the case header already reflects the current stage/severity.

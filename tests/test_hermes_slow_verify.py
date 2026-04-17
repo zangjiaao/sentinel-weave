@@ -6,7 +6,9 @@ import pytest
 from security_analyst_agent import hermes_slow_verify
 from security_analyst_agent.db import connect_db, create_schema
 from security_analyst_agent.hermes_slow_verify import (
+    DEFAULT_FINALIZE_QUERY,
     HermesSlowVerificationError,
+    _is_missing_header_error,
     _verify_final_db_state,
     _verify_chat_output,
     build_chat_command,
@@ -1330,6 +1332,19 @@ def test_build_chat_command_includes_query_and_skill() -> None:
     assert "secagent-patrol" in command
 
 
+def test_build_chat_command_supports_continue_latest() -> None:
+    command = build_chat_command(
+        query=DEFAULT_FINALIZE_QUERY,
+        max_turns=2,
+        continue_latest=True,
+    )
+
+    assert "--continue" in command
+    assert "--max-turns" in command
+    assert "2" in command
+    assert "-q" in command
+
+
 def test_prepare_isolated_hermes_home_copies_required_files(tmp_path: Path) -> None:
     source_home = tmp_path / "source"
     source_home.mkdir()
@@ -1361,9 +1376,18 @@ def test_prepare_isolated_hermes_home_uses_repo_soul_template(tmp_path: Path) ->
 
     prepare_isolated_hermes_home(source_home=source_home, dest_home=dest_home, repo_skill_dir=repo_skill_dir)
 
-    assert (dest_home / "SOUL.md").read_text(encoding="utf-8") == Path("hermes/SOUL.template.md").read_text(
-        encoding="utf-8"
-    )
+    expected_template = Path("hermes/SOUL.patrol.template.md")
+    if not expected_template.exists():
+        expected_template = Path("hermes/SOUL.template.md")
+    assert (dest_home / "SOUL.md").read_text(encoding="utf-8") == expected_template.read_text(encoding="utf-8")
+
+
+def test_is_missing_header_error_matches_chat_output_header_failures(tmp_path: Path) -> None:
+    round_spec = {"round_id": "round_demo", "required_output_headers": ["## Patrol Action Summary"]}
+
+    with pytest.raises(HermesSlowVerificationError) as captured:
+        _verify_chat_output(chat_stdout="No headers", round_spec=round_spec, artifact_dir=tmp_path)
+    assert _is_missing_header_error(captured.value, round_id="round_demo") is True
 
 
 def test_main_prints_progress_to_stderr_and_summary_to_stdout(monkeypatch, capsys, tmp_path: Path) -> None:
