@@ -50,6 +50,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     page_next_cursor: str | None = None
     total_cluster_candidates: int | None = None
     priority_buckets: dict[str, dict[str, int]] | None = None
+    backlog_schedule: dict[str, int | str | None] | None = None
     if effective_mode == "clusters":
         cluster_offset = 0
         if request.cursor:
@@ -98,6 +99,28 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             warnings.append("cluster_filter_omitted_low_volume_alerts")
         page_has_more = cluster_offset + len(clusters) < (total_cluster_candidates or 0)
         page_next_cursor = str(cluster_offset + len(clusters)) if page_has_more else None
+        remaining_cluster_count = max((total_cluster_candidates or 0) - (cluster_offset + len(clusters)), 0)
+        next_priority_bucket: str | None = None
+        if page_has_more:
+            next_page_preview = fetch_alert_clusters(
+                conn,
+                limit=1,
+                offset=cluster_offset + len(clusters),
+                statuses=request.status,
+                min_severity=request.min_severity,
+                analysis_cutoff_at=analysis_cutoff_at,
+                cluster_min_count=request.cluster_min_count,
+                sample_size=1,
+            )
+            if next_page_preview:
+                next_priority_bucket = str(next_page_preview[0]["priority_bucket"])
+        backlog_schedule = {
+            "current_offset": cluster_offset,
+            "returned_clusters": len(clusters),
+            "remaining_cluster_count": remaining_cluster_count,
+            "next_cursor": page_next_cursor,
+            "next_priority_bucket": next_priority_bucket,
+        }
         if page_has_more:
             warnings.append("cluster_backlog_remaining")
         summary = (
@@ -128,6 +151,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             "total_candidates": total_candidates,
             "total_cluster_candidates": total_cluster_candidates,
             "priority_buckets": priority_buckets,
+            "backlog_schedule": backlog_schedule,
             "omitted_alert_count": omitted_alert_count,
         },
         refs={"alert_ids": refs_alert_ids},

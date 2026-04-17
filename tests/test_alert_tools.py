@@ -310,6 +310,13 @@ def test_alert_fetch_clusters_supports_backlog_cursor_and_priority_buckets(db_co
         "p1": {"cluster_count": 1, "alert_count": 3},
         "p2": {"cluster_count": 1, "alert_count": 3},
     }
+    assert first["data"]["backlog_schedule"] == {
+        "current_offset": 0,
+        "returned_clusters": 1,
+        "remaining_cluster_count": 2,
+        "next_cursor": "1",
+        "next_priority_bucket": "p1",
+    }
     assert first["data"]["omitted_alert_count"] == 1
     assert first["page"]["has_more"] is True
     assert first["page"]["next_cursor"] == "1"
@@ -329,5 +336,12 @@ def test_alert_fetch_clusters_supports_backlog_cursor_and_priority_buckets(db_co
     assert second["ok"] is True
     assert len(second["data"]["clusters"]) == 1
     assert second["data"]["clusters"][0]["src_ip"] == "198.51.100.32"
+    assert second["data"]["backlog_schedule"] == {
+        "current_offset": 1,
+        "returned_clusters": 1,
+        "remaining_cluster_count": 1,
+        "next_cursor": "2",
+        "next_priority_bucket": "p2",
+    }
     assert second["page"]["has_more"] is True
     assert second["page"]["next_cursor"] == "2"
