@@ -320,6 +320,62 @@ def _verify_chat_output(*, chat_stdout: str, round_spec: dict[str, Any], artifac
             )
 
 
+def _run_chat_with_continue_fallback(
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess[str]],
+    query: str,
+    max_turns: int,
+    model: str | None,
+    provider: str | None,
+    skills: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    timeout_sec: int,
+    artifact_dir: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    continue_result = run_command(
+        build_chat_command(
+            query=query,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            skills=skills,
+            continue_latest=True,
+        ),
+        env=env,
+        cwd=cwd,
+        timeout_sec=timeout_sec,
+    )
+    if continue_result.returncode == 0:
+        return continue_result
+
+    fresh_result = run_command(
+        build_chat_command(
+            query=query,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            skills=skills,
+            continue_latest=False,
+        ),
+        env=env,
+        cwd=cwd,
+        timeout_sec=timeout_sec,
+    )
+    if fresh_result.returncode == 0:
+        return fresh_result
+
+    continue_output = f"{continue_result.stdout}\n{continue_result.stderr}".strip()
+    fresh_output = f"{fresh_result.stdout}\n{fresh_result.stderr}".strip()
+    raise HermesSlowVerificationError(
+        "hermes_chat",
+        "continue and fresh chat both failed: "
+        f"continue_rc={continue_result.returncode}, fresh_rc={fresh_result.returncode}, "
+        f"continue_output={continue_output or '<empty>'}, fresh_output={fresh_output or '<empty>'}",
+        artifact_dir=str(artifact_dir) if artifact_dir else None,
+    )
+
+
 def _is_missing_header_error(error: HermesSlowVerificationError, *, round_id: str) -> bool:
     return error.stage == "chat_output" and f"round {round_id} missing output header:" in error.detail
 
@@ -683,26 +739,20 @@ def run_slow_integration(
 
             started_at_iso = datetime.now(timezone.utc).isoformat()
             reporter(step, total_steps, f"运行并校验 Hermes patrol {round_id}")
-            result = _run_command(
-                build_chat_command(
-                    query=round_spec["query"],
-                    max_turns=int(round_spec["max_turns"]),
-                    model=model,
-                    provider=provider,
-                    skills=list(manifest.get("skills", [])),
-                ),
+            result = _run_chat_with_continue_fallback(
+                run_command=_run_command,
+                query=round_spec["query"],
+                max_turns=int(round_spec["max_turns"]),
+                model=model,
+                provider=provider,
+                skills=list(manifest.get("skills", [])),
                 env=env,
                 cwd=PROJECT_ROOT,
                 timeout_sec=240,
+                artifact_dir=artifact_root,
             )
             chat_output = f"{result.stdout}\n{result.stderr}".strip()
             chat_stdout = result.stdout.strip()
-            if result.returncode != 0:
-                raise HermesSlowVerificationError(
-                    "hermes_chat",
-                    f"round {round_id}: {chat_output or 'Hermes chat run failed'}",
-                    artifact_dir=str(artifact_root),
-                )
 
             try:
                 _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_root)

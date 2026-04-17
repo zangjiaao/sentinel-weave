@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -9,6 +10,7 @@ from security_analyst_agent.hermes_slow_verify import (
     DEFAULT_FINALIZE_QUERY,
     HermesSlowVerificationError,
     _is_missing_header_error,
+    _run_chat_with_continue_fallback,
     _verify_final_db_state,
     _verify_chat_output,
     build_chat_command,
@@ -1343,6 +1345,57 @@ def test_build_chat_command_supports_continue_latest() -> None:
     assert "--max-turns" in command
     assert "2" in command
     assert "-q" in command
+
+
+def test_run_chat_with_continue_fallback_prefers_continue_on_success(monkeypatch) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run_command(command, *, env, cwd, timeout_sec):  # noqa: ANN001
+        del env, cwd, timeout_sec
+        commands.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
+
+    result = _run_chat_with_continue_fallback(
+        run_command=fake_run_command,
+        query="run patrol",
+        max_turns=12,
+        model=None,
+        provider=None,
+        skills=["secagent-patrol"],
+        env={},
+        cwd=Path("."),
+        timeout_sec=30,
+    )
+    assert result.returncode == 0
+    assert len(commands) == 1
+    assert "--continue" in commands[0]
+
+
+def test_run_chat_with_continue_fallback_uses_fresh_session_when_continue_fails() -> None:
+    commands: list[list[str]] = []
+
+    def fake_run_command(command, *, env, cwd, timeout_sec):  # noqa: ANN001
+        del env, cwd, timeout_sec
+        commands.append(command)
+        if len(commands) == 1:
+            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="no session")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
+
+    result = _run_chat_with_continue_fallback(
+        run_command=fake_run_command,
+        query="run patrol",
+        max_turns=12,
+        model=None,
+        provider=None,
+        skills=["secagent-patrol"],
+        env={},
+        cwd=Path("."),
+        timeout_sec=30,
+    )
+    assert result.returncode == 0
+    assert len(commands) == 2
+    assert "--continue" in commands[0]
+    assert "--continue" not in commands[1]
 
 
 def test_prepare_isolated_hermes_home_copies_required_files(tmp_path: Path) -> None:

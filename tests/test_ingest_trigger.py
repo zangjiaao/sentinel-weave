@@ -67,13 +67,17 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
     assert result["triggered"] is True
     assert result["processed_events"] == 2
     assert result["status"] == "success"
-    assert len(commands) == 1
+    assert len(commands) == 2
     assert commands[0][:3] == ["hermes", "chat", "-q"]
     assert "--continue" in commands[0]
     assert "--max-turns" in commands[0]
     assert "18" in commands[0]
     assert "-s" in commands[0]
     assert "secagent-patrol" in commands[0]
+    assert commands[1][:3] == ["hermes", "chat", "-q"]
+    assert "--continue" in commands[1]
+    assert "--max-turns" in commands[1]
+    assert "2" in commands[1]
     assert envs and all(item["HERMES_HOME"] == str(patrol_home) for item in envs)
     assert (patrol_home / "SOUL.md").exists()
     assert (patrol_home / "auth.json").exists()
@@ -133,8 +137,9 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_p
     commands: list[list[str]] = []
 
     def flaky_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        del env
         commands.append(command)
-        if "--continue" in command:
+        if len(commands) == 1 and "--continue" in command:
             return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="no session")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
 
@@ -145,6 +150,7 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_p
         source_hermes_home=source_home,
     )
     assert result["status"] == "success"
-    assert len(commands) == 2
+    assert len(commands) == 3
     assert "--continue" in commands[0]
     assert "--continue" not in commands[1]
+    assert "--continue" in commands[2]

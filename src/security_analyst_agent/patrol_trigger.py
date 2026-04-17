@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import inspect
+import json
 import os
 from pathlib import Path
 import shutil
@@ -32,6 +33,13 @@ DEFAULT_PATROL_CHAT_QUERY = (
     "## Patrol Action Summary, ## Remaining Uncertainty, ## Memory Summary."
 )
 DEFAULT_PATROL_SKILL = "secagent-patrol"
+DEFAULT_PATROL_LOOP_PATH = PROJECT_ROOT / "hermes" / "patrol-loop.json"
+DEFAULT_PATROL_MEMORY_FLUSH_QUERY = (
+    "Patrol run has just finished. Do not call MCP secagent tools. "
+    "If there are durable cross-run facts (user preference, stable environment convention, or reliable workflow rule), "
+    "save at most one compact memory entry using memory tool. "
+    "If nothing is worth persisting, reply exactly [NO_MEMORY]."
+)
 
 
 def _default_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -141,6 +149,16 @@ def _trim_command_error(result: subprocess.CompletedProcess[str]) -> str:
     return f"{message[:300]}..."
 
 
+def _load_write_memory_on_finish(loop_path: Path = DEFAULT_PATROL_LOOP_PATH) -> bool:
+    if not loop_path.exists():
+        return False
+    try:
+        data = json.loads(loop_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(data.get("write_memory_on_finish", False))
+
+
 def trigger_patrol_from_ingest(
     db_path: Path,
     job_id: str = DEFAULT_HERMES_CRON_JOB_ID,
@@ -151,6 +169,7 @@ def trigger_patrol_from_ingest(
     trigger_mode: str = DEFAULT_HERMES_PATROL_TRIGGER_MODE,
     patrol_max_turns: int = DEFAULT_HERMES_PATROL_MAX_TURNS,
     patrol_prompt_path: Path = DEFAULT_HERMES_PATROL_PROMPT_PATH,
+    write_memory_on_finish: bool | None = None,
 ) -> dict[str, object]:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -187,6 +206,9 @@ def trigger_patrol_from_ingest(
             _ensure_patrol_hermes_home(patrol_runtime_home, source_runtime_home)
             env = _build_hermes_env(patrol_runtime_home)
             normalized_mode = trigger_mode.strip().lower()
+            memory_enabled = (
+                write_memory_on_finish if write_memory_on_finish is not None else _load_write_memory_on_finish()
+            )
             if normalized_mode == "chat":
                 query = _load_patrol_chat_query(patrol_prompt_path)
                 continue_result = _run_with_compat_runner(
@@ -214,6 +236,23 @@ def trigger_patrol_from_ingest(
                             f"continue_rc={continue_result.returncode}, fresh_rc={fresh_result.returncode}, "
                             f"continue_err={_trim_command_error(continue_result)}, "
                             f"fresh_err={_trim_command_error(fresh_result)}"
+                        )
+                if status == "success" and memory_enabled:
+                    memory_result = _run_with_compat_runner(
+                        runner,
+                        _build_patrol_chat_command(
+                            query=DEFAULT_PATROL_MEMORY_FLUSH_QUERY,
+                            max_turns=2,
+                            continue_latest=True,
+                        ),
+                        env,
+                    )
+                    if memory_result.returncode == 0:
+                        detail = f"{detail}; memory_flush=ok"
+                    else:
+                        detail = (
+                            f"{detail}; memory_flush_failed rc={memory_result.returncode}, "
+                            f"err={_trim_command_error(memory_result)}"
                         )
             elif normalized_mode == "cron":
                 run_result = _run_with_compat_runner(runner, ["hermes", "cron", "run", job_id], env)
