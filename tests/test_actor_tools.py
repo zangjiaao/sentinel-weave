@@ -384,3 +384,48 @@ def test_actor_case_batch_tools_write_multiple_items(db_conn) -> None:
     assert link_result["ok"] is True
     assert len(link_result["data"]["links"]) == 2
     assert link_result["data"]["failures"] == []
+
+
+def test_actor_case_link_batch_skips_missing_actor_without_failing_tool(db_conn) -> None:
+    actor_case_upsert(
+        db_conn,
+        {
+            "case_actor_id": "cactor_batch_skip_001",
+            "case_id": "case_demo_001",
+            "label": "batch actor skip",
+            "status": "active",
+            "profile_confidence": 0.82,
+            "risk_level": "high",
+            "is_primary": False,
+            "current_stage": "command_execution",
+            "first_seen_at": "2026-04-11T14:20:00+08:00",
+            "last_seen_at": "2026-04-11T14:20:00+08:00",
+            "summary": "batch actor skip profile",
+        },
+    )
+    result = actor_case_link_batch(
+        db_conn,
+        {
+            "items": [
+                {
+                    "case_actor_id": "cactor_batch_skip_001",
+                    "target_type": "alert",
+                    "target_id": "alt_day2_webshell_01",
+                    "link_confidence": 0.9,
+                    "link_reason": "batch-link-existing",
+                },
+                {
+                    "case_actor_id": "cactor_missing_001",
+                    "target_type": "alert",
+                    "target_id": "alt_day3_shell_01",
+                    "link_confidence": 0.88,
+                    "link_reason": "batch-link-missing",
+                },
+            ]
+        },
+    )
+
+    assert result["ok"] is True
+    assert len(result["data"]["links"]) == 1
+    assert len(result["data"]["skipped"]) == 1
+    assert result["data"]["failures"] == []

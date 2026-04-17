@@ -222,6 +222,7 @@ def actor_case_link(conn: sqlite3.Connection, payload: dict) -> dict:
 def actor_case_link_batch(conn: sqlite3.Connection, payload: dict) -> dict:
     request = ActorCaseLinkBatchRequest.model_validate(payload)
     links: list[dict] = []
+    skipped: list[dict] = []
     failures: list[dict] = []
     warnings: list[str] = []
     refs_case_actor_ids: list[str] = []
@@ -238,20 +239,33 @@ def actor_case_link_batch(conn: sqlite3.Connection, payload: dict) -> dict:
             refs_target_ids.append(item.target_id)
             continue
 
+        result_warnings = result.get("warnings", [])
+        if any(str(warning).startswith("case_actor_not_found:") for warning in result_warnings):
+            skipped.append(
+                {
+                    "index": index,
+                    "item": item.model_dump(mode="python"),
+                    "summary": result.get("summary", "actor.case-link skipped"),
+                    "warnings": result_warnings,
+                }
+            )
+            warnings.extend(result_warnings)
+            continue
+
         failures.append(
             {
                 "index": index,
                 "item": item.model_dump(mode="python"),
                 "summary": result.get("summary", "actor.case-link failed"),
-                "warnings": result.get("warnings", []),
+                "warnings": result_warnings,
             }
         )
-        warnings.extend(result.get("warnings", []))
+        warnings.extend(result_warnings)
 
     response = ToolResponse(
         ok=len(failures) == 0,
-        summary=f"批量关联案内画像：成功 {len(links)} 条，失败 {len(failures)} 条",
-        data={"links": links, "failures": failures},
+        summary=f"批量关联案内画像：成功 {len(links)} 条，跳过 {len(skipped)} 条，失败 {len(failures)} 条",
+        data={"links": links, "skipped": skipped, "failures": failures},
         refs={
             "case_actor_ids": list(dict.fromkeys(refs_case_actor_ids)),
             "target_ids": list(dict.fromkeys(refs_target_ids)),

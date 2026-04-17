@@ -4,14 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-_STAGE_ORDER = {
-    "recon": 1,
-    "reconnaissance": 1,
-    "exploit": 2,
-    "persistence": 3,
-    "command_execution": 4,
-    "lateral_prep": 5,
-}
+from security_analyst_agent.stages import normalize_stage, stage_rank
+
 _SEVERITY_ORDER = {
     "low": 1,
     "medium": 2,
@@ -40,9 +34,9 @@ def _normalize_set(value: Any) -> set[str]:
 
 
 def _stage_continuity_score(left_stage: str | None, right_stage: str | None) -> float:
-    left_rank = _STAGE_ORDER.get(str(left_stage or "").lower())
-    right_rank = _STAGE_ORDER.get(str(right_stage or "").lower())
-    if left_rank is None or right_rank is None:
+    left_rank = stage_rank(left_stage)
+    right_rank = stage_rank(right_stage)
+    if left_rank == 0 or right_rank == 0:
         return 0.5
     distance = abs(left_rank - right_rank)
     if distance == 0:
@@ -89,13 +83,13 @@ def _recon_to_attack_bridge_score(
     if temporal_score < 0.8:
         return 0.0
 
-    left_stage = str(left.get("current_stage") or "").lower()
-    right_stage = str(right.get("current_stage") or "").lower()
-    left_rank = _STAGE_ORDER.get(left_stage, 0)
-    right_rank = _STAGE_ORDER.get(right_stage, 0)
-    if min(left_rank, right_rank) != _STAGE_ORDER["recon"]:
+    left_stage = normalize_stage(left.get("current_stage"))
+    right_stage = normalize_stage(right.get("current_stage"))
+    left_rank = stage_rank(left_stage)
+    right_rank = stage_rank(right_stage)
+    if min(left_rank, right_rank) != stage_rank("recon"):
         return 0.0
-    if max(left_rank, right_rank) < _STAGE_ORDER["persistence"]:
+    if max(left_rank, right_rank) < stage_rank("persistence"):
         return 0.0
 
     left_severity = _SEVERITY_ORDER.get(str(left.get("overall_severity") or "").lower(), 0)

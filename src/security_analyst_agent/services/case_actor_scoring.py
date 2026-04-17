@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-STAGE_ORDER = {
-    "recon": 1,
-    "exploit": 2,
-    "persistence": 3,
-    "command_execution": 4,
-    "lateral_prep": 5,
-}
+from security_analyst_agent.stages import normalize_stage, stage_rank
 
 
 def _recommended_action(score: float, alert: dict) -> str:
+    alert_stage = normalize_stage(alert.get("attack_stage"))
     if score >= 0.80:
         return "link_existing_case_actor"
     if score >= 0.45:
         return "candidate_actor_relation"
-    if alert.get("severity") == "low" or alert.get("attack_stage") == "recon":
+    if alert.get("severity") == "low" or alert_stage == "recon":
         return "classify_as_noise"
     return "create_new_case_actor"
 
@@ -41,14 +36,17 @@ def score_case_actor_candidate(context: dict) -> dict:
         )
 
     behavior_continuity_score = 0.2
-    profile_stage_rank = STAGE_ORDER.get(profile.get("current_stage"), 0)
-    alert_stage_rank = STAGE_ORDER.get(alert.get("attack_stage"), 0)
+    profile_stage_rank = stage_rank(profile.get("current_stage"))
+    alert_stage_rank = stage_rank(alert.get("attack_stage"))
     if alert_stage_rank >= profile_stage_rank and alert_stage_rank > 0:
         behavior_continuity_score = 0.85 if alert_stage_rank > profile_stage_rank else 0.65
         positive_factors.append(
             {"factor_type": "behavior_continuity", "summary": "告警阶段与案内画像行为连续"}
         )
-    elif alert.get("severity") in {"high", "critical"} and alert.get("attack_stage") == "command_execution":
+    elif alert.get("severity") in {"high", "critical"} and normalize_stage(alert.get("attack_stage")) in {
+        "command_execution",
+        "reactivation",
+    }:
         behavior_continuity_score = 0.75
         positive_factors.append(
             {"factor_type": "reactivation_behavior", "summary": "高风险回连/命令执行行为可视为画像延续"}

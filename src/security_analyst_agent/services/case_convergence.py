@@ -20,28 +20,23 @@ from security_analyst_agent.repositories.case_relations import (
 )
 from security_analyst_agent.repositories.cases import reselect_cluster_canonical_case
 from security_analyst_agent.services.case_relation_scoring import score_case_relation
+from security_analyst_agent.stages import STAGE_ORDER, normalize_stage, stage_rank
 
 _MIN_LINK_CONFIDENCE_FOR_RELATION = 0.6
 _ALLOWED_ALERT_SEVERITIES_FOR_RELATION = {"medium", "high", "critical"}
 _CLUSTER_BRIDGE_PROMOTION_SCORE = 0.82
 _FAST_TRACK_MERGE_SCORE = 0.78
-_FAST_TRACK_MIN_STAGE_RANK = 3
+_FAST_TRACK_MIN_STAGE_RANK = stage_rank("persistence")
 _FAST_TRACK_MIN_SEVERITY_RANK = 3
 _SUPERSEDED_RELATION_SCORE_MARGIN = 0.08
-_STAGE_ORDER = {
-    "recon": 1,
-    "exploit": 2,
-    "persistence": 3,
-    "command_execution": 4,
-    "lateral_prep": 5,
-}
+_STAGE_ORDER = {**STAGE_ORDER, "reconnaissance": STAGE_ORDER["recon"]}
 _SEVERITY_ORDER = {
     "low": 1,
     "medium": 2,
     "high": 3,
     "critical": 4,
 }
-_HIGH_SIGNAL_ACTOR_STAGES = {"exploit", "persistence", "command_execution", "lateral_prep"}
+_HIGH_SIGNAL_ACTOR_STAGES = {"exploit", "persistence", "command_execution", "reactivation", "lateral_prep"}
 _HIGH_SIGNAL_ACTOR_SEVERITIES = {"high", "critical"}
 
 
@@ -55,9 +50,11 @@ def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_
     stage_rank_sql = """
     case lower(alerts.attack_stage)
       when 'recon' then 1
+      when 'reconnaissance' then 1
       when 'exploit' then 2
       when 'persistence' then 3
       when 'command_execution' then 4
+      when 'reactivation' then 4
       when 'lateral_prep' then 5
       else 0
     end
@@ -77,7 +74,7 @@ def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_
         (case_id, _MIN_LINK_CONFIDENCE_FOR_RELATION, *allowed_severities),
     ).fetchone()
     if row is not None and row["attack_stage"]:
-        return str(row["attack_stage"])
+        return normalize_stage(str(row["attack_stage"]))
 
     fallback_row = conn.execute(
         f"""
@@ -93,7 +90,7 @@ def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_
         (case_id, *allowed_severities),
     ).fetchone()
     if fallback_row is not None and fallback_row["attack_stage"]:
-        return str(fallback_row["attack_stage"])
+        return normalize_stage(str(fallback_row["attack_stage"]))
     return None
 
 
@@ -152,7 +149,7 @@ def _pick_case_actor_for_high_signal_coverage(
             return (
                 status_rank,
                 float(item["profile_confidence"] or 0.0),
-                _STAGE_ORDER.get(str(item["current_stage"] or "").lower(), 0),
+                stage_rank(item["current_stage"]),
                 int(item["is_primary"] or 0),
                 str(item["updated_at"] or ""),
                 str(item["case_actor_id"] or ""),
@@ -497,7 +494,7 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         ).fetchall()
         if (
             not high_signal_alert_rows
-            and str(row["current_stage"]).lower() == "recon"
+            and normalize_stage(row["current_stage"]) == "recon"
             and str(row["merge_state"] or "").lower() != "merged"
             and all(_SEVERITY_ORDER.get(str(item["severity"]).lower(), 0) <= 1 for item in alert_rows)
             and not evidence_rows
@@ -606,7 +603,7 @@ def _promote_cluster_bridge_relations(
         for cluster in clusters:
             cluster_set = set(cluster)
             cluster_max_stage_rank = max(
-                _STAGE_ORDER.get(case_context_by_id.get(case_id, {}).get("current_stage", ""), 0)
+                stage_rank(case_context_by_id.get(case_id, {}).get("current_stage", ""))
                 for case_id in cluster
             )
             if cluster_max_stage_rank < _STAGE_ORDER["persistence"]:
@@ -615,7 +612,7 @@ def _promote_cluster_bridge_relations(
             for outside_case_id, outside_context in case_context_by_id.items():
                 if outside_case_id in cluster_set:
                     continue
-                outside_stage_rank = _STAGE_ORDER.get(outside_context.get("current_stage", ""), 0)
+                outside_stage_rank = stage_rank(outside_context.get("current_stage", ""))
                 if outside_stage_rank < _STAGE_ORDER["persistence"]:
                     continue
 
@@ -661,8 +658,8 @@ def _should_fast_track_relation(
     score: Any,
 ) -> bool:
     factor_map = {item["factor_type"]: float(item["score"]) for item in score.factors}
-    left_stage_rank = _STAGE_ORDER.get(str(left_context.get("current_stage", "")).lower(), 0)
-    right_stage_rank = _STAGE_ORDER.get(str(right_context.get("current_stage", "")).lower(), 0)
+    left_stage_rank = stage_rank(left_context.get("current_stage", ""))
+    right_stage_rank = stage_rank(right_context.get("current_stage", ""))
     left_severity_rank = int(left_context.get("max_alert_severity_rank") or 0)
     right_severity_rank = int(right_context.get("max_alert_severity_rank") or 0)
     return (
@@ -1531,19 +1528,19 @@ def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
             continue
 
         observed_stage = _select_latest_high_signal_stage_for_case(conn, case_id=canonical_case_id)
-        observed_stage_rank = _STAGE_ORDER.get(str(observed_stage or "").lower(), 0)
+        observed_stage_rank = stage_rank(observed_stage)
         if observed_stage and observed_stage_rank > 0:
             target_stage = observed_stage
             target_stage_rank = observed_stage_rank
         else:
             target_stage = canonical_row["current_stage"]
-            target_stage_rank = _STAGE_ORDER.get(str(target_stage or "").lower(), 0)
+            target_stage_rank = stage_rank(target_stage)
         target_severity = canonical_row["overall_severity"]
         target_severity_rank = _SEVERITY_ORDER.get(str(target_severity or "").lower(), 0)
         has_active_member = False
         for member in members:
             member_stage = member["current_stage"]
-            member_stage_rank = _STAGE_ORDER.get(str(member_stage or "").lower(), 0)
+            member_stage_rank = stage_rank(member_stage)
             if observed_stage is None and member_stage_rank > target_stage_rank:
                 target_stage = member_stage
                 target_stage_rank = member_stage_rank
@@ -1578,9 +1575,85 @@ def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
 
 
 def _rollup_canonical_primary_actor_state(conn: sqlite3.Connection) -> int:
+    _PRIMARY_ACTOR_MIN_SELECTION_STAGE = "persistence"
+    _PRIMARY_ACTOR_SWITCH_MIN_ADVANTAGE = 0.18
+    _PRIMARY_ACTOR_SWITCH_MIN_CONFIDENCE = 0.9
+
+    def _actor_priority_tuple(item: sqlite3.Row) -> tuple[int, float, int, int, str, str]:
+        status = str(item["status"] or "").lower()
+        status_rank = 2 if status == "active" else (1 if status in {"suspected", "watch"} else 0)
+        return (
+            status_rank,
+            float(item["profile_confidence"] or 0.0),
+            stage_rank(item["current_stage"]),
+            int(item["is_primary"] or 0),
+            str(item["updated_at"] or ""),
+            str(item["case_actor_id"] or ""),
+        )
+
+    def _actor_priority_score(item: sqlite3.Row) -> float:
+        status = str(item["status"] or "").lower()
+        status_rank = 2 if status == "active" else (1 if status in {"suspected", "watch"} else 0)
+        confidence = float(item["profile_confidence"] or 0.0)
+        actor_stage_rank = stage_rank(item["current_stage"])
+        sticky = 0.15 if int(item["is_primary"] or 0) == 1 else 0.0
+        return round(status_rank * 1.8 + confidence * 3.0 + actor_stage_rank * 0.7 + sticky, 4)
+
+    def _choose_primary_actor_with_hysteresis(
+        *,
+        case_stage: str | None,
+        case_primary_actor_id: str | None,
+        actor_rows: list[sqlite3.Row],
+    ) -> str | None:
+        if not actor_rows:
+            return None
+        actor_by_id = {row["case_actor_id"]: row for row in actor_rows}
+        candidate_id = max(actor_rows, key=_actor_priority_tuple)["case_actor_id"]
+
+        if stage_rank(case_stage) < stage_rank(_PRIMARY_ACTOR_MIN_SELECTION_STAGE):
+            if case_primary_actor_id and case_primary_actor_id in actor_by_id:
+                return case_primary_actor_id
+            return None
+
+        current_primary_id = (
+            case_primary_actor_id if case_primary_actor_id and case_primary_actor_id in actor_by_id else None
+        )
+        if current_primary_id is None:
+            current_primary_id = next(
+                (
+                    row["case_actor_id"]
+                    for row in actor_rows
+                    if int(row["is_primary"] or 0) == 1 and row["case_actor_id"] in actor_by_id
+                ),
+                None,
+            )
+
+        if current_primary_id is None:
+            return candidate_id
+        if current_primary_id == candidate_id:
+            return current_primary_id
+
+        candidate = actor_by_id[candidate_id]
+        current = actor_by_id[current_primary_id]
+        candidate_score = _actor_priority_score(candidate)
+        current_score = _actor_priority_score(current)
+        if candidate_score >= current_score + _PRIMARY_ACTOR_SWITCH_MIN_ADVANTAGE:
+            return candidate_id
+
+        candidate_stage_rank = stage_rank(candidate["current_stage"])
+        current_stage_rank = stage_rank(current["current_stage"])
+        candidate_confidence = float(candidate["profile_confidence"] or 0.0)
+        current_confidence = float(current["profile_confidence"] or 0.0)
+        if (
+            candidate_stage_rank >= current_stage_rank + 2
+            and candidate_confidence >= max(_PRIMARY_ACTOR_SWITCH_MIN_CONFIDENCE, current_confidence)
+        ):
+            return candidate_id
+        return current_primary_id
+
     rows = conn.execute(
         """
-        select case_id, primary_actor_id
+        select case_id, primary_actor_id, current_stage
         from cases
         where coalesce(merge_state, 'standalone') <> 'merged'
         """
@@ -1603,19 +1676,32 @@ def _rollup_canonical_primary_actor_state(conn: sqlite3.Connection) -> int:
         if not actor_rows:
             continue
 
-        def _actor_score(item: sqlite3.Row) -> tuple[int, float, int, int, str, str]:
-            status = str(item["status"] or "").lower()
-            status_rank = 2 if status == "active" else (1 if status in {"suspected", "watch"} else 0)
-            return (
-                status_rank,
-                float(item["profile_confidence"] or 0.0),
-                _STAGE_ORDER.get(str(item["current_stage"] or "").lower(), 0),
-                int(item["is_primary"] or 0),
-                str(item["updated_at"] or ""),
-                str(item["case_actor_id"] or ""),
-            )
-
-        winner = max(actor_rows, key=_actor_score)["case_actor_id"]
+        winner = _choose_primary_actor_with_hysteresis(
+            case_stage=row["current_stage"],
+            case_primary_actor_id=row["primary_actor_id"],
+            actor_rows=actor_rows,
+        )
+        if winner is None:
+            had_primary = any(int(item["is_primary"] or 0) == 1 for item in actor_rows) or bool(row["primary_actor_id"])
+            if had_primary:
+                conn.execute(
+                    """
+                    update case_actor_profiles
+                    set is_primary = 0, updated_at = ?
+                    where case_id = ?
+                    """,
+                    (now, case_id),
+                )
+                conn.execute(
+                    """
+                    update cases
+                    set primary_actor_id = null
+                    where case_id = ?
+                    """,
+                    (case_id,),
+                )
+                updates += 1
+            continue
         current_primary_ids = {item["case_actor_id"] for item in actor_rows if int(item["is_primary"] or 0) == 1}
         if current_primary_ids != {winner}:
             conn.execute(

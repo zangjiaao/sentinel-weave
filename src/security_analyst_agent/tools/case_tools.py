@@ -32,25 +32,18 @@ from security_analyst_agent.schemas.case_tools import (
     CaseUpsertRequest,
 )
 from security_analyst_agent.schemas.common import ToolResponse
+from security_analyst_agent.stages import normalize_stage, stage_rank
 from security_analyst_agent.services.link_explainer import explain_alert_link
 
-_STAGE_ORDER = {
-    "recon": 1,
-    "exploit": 2,
-    "persistence": 3,
-    "command_execution": 4,
-    "lateral_prep": 5,
-}
-
-
 def _resolve_stage_with_guard(current_stage: str, requested_stage: str, force_downgrade: bool) -> tuple[str, bool]:
-    current_rank = _STAGE_ORDER.get(current_stage)
-    requested_rank = _STAGE_ORDER.get(requested_stage)
-    if current_rank is None or requested_rank is None:
-        return requested_stage, False
+    normalized_requested_stage = normalize_stage(requested_stage) or requested_stage
+    current_rank = stage_rank(current_stage)
+    requested_rank = stage_rank(normalized_requested_stage)
+    if current_rank == 0 or requested_rank == 0:
+        return normalized_requested_stage, False
     if requested_rank < current_rank and not force_downgrade:
         return current_stage, True
-    return requested_stage, False
+    return normalized_requested_stage, False
 
 
 def _load_case_supporting_evidence_ids(

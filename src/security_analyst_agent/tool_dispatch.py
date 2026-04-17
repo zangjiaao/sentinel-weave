@@ -85,6 +85,41 @@ def _validation_error_summary(exc: ValidationError) -> str:
     return f"payload 校验失败：{message}"
 
 
+_SOFT_NOOP_BATCH_TOOLS = {
+    "case.upsert-batch",
+    "case.link-alert-batch",
+    "assessment.upsert-batch",
+    "actor.case-link-batch",
+    "actor.case-add-observation-batch",
+}
+
+
+def _is_soft_noop_batch_validation(tool_name: str, payload: dict, exc: ValidationError, *, source: str) -> bool:
+    if source != "mcp":
+        return False
+    if tool_name not in _SOFT_NOOP_BATCH_TOOLS:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    items = payload.get("items")
+    if isinstance(items, list) and len(items) > 0:
+        return False
+    errors = exc.errors()
+    if not errors:
+        return False
+    for error in errors:
+        location = tuple(error.get("loc", ()))
+        if not location:
+            continue
+        first_location = str(location[0])
+        if first_location != "items":
+            continue
+        error_type = str(error.get("type", "")).lower()
+        if error_type in {"missing", "list_too_short", "too_short", "value_error.missing"}:
+            return True
+    return False
+
+
 def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, source: str = "unknown") -> dict:
     if tool_name not in TOOL_HANDLERS:
         raise ValueError(f"unsupported tool: {tool_name}")
@@ -98,6 +133,33 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
             result = TOOL_HANDLERS[tool_name](conn, payload)
         except ValidationError as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
+            if _is_soft_noop_batch_validation(tool_name, payload, exc, source=source):
+                noop_result = {
+                    "ok": True,
+                    "summary": "empty batch payload skipped",
+                    "data": {"tool": tool_name, "skipped": True, "reason": "empty_batch_payload"},
+                    "warnings": ["empty_batch_payload_skipped"],
+                    "refs": {},
+                    "page": {"next_cursor": None, "has_more": False},
+                    "meta": {},
+                }
+                finalize_mcp_auto_run_after_tool(
+                    conn,
+                    source=source,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    result=noop_result,
+                )
+                insert_tool_call_log(
+                    conn,
+                    source=source,
+                    tool_name=tool_name,
+                    payload=payload,
+                    result=noop_result,
+                    latency_ms=latency_ms,
+                )
+                conn.commit()
+                return noop_result
             validation_result = {
                 "ok": False,
                 "summary": _validation_error_summary(exc),

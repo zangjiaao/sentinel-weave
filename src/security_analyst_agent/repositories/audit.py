@@ -6,18 +6,12 @@ from typing import Any
 from uuid import uuid4
 
 from security_analyst_agent.services.case_convergence import run_case_convergence_for_run
+from security_analyst_agent.stages import normalize_stage, stage_rank
 
 _UNSET = object()
 _BOUND_RUN_ID: ContextVar[object] = ContextVar("audit_bound_run_id", default=_UNSET)
 _BOUND_ANALYSIS_CUTOFF_AT: ContextVar[object] = ContextVar("audit_bound_analysis_cutoff_at", default=_UNSET)
-_RECENT_FINISHED_MCP_AUTO_RUN_GRACE_SECONDS = 120
-_AUTO_ESCALATION_STAGE_ORDER = {
-    "recon": 1,
-    "exploit": 2,
-    "persistence": 3,
-    "command_execution": 4,
-    "lateral_prep": 5,
-}
+_RECENT_FINISHED_MCP_AUTO_RUN_GRACE_SECONDS = 1800
 _AUTO_ESCALATION_MIN_STAGE = "persistence"
 _AUTO_ESCALATION_CHANNEL = "email"
 _AUTO_ESCALATION_TEMPLATE = "high_severity"
@@ -160,9 +154,7 @@ def _finish_auto_patrol_run(conn: sqlite3.Connection, *, run_id: str, summary: s
 
 
 def _stage_rank(stage: str | None) -> int:
-    if not stage:
-        return 0
-    return _AUTO_ESCALATION_STAGE_ORDER.get(str(stage).lower(), 0)
+    return stage_rank(stage)
 
 
 def _extract_case_ids_from_result(result: dict[str, Any]) -> list[str]:
@@ -316,8 +308,8 @@ def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_i
 
 
 def _normalize_escalation_stage(stage: str | None) -> str:
-    normalized = str(stage or "").strip().lower()
-    if normalized in _AUTO_ESCALATION_STAGE_ORDER:
+    normalized = normalize_stage(stage)
+    if stage_rank(normalized) > 0:
         return normalized
     return _AUTO_ESCALATION_MIN_STAGE
 
@@ -334,7 +326,7 @@ def _extract_stage_from_dedupe_key(dedupe_key: str | None) -> str | None:
         return None
     stage = dedupe_key.rsplit(marker, 1)[-1]
     normalized = _normalize_escalation_stage(stage)
-    if normalized in _AUTO_ESCALATION_STAGE_ORDER:
+    if stage_rank(normalized) > 0:
         return normalized
     return None
 
@@ -595,11 +587,7 @@ def resolve_run_context_for_dispatch(
         if active and active["trigger_source"] == "ingest_event":
             return active["run_id"], active["analysis_cutoff_at"]
         if active and active["trigger_source"] == "mcp_auto":
-            _finish_auto_patrol_run(
-                conn,
-                run_id=active["run_id"],
-                summary="auto_closed_on_next_alert_fetch",
-            )
+            return active["run_id"], active["analysis_cutoff_at"]
         run_id = _create_auto_patrol_run(conn, summary="auto_started_by_mcp_alert_fetch")
         return run_id, load_analysis_cutoff_for_run(conn, run_id)
 

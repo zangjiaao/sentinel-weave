@@ -451,6 +451,66 @@ def test_case_update_risk_allows_stage_downgrade_with_force_flag(db_conn) -> Non
     assert result["data"]["case"]["current_stage"] == "command_execution"
 
 
+def test_case_update_risk_normalizes_reconnaissance_alias(db_conn) -> None:
+    case_upsert(
+        db_conn,
+        {
+            "case_id": "case_stage_alias_001",
+            "title": "stage alias case",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": None,
+        },
+    )
+    result = case_update_risk(
+        db_conn,
+        {
+            "case_id": "case_stage_alias_001",
+            "overall_severity": "medium",
+            "current_stage": "reconnaissance",
+            "status": "open",
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["case"]["current_stage"] == "recon"
+
+
+def test_case_update_risk_treats_reactivation_as_valid_progression_stage(db_conn) -> None:
+    case_upsert(
+        db_conn,
+        {
+            "case_id": "case_stage_reactivation_001",
+            "title": "reactivation stage case",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": None,
+        },
+    )
+    case_update_risk(
+        db_conn,
+        {
+            "case_id": "case_stage_reactivation_001",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "status": "open",
+        },
+    )
+    result = case_update_risk(
+        db_conn,
+        {
+            "case_id": "case_stage_reactivation_001",
+            "overall_severity": "high",
+            "current_stage": "reactivation",
+            "status": "open",
+        },
+    )
+    assert result["ok"] is True
+    assert "stage_downgrade_blocked" not in result["warnings"]
+    assert result["data"]["case"]["current_stage"] == "reactivation"
+
+
 def test_case_update_risk_writes_case_assessment_log(db_conn) -> None:
     case_update_risk(
         db_conn,

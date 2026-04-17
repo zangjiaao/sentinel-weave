@@ -51,3 +51,20 @@ def test_case_relation_score_boosts_recon_to_attack_continuation() -> None:
         },
     )
     assert score.total >= 0.78
+
+
+def test_case_relation_score_treats_reactivation_close_to_command_execution() -> None:
+    score = score_case_relation(
+        left={
+            "current_stage": "command_execution",
+            "asset_ids": {"asset_api_prod"},
+            "src_ips": {"198.51.100.77"},
+        },
+        right={
+            "current_stage": "reactivation",
+            "asset_ids": {"asset_api_prod"},
+            "src_ips": {"198.51.100.91"},
+        },
+    )
+    stage_factor = next(item for item in score.factors if item["factor_type"] == "stage_continuity")
+    assert stage_factor["score"] >= 0.85

@@ -30,6 +30,12 @@ DEFAULT_FINALIZE_QUERY = (
     "'## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'."
 )
 ProgressReporter = Callable[[int, int, str], None]
+_RISK_LEVEL_ORDER = {
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
 
 
 @dataclass
@@ -517,8 +523,15 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
                 continue
             if current_entity["entity_key"] != required_entity["entity_key"]:
                 continue
-            if current_entity["risk_level"] != required_entity["risk_level"]:
+            required_risk_level = required_entity.get("risk_level")
+            if required_risk_level is not None and current_entity["risk_level"] != required_risk_level:
                 continue
+            required_risk_level_min = required_entity.get("risk_level_at_least")
+            if required_risk_level_min is not None:
+                required_rank = _RISK_LEVEL_ORDER.get(str(required_risk_level_min).lower(), 0)
+                current_rank = _RISK_LEVEL_ORDER.get(str(current_entity["risk_level"]).lower(), 0)
+                if current_rank < required_rank:
+                    continue
             if current_entity["verdict"] != required_entity["verdict"]:
                 continue
             if "related_case_id" in required_entity and current_entity["related_case_id"] != required_entity["related_case_id"]:
@@ -570,7 +583,7 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
             str(item).lower()
             for item in final_assertions.get(
                 "high_signal_actor_stages",
-                ["exploit", "persistence", "command_execution", "lateral_prep"],
+                ["exploit", "persistence", "command_execution", "reactivation", "lateral_prep"],
             )
         ]
         high_signal_severities = [

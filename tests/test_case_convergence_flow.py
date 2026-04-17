@@ -1201,6 +1201,67 @@ def test_case_convergence_backfills_high_signal_alert_actor_coverage_with_single
     conn.close()
 
 
+def test_case_convergence_defers_primary_actor_rollup_for_recon_stage_case(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_actor_defer_recon",
+            "title": "actor defer recon",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+            "primary_actor_id": None,
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "actor.case-upsert",
+        {
+            "case_actor_id": "actor_defer_recon_001",
+            "case_id": "case_actor_defer_recon",
+            "label": "recon actor",
+            "status": "active",
+            "profile_confidence": 0.92,
+            "risk_level": "medium",
+            "is_primary": True,
+            "current_stage": "recon",
+            "summary": "recon-only actor should stay pending",
+        },
+        source="cli",
+    )
+    conn.commit()
+
+    run_case_convergence_for_run(conn, run_id="run_actor_defer_recon_1")
+
+    case_row = conn.execute(
+        """
+        select primary_actor_id
+        from cases
+        where case_id = 'case_actor_defer_recon'
+        """
+    ).fetchone()
+    assert case_row is not None
+    assert case_row["primary_actor_id"] is None
+
+    actor_primary_count = conn.execute(
+        """
+        select count(*)
+        from case_actor_profiles
+        where case_id = 'case_actor_defer_recon' and is_primary = 1
+        """
+    ).fetchone()[0]
+    assert actor_primary_count == 0
+    conn.close()
+
+
 def test_case_convergence_backfills_compromised_host_assessment_for_high_signal_case(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

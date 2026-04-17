@@ -200,6 +200,33 @@ def test_dispatch_tool_returns_payload_validation_error_and_audits_it(tmp_path) 
     conn.close()
 
 
+def test_dispatch_tool_skips_empty_batch_payload_for_mcp_without_failure(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    result = dispatch_tool(conn, "case.upsert-batch", {}, source="mcp")
+    assert result["ok"] is True
+    assert "empty batch payload skipped" in result["summary"]
+    assert "empty_batch_payload_skipped" in result["warnings"]
+
+    row = conn.execute(
+        """
+        select result_ok, result_summary, result_json
+        from agent_tool_calls
+        where tool_name = 'case.upsert-batch'
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["result_ok"] == 1
+    assert row["result_summary"] == "empty batch payload skipped"
+    assert "empty_batch_payload_skipped" in row["result_json"]
+    conn.close()
+
+
 def test_audit_cli_commands_return_rows(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
@@ -434,6 +461,38 @@ def test_mcp_auto_run_closes_immediately_on_empty_fetch(tmp_path) -> None:
     assert run_row["status"] == "success"
     assert run_row["finished_at"] is not None
     assert run_row["summary"] == "auto_closed_empty_fetch"
+    conn.close()
+
+
+def test_mcp_alert_fetch_reuses_active_auto_run_without_creating_new_run(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 5}, source="mcp")
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 5}, source="mcp")
+
+    run_rows = conn.execute(
+        """
+        select run_id, status
+        from patrol_runs
+        where trigger_source = 'mcp_auto'
+        order by started_at asc
+        """
+    ).fetchall()
+    assert len(run_rows) == 1
+    assert run_rows[0]["status"] == "running"
+
+    call_rows = conn.execute(
+        """
+        select run_id
+        from agent_tool_calls
+        where source = 'mcp' and tool_name = 'alert.fetch'
+        order by occurred_at asc, rowid asc
+        """
+    ).fetchall()
+    assert len(call_rows) == 2
+    assert call_rows[0]["run_id"] == call_rows[1]["run_id"]
     conn.close()
 
 
