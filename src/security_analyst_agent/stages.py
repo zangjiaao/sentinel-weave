@@ -14,6 +14,7 @@ _STAGE_ALIASES = {
     "execution": "command_execution",
     "reactivate": "reactivation",
     "webshell_reactivation": "reactivation",
+    "lateral_movement": "lateral_prep",
 }
 
 

@@ -851,7 +851,7 @@ def test_mcp_auto_escalation_dedupes_to_single_canonical_notification(tmp_path) 
     conn.close()
 
 
-def test_mcp_stage_progression_escalates_once_per_advanced_stage(tmp_path) -> None:
+def test_mcp_stage_progression_applies_cooldown_but_allows_lateral_milestone(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
     conn = connect_db(db_path)
@@ -944,7 +944,6 @@ def test_mcp_stage_progression_escalates_once_per_advanced_stage(tmp_path) -> No
     ).fetchall()
     assert [row["dedupe_key"] for row in notifications] == [
         "case_stage_progress_001:email:high_severity:stage:persistence",
-        "case_stage_progress_001:email:high_severity:stage:command_execution",
         "case_stage_progress_001:email:high_severity:stage:lateral_prep",
     ]
 
@@ -958,13 +957,14 @@ def test_mcp_stage_progression_escalates_once_per_advanced_stage(tmp_path) -> No
         ("case_stage_progress_001",),
     ).fetchall()
     assert len(escalation_rows) == 4
-    assert [row["triggered"] for row in escalation_rows] == [1, 1, 1, 0]
+    assert [row["triggered"] for row in escalation_rows] == [1, 0, 1, 0]
     assert [row["reason"] for row in escalation_rows] == [
         "threshold_met",
-        "threshold_met",
+        "cooldown_hit",
         "threshold_met",
         "dedupe_hit",
     ]
+    assert "deduped_within_cooldown" in escalation_rows[1]["detail_json"]
     assert escalation_rows[-1]["dedupe_key"].endswith(":stage:command_execution")
     assert "deduped_stage_not_advanced" in escalation_rows[-1]["detail_json"]
     conn.close()

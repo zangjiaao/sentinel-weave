@@ -15,6 +15,8 @@ _RECENT_FINISHED_MCP_AUTO_RUN_GRACE_SECONDS = 1800
 _AUTO_ESCALATION_MIN_STAGE = "persistence"
 _AUTO_ESCALATION_CHANNEL = "email"
 _AUTO_ESCALATION_TEMPLATE = "high_severity"
+_AUTO_ESCALATION_STAGE_COOLDOWN_SECONDS = 1800
+_AUTO_ESCALATION_COOLDOWN_BYPASS_STAGES = {"lateral_prep", "reactivation"}
 _AUTO_ESCALATION_MIN_ALERT_CONFIDENCE = 0.8
 _AUTO_ESCALATION_CONTINUITY_EVIDENCE_TYPES = ("webshell", "webshell_exploitation", "shell_connection")
 
@@ -354,6 +356,28 @@ def _load_max_notified_stage_rank_for_chain(conn: sqlite3.Connection, *, anchor_
     return max_rank
 
 
+def _load_last_triggered_escalation_for_chain(
+    conn: sqlite3.Connection, *, anchor_case_id: str
+) -> tuple[str | None, str | None]:
+    prefix = f"{anchor_case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}"
+    row = conn.execute(
+        """
+        select occurred_at, dedupe_key
+        from escalation_decisions
+        where triggered = 1
+          and dedupe_key like ?
+        order by occurred_at desc
+        limit 1
+        """,
+        (f"{prefix}%",),
+    ).fetchone()
+    if row is None:
+        return None, None
+    occurred_at = row["occurred_at"]
+    stage = _extract_stage_from_dedupe_key(str(row["dedupe_key"] or ""))
+    return (str(occurred_at) if occurred_at else None, stage)
+
+
 def _send_auto_escalation_notification(
     conn: sqlite3.Connection,
     *,
@@ -399,6 +423,40 @@ def _send_auto_escalation_notification(
             },
         )
         return
+
+    last_triggered_occurred_at, last_triggered_stage = _load_last_triggered_escalation_for_chain(
+        conn,
+        anchor_case_id=dedupe_anchor_case_id,
+    )
+    last_triggered_time = _parse_iso_datetime(last_triggered_occurred_at)
+    if (
+        last_triggered_time is not None
+        and effective_stage not in _AUTO_ESCALATION_COOLDOWN_BYPASS_STAGES
+    ):
+        elapsed_seconds = (datetime.now(timezone.utc) - last_triggered_time).total_seconds()
+        if 0 <= elapsed_seconds < _AUTO_ESCALATION_STAGE_COOLDOWN_SECONDS:
+            insert_escalation_log(
+                conn,
+                case_id=case_id,
+                triggered=False,
+                channel=_AUTO_ESCALATION_CHANNEL,
+                template=_AUTO_ESCALATION_TEMPLATE,
+                notification_id=None,
+                dedupe_key=dedupe_key,
+                reason="cooldown_hit",
+                detail={
+                    "status": "deduped_within_cooldown",
+                    "auto_policy": "stage_progression_with_convergence",
+                    "source_case_id": source_case,
+                    "escalation_case_id": case_id,
+                    "dedupe_case_id": dedupe_anchor_case_id,
+                    "escalation_stage": effective_stage,
+                    "last_triggered_stage": last_triggered_stage,
+                    "cooldown_seconds": _AUTO_ESCALATION_STAGE_COOLDOWN_SECONDS,
+                    "elapsed_seconds": round(elapsed_seconds, 3),
+                },
+            )
+            return
 
     existing = conn.execute(
         """
