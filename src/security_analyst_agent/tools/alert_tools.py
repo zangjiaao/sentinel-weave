@@ -10,6 +10,7 @@ from security_analyst_agent.repositories.alerts import (
     get_alert_by_id,
     get_alert_evidence_summaries,
     get_case_evidence_summaries,
+    summarize_alert_hotspots,
     summarize_alert_cluster_buckets,
 )
 from security_analyst_agent.repositories.audit import insert_alert_decision_log, load_active_analysis_cutoff
@@ -51,6 +52,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     total_cluster_candidates: int | None = None
     priority_buckets: dict[str, dict[str, int]] | None = None
     backlog_schedule: dict[str, int | str | None] | None = None
+    hotspot_summary: dict[str, object] | None = None
     if effective_mode == "clusters":
         cluster_offset = 0
         if request.cursor:
@@ -85,6 +87,13 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             min_severity=request.min_severity,
             analysis_cutoff_at=analysis_cutoff_at,
             cluster_min_count=request.cluster_min_count,
+        )
+        hotspot_summary = summarize_alert_hotspots(
+            conn,
+            statuses=request.status,
+            min_severity=request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+            top_n=request.hotspot_top_n,
         )
         refs_alert_ids = list(dict.fromkeys([item for cluster in clusters for item in cluster["sample_alert_ids"]]))
         covered_alert_count = count_alerts_covered_by_clusters(
@@ -152,6 +161,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             "total_cluster_candidates": total_cluster_candidates,
             "priority_buckets": priority_buckets,
             "backlog_schedule": backlog_schedule,
+            "hotspot_summary": hotspot_summary,
             "omitted_alert_count": omitted_alert_count,
         },
         refs={"alert_ids": refs_alert_ids},

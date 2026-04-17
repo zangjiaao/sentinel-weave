@@ -7,6 +7,7 @@ def test_alert_fetch_request_defaults_limit_to_20() -> None:
     request = AlertFetchRequest.model_validate({})
     assert request.limit == 20
     assert request.mode == "auto"
+    assert request.hotspot_top_n == 3
 
 
 def test_tool_response_requires_summary() -> None:
@@ -309,6 +310,25 @@ def test_alert_fetch_clusters_supports_backlog_cursor_and_priority_buckets(db_co
         "p0": {"cluster_count": 1, "alert_count": 3},
         "p1": {"cluster_count": 1, "alert_count": 3},
         "p2": {"cluster_count": 1, "alert_count": 3},
+    }
+    assert first["data"]["hotspot_summary"] == {
+        "top_attack_stages": [
+            {"attack_stage": "recon", "alert_count": 4},
+            {"attack_stage": "command_execution", "alert_count": 3},
+            {"attack_stage": "persistence", "alert_count": 3},
+        ],
+        "top_assets": [
+            {"asset_id": "asset_api_prod", "alert_count": 6},
+            {"asset_id": "asset_admin_portal", "alert_count": 3},
+            {"asset_id": "asset_static_www", "alert_count": 1},
+        ],
+        "top_src_ips": [
+            {"src_ip": "198.51.100.31", "alert_count": 3},
+            {"src_ip": "198.51.100.32", "alert_count": 3},
+            {"src_ip": "198.51.100.33", "alert_count": 3},
+        ],
+        "high_severity_alert_count": 6,
+        "top_n": 3,
     }
     assert first["data"]["backlog_schedule"] == {
         "current_offset": 0,

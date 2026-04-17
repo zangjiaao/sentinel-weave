@@ -16,6 +16,7 @@ class AlertFetchRequest(BaseModel):
     auto_cluster_threshold: int = Field(default=200, ge=1)
     cluster_min_count: int = Field(default=2, ge=1)
     cluster_sample_size: int = Field(default=3, ge=1, le=10)
+    hotspot_top_n: int = Field(default=3, ge=1, le=10)
 
 
 class AlertDetailRequest(BaseModel):

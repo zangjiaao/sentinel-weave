@@ -367,6 +367,88 @@ def summarize_alert_cluster_buckets(
     }
 
 
+def summarize_alert_hotspots(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+    top_n: int = 3,
+) -> dict[str, object]:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    where_clause = _build_where_clause(conditions)
+    top_attack_stages_rows = conn.execute(
+        f"""
+        select
+          coalesce(lower(alerts.attack_stage), 'unknown') as attack_stage,
+          count(*) as alert_count
+        from alerts
+        {where_clause}
+        group by coalesce(lower(alerts.attack_stage), 'unknown')
+        order by alert_count desc, attack_stage asc
+        limit ?
+        """,
+        (*params, top_n),
+    ).fetchall()
+    top_assets_rows = conn.execute(
+        f"""
+        select
+          coalesce(alerts.asset_id, 'unknown') as asset_id,
+          count(*) as alert_count
+        from alerts
+        {where_clause}
+        group by coalesce(alerts.asset_id, 'unknown')
+        order by alert_count desc, asset_id asc
+        limit ?
+        """,
+        (*params, top_n),
+    ).fetchall()
+    top_src_ips_rows = conn.execute(
+        f"""
+        select
+          coalesce(alerts.src_ip, 'unknown') as src_ip,
+          count(*) as alert_count
+        from alerts
+        {where_clause}
+        group by coalesce(alerts.src_ip, 'unknown')
+        order by alert_count desc, src_ip asc
+        limit ?
+        """,
+        (*params, top_n),
+    ).fetchall()
+    high_severity_row = conn.execute(
+        f"""
+        select
+          coalesce(sum(case when {_SEVERITY_RANK_SQL} >= 3 then 1 else 0 end), 0)
+            as high_severity_alert_count
+        from alerts
+        {where_clause}
+        """,
+        tuple(params),
+    ).fetchone()
+
+    return {
+        "top_attack_stages": [
+            {"attack_stage": str(row["attack_stage"]), "alert_count": int(row["alert_count"])}
+            for row in top_attack_stages_rows
+        ],
+        "top_assets": [
+            {"asset_id": str(row["asset_id"]), "alert_count": int(row["alert_count"])}
+            for row in top_assets_rows
+        ],
+        "top_src_ips": [
+            {"src_ip": str(row["src_ip"]), "alert_count": int(row["alert_count"])}
+            for row in top_src_ips_rows
+        ],
+        "high_severity_alert_count": int(high_severity_row["high_severity_alert_count"]) if high_severity_row else 0,
+        "top_n": int(top_n),
+    }
+
+
 def get_alert_by_id(conn: sqlite3.Connection, alert_id: str, analysis_cutoff_at: str | None = None) -> dict | None:
     row = conn.execute(
         """
