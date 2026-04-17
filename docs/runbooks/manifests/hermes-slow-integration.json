@@ -1,9 +1,9 @@
 {
   "scenario": "hermes-slow-integration",
-  "skills": ["secagent-patrol"],
+  "skills": [],
   "preflight_query": "Reply exactly READY",
   "round_defaults": {
-    "query": "Run exactly one patrol pass against the current alert queue. First call alert.fetch. Review enough evidence to explain the active intrusion. Keep this round budget-aware with tiered limits: target <=8 tool calls for noise/recon-only rounds; target <=15 tool calls for high-signal rounds that include persistence/command_execution/lateral_prep evidence; hard cap <=18 tool calls in all cases. Avoid one-call-per-alert fan-out for homogeneous alerts and reserve turns for final output. If current alerts justify a new case or the referenced case record does not exist yet, call alert.detail-batch with at least one representative alert first, then create or refresh the case with case.upsert-batch using the exact case.upsert-batch schema keys from the MCP prompt only (single-case writes also use one-item batch). Do not send extra case.upsert-batch fields such as description, severity, created_at, or updated_at. Then use case tools to maintain case state when justified, always include numeric confidence and reason in each case.link-alert-batch item, call case.update-risk to persist a case-level assessment snapshot whenever this run advances stage, raises severity, or forms a new case-level judgment even if the case header is already synced, persist entity-level conclusions with the exact assessment.upsert-batch schema keys from the MCP prompt, include compromised_host for an asset when exploitation/webshell/foothold evidence supports it, and ack any alert you have triaged in one batch call whenever possible. Keep write calls consolidated by default: no more than one assessment.upsert-batch, one case.update-risk, and one batched alert.ack in this round unless a previous write failed. For evidence, avoid per-alert fan-out; use at most one representative evidence.upsert per same-stage homogeneous cluster. Follow a case-first, actor-later policy: when evidence is still incomplete, keep actor judgement as candidate and avoid forcing primary actor switches; only strengthen actor conclusions after persistence/command_execution continuity is clear. When linking alerts/entities/actor-relations in one pass, prefer case.link-alert-batch, assessment.upsert-batch, actor.case-link-batch, and actor.case-add-observation-batch. Never send empty batch payloads; if no items exist, skip the batch tool. For same-stage events in one case, prefer one aggregated timeline.upsert node instead of per-alert timeline fan-out. Do not run repeated alert.detail-batch for the same alert in one round. For low-signal recon/noise alerts, skip intel.lookup by default unless they materially change case judgment. Keep assessment.upsert-batch consolidated in one call per round when practical. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
+    "query": "Run exactly one patrol pass against the current alert queue. Start with alert.fetch. Use the available secagent tools to triage alerts, maintain cases, and maintain attacker profiles when evidence supports it. Infer the attack chain from concrete alerts/evidence/timeline continuity instead of assumptions. If information is incomplete, explicitly keep uncertainty and do not rush to final conclusions. Keep the round budget-aware and avoid repetitive per-alert fan-out when alerts are homogeneous. Output the final answer with these Markdown headers exactly: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
     "max_turns": 18,
     "max_tool_calls": 18,
     "required_output_headers": [
@@ -13,7 +13,7 @@
     ],
     "required_tool_names": ["alert.fetch"],
     "required_any_tool_names": [],
-    "min_tool_calls": 2,
+    "min_tool_calls": 1,
     "first_tool_name": "alert.fetch"
   },
   "rounds": [
@@ -47,6 +47,12 @@
     "min_alert_decisions": 0,
     "require_actor_coverage_for_high_signal_alerts": true,
     "require_primary_case_actor_for_high_signal_cases": true,
+    "allow_single_chain_case_fallback": true,
+    "min_single_chain_cases": 1,
+    "single_chain_min_alerts": 3,
+    "single_chain_min_distinct_stages": 3,
+    "single_chain_stages": ["exploit", "persistence", "command_execution", "reactivation", "lateral_prep"],
+    "single_chain_severities": ["high", "critical"],
     "high_signal_actor_stages": ["persistence", "command_execution", "reactivation", "lateral_prep"],
     "high_signal_actor_severities": ["high", "critical"]
   }

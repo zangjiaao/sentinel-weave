@@ -10,6 +10,7 @@ from security_analyst_agent.hermes_slow_verify import (
     DEFAULT_FINALIZE_QUERY,
     HermesSlowVerificationError,
     _is_missing_header_error,
+    _is_retryable_round_db_error,
     _run_chat_with_continue_fallback,
     _verify_final_db_state,
     _verify_chat_output,
@@ -135,14 +136,16 @@ def test_load_integration_manifest_requires_zero_failed_tools_and_compromised_ho
     } in final_assertions["required_current_entities"]
 
 
-def test_load_integration_manifest_requires_runtime_case_creation_guidance() -> None:
+def test_load_integration_manifest_uses_weak_guidance_without_forced_playbook() -> None:
     manifest = load_integration_manifest("hermes-slow-integration")
 
+    assert manifest["skills"] == []
     query = manifest["round_defaults"]["query"]
-    assert "case.upsert-batch" in query
-    assert "new case" in query.lower() or "新案件" in query
-    assert "alert.detail-batch" in query
-    assert "exact case.upsert-batch schema keys" in query or "精确的 case.upsert-batch 字段" in query
+    assert "attack chain" in query.lower() or "攻击链" in query
+    assert "evidence" in query.lower() or "证据" in query
+    assert "information is incomplete" in query.lower() or "信息不足" in query
+    assert "exact case.upsert-batch schema keys" not in query
+    assert "alert.detail-batch" not in query
 
 
 def test_verify_final_db_state_fails_when_failed_tool_calls_exist(tmp_path: Path) -> None:
@@ -908,6 +911,125 @@ def test_verify_final_db_state_checks_case_convergence(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_verify_final_db_state_accepts_single_chain_case_without_cluster(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_chain_verify_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_chain_verify_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_chain_verify_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (
+          case_id, title, status, overall_severity, current_stage, primary_actor_id,
+          canonical_case_id, merged_into_case_id, merge_state, merge_updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "case_chain_main",
+            "chain main",
+            "active",
+            "critical",
+            "lateral_prep",
+            "actor_chain_001",
+            "case_chain_main",
+            None,
+            "standalone",
+            "2026-04-14T10:00:30+08:00",
+        ),
+    )
+    for alert_id, occurred_at, stage in [
+        ("alt_chain_verify_001", "2026-04-14T09:55:00+08:00", "persistence"),
+        ("alt_chain_verify_002", "2026-04-14T09:56:00+08:00", "command_execution"),
+        ("alt_chain_verify_003", "2026-04-14T09:57:00+08:00", "lateral_prep"),
+    ]:
+        conn.execute(
+            """
+            insert into alerts (alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                occurred_at,
+                "chain verify",
+                "triaged",
+                "high",
+                stage,
+                "198.51.100.23",
+                "203.0.113.10",
+                "asset_api_prod",
+            ),
+        )
+        conn.execute(
+            """
+            insert into case_alert_links (case_id, alert_id, linked_at, confidence, reason, is_active)
+            values (?, ?, ?, ?, ?, 1)
+            """,
+            (
+                "case_chain_main",
+                alert_id,
+                occurred_at,
+                0.9,
+                "single chain continuity",
+            ),
+        )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+            "min_converged_case_clusters": 1,
+            "allow_single_chain_case_fallback": True,
+            "min_single_chain_cases": 1,
+            "single_chain_min_distinct_stages": 3,
+            "single_chain_min_alerts": 3,
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["converged_case_clusters_count"] == 0
+    assert summary["single_chain_case_candidates_count"] == 1
+    conn.close()
+
+
 def test_verify_final_db_state_fails_when_case_assessments_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "slow.db"
     conn = connect_db(db_path)
@@ -1535,6 +1657,16 @@ def test_is_missing_header_error_matches_chat_output_header_failures(tmp_path: P
     with pytest.raises(HermesSlowVerificationError) as captured:
         _verify_chat_output(chat_stdout="No headers", round_spec=round_spec, artifact_dir=tmp_path)
     assert _is_missing_header_error(captured.value, round_id="round_demo") is True
+
+
+def test_is_retryable_round_db_error_matches_empty_round_failures() -> None:
+    err = HermesSlowVerificationError("round_db_assertions:round_04_lateral_prep", "no patrol_runs created by Hermes flow")
+    assert _is_retryable_round_db_error(err) is True
+
+
+def test_is_retryable_round_db_error_rejects_non_round_failures() -> None:
+    err = HermesSlowVerificationError("final_db_assertions", "expected at least 1 converged case clusters")
+    assert _is_retryable_round_db_error(err) is False
 
 
 def test_main_prints_progress_to_stderr_and_summary_to_stdout(monkeypatch, capsys, tmp_path: Path) -> None:

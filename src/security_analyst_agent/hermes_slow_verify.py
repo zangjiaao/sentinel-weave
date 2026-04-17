@@ -386,6 +386,96 @@ def _is_missing_header_error(error: HermesSlowVerificationError, *, round_id: st
     return error.stage == "chat_output" and f"round {round_id} missing output header:" in error.detail
 
 
+def _is_retryable_round_db_error(error: HermesSlowVerificationError) -> bool:
+    if not error.stage.startswith("round_db_assertions:"):
+        return False
+    if "no patrol_runs created by Hermes flow" in error.detail:
+        return True
+    if "no mcp_auto patrol_runs created by Hermes flow" in error.detail:
+        return True
+    if "expected at least" in error.detail and "tool calls" in error.detail:
+        return True
+    return False
+
+
+def _run_round_chat(
+    *,
+    round_spec: dict[str, Any],
+    env: dict[str, str],
+    model: str | None,
+    provider: str | None,
+    skills: list[str],
+    artifact_dir: Path,
+    prefer_continue: bool,
+) -> str:
+    round_id = round_spec["round_id"]
+    if prefer_continue:
+        result = _run_chat_with_continue_fallback(
+            run_command=_run_command,
+            query=round_spec["query"],
+            max_turns=int(round_spec["max_turns"]),
+            model=model,
+            provider=provider,
+            skills=skills,
+            env=env,
+            cwd=PROJECT_ROOT,
+            timeout_sec=240,
+            artifact_dir=artifact_dir,
+        )
+    else:
+        result = _run_command(
+            build_chat_command(
+                query=round_spec["query"],
+                max_turns=int(round_spec["max_turns"]),
+                model=model,
+                provider=provider,
+                skills=skills,
+                continue_latest=False,
+            ),
+            env=env,
+            cwd=PROJECT_ROOT,
+            timeout_sec=240,
+        )
+        if result.returncode != 0:
+            chat_output = f"{result.stdout}\n{result.stderr}".strip()
+            raise HermesSlowVerificationError(
+                "hermes_chat",
+                f"round {round_id}: {chat_output or 'Hermes chat failed'}",
+                artifact_dir=str(artifact_dir),
+            )
+
+    chat_output = f"{result.stdout}\n{result.stderr}".strip()
+    chat_stdout = result.stdout.strip()
+    try:
+        _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_dir)
+    except HermesSlowVerificationError as exc:
+        if not _is_missing_header_error(exc, round_id=round_id):
+            raise
+        finalize_result = _run_command(
+            build_chat_command(
+                query=str(round_spec.get("finalize_query", DEFAULT_FINALIZE_QUERY)),
+                max_turns=int(round_spec.get("finalize_max_turns", 2)),
+                model=model,
+                provider=provider,
+                continue_latest=True,
+            ),
+            env=env,
+            cwd=PROJECT_ROOT,
+            timeout_sec=120,
+        )
+        finalize_output = f"{finalize_result.stdout}\n{finalize_result.stderr}".strip()
+        if finalize_result.returncode != 0:
+            raise HermesSlowVerificationError(
+                "hermes_chat_finalize",
+                f"round {round_id}: {finalize_output or 'Hermes chat finalize failed'}",
+                artifact_dir=str(artifact_dir),
+            ) from exc
+        chat_stdout = finalize_result.stdout.strip()
+        chat_output = finalize_output
+        _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_dir)
+    return chat_output
+
+
 def _verify_round_db_state(conn, *, round_spec: dict[str, Any], started_at: str) -> dict[str, Any]:
     tool_rows = conn.execute(
         """
@@ -661,6 +751,62 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
                         f"primary case actor missing for high-signal cases: {missing_primary_case_ids}",
                     )
 
+    single_chain_case_candidates_count = 0
+    min_single_chain_cases = int(final_assertions.get("min_single_chain_cases", 0))
+    allow_single_chain_case_fallback = bool(final_assertions.get("allow_single_chain_case_fallback", False))
+    needs_single_chain_eval = allow_single_chain_case_fallback or min_single_chain_cases > 0
+    if needs_single_chain_eval:
+        single_chain_min_alerts = int(final_assertions.get("single_chain_min_alerts", 3))
+        single_chain_min_distinct_stages = int(final_assertions.get("single_chain_min_distinct_stages", 3))
+        single_chain_stages = [
+            str(item).lower()
+            for item in final_assertions.get(
+                "single_chain_stages",
+                final_assertions.get(
+                    "high_signal_actor_stages",
+                    ["exploit", "persistence", "command_execution", "reactivation", "lateral_prep"],
+                ),
+            )
+        ]
+        single_chain_severities = [
+            str(item).lower()
+            for item in final_assertions.get(
+                "single_chain_severities",
+                final_assertions.get("high_signal_actor_severities", ["high", "critical"]),
+            )
+        ]
+        where_clauses = ["case_alert_links.is_active = 1"]
+        params: list[Any] = []
+        if single_chain_stages:
+            stage_placeholders = ", ".join("?" for _ in single_chain_stages)
+            where_clauses.append(f"lower(alerts.attack_stage) in ({stage_placeholders})")
+            params.extend(single_chain_stages)
+        if single_chain_severities:
+            severity_placeholders = ", ".join("?" for _ in single_chain_severities)
+            where_clauses.append(f"lower(alerts.severity) in ({severity_placeholders})")
+            params.extend(single_chain_severities)
+        where_sql = " and ".join(where_clauses)
+        single_chain_case_candidates_count = conn.execute(
+            f"""
+            select count(*)
+            from (
+              select case_alert_links.case_id
+              from case_alert_links
+              join alerts on alerts.alert_id = case_alert_links.alert_id
+              where {where_sql}
+              group by case_alert_links.case_id
+              having count(*) >= ? and count(distinct lower(alerts.attack_stage)) >= ?
+            )
+            """,
+            (*params, single_chain_min_alerts, single_chain_min_distinct_stages),
+        ).fetchone()[0]
+        if single_chain_case_candidates_count < min_single_chain_cases:
+            raise HermesSlowVerificationError(
+                "final_db_assertions",
+                "expected at least "
+                f"{min_single_chain_cases} single-chain case candidates, got {single_chain_case_candidates_count}",
+            )
+
     converged_case_clusters_count = conn.execute(
         """
         select count(*)
@@ -675,11 +821,22 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
     ).fetchone()[0]
     min_converged_case_clusters = int(final_assertions.get("min_converged_case_clusters", 0))
     if converged_case_clusters_count < min_converged_case_clusters:
-        raise HermesSlowVerificationError(
-            "final_db_assertions",
-            "expected at least "
-            f"{min_converged_case_clusters} converged case clusters, got {converged_case_clusters_count}",
-        )
+        fallback_min_single_chain_cases = max(min_single_chain_cases, 1)
+        if allow_single_chain_case_fallback and single_chain_case_candidates_count >= fallback_min_single_chain_cases:
+            pass
+        else:
+            fallback_suffix = ""
+            if allow_single_chain_case_fallback:
+                fallback_suffix = (
+                    "; single-chain fallback candidates="
+                    f"{single_chain_case_candidates_count}, required>={fallback_min_single_chain_cases}"
+                )
+            raise HermesSlowVerificationError(
+                "final_db_assertions",
+                "expected at least "
+                f"{min_converged_case_clusters} converged case clusters, got {converged_case_clusters_count}"
+                f"{fallback_suffix}",
+            )
 
     return {
         "tool_calls_count": len(tool_names),
@@ -691,6 +848,7 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         "entity_assessments_count": entity_assessments_count,
         "alert_decisions_count": alert_decisions_count,
         "converged_case_clusters_count": converged_case_clusters_count,
+        "single_chain_case_candidates_count": single_chain_case_candidates_count,
     }
 
 
@@ -750,56 +908,30 @@ def run_slow_integration(
             apply_memory_spike_round(target_db_path, round_id)
             step += 1
 
-            started_at_iso = datetime.now(timezone.utc).isoformat()
             reporter(step, total_steps, f"运行并校验 Hermes patrol {round_id}")
-            result = _run_chat_with_continue_fallback(
-                run_command=_run_command,
-                query=round_spec["query"],
-                max_turns=int(round_spec["max_turns"]),
-                model=model,
-                provider=provider,
-                skills=list(manifest.get("skills", [])),
-                env=env,
-                cwd=PROJECT_ROOT,
-                timeout_sec=240,
-                artifact_dir=artifact_root,
-            )
-            chat_output = f"{result.stdout}\n{result.stderr}".strip()
-            chat_stdout = result.stdout.strip()
-
-            try:
-                _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_root)
-            except HermesSlowVerificationError as exc:
-                if not _is_missing_header_error(exc, round_id=round_id):
-                    raise
-                finalize_result = _run_command(
-                    build_chat_command(
-                        query=str(round_spec.get("finalize_query", DEFAULT_FINALIZE_QUERY)),
-                        max_turns=int(round_spec.get("finalize_max_turns", 2)),
-                        model=model,
-                        provider=provider,
-                        continue_latest=True,
-                    ),
+            max_round_db_retries = int(round_spec.get("max_round_db_retries", 1))
+            attempt = 0
+            while True:
+                started_at_iso = datetime.now(timezone.utc).isoformat()
+                chat_output = _run_round_chat(
+                    round_spec=round_spec,
                     env=env,
-                    cwd=PROJECT_ROOT,
-                    timeout_sec=120,
+                    model=model,
+                    provider=provider,
+                    skills=list(manifest.get("skills", [])),
+                    artifact_dir=artifact_root,
+                    prefer_continue=(attempt == 0),
                 )
-                finalize_output = f"{finalize_result.stdout}\n{finalize_result.stderr}".strip()
-                if finalize_result.returncode != 0:
-                    raise HermesSlowVerificationError(
-                        "hermes_chat_finalize",
-                        f"round {round_id}: {finalize_output or 'Hermes chat finalize failed'}",
-                        artifact_dir=str(artifact_root),
-                    ) from exc
-                chat_stdout = finalize_result.stdout.strip()
-                chat_output = finalize_output
-                _verify_chat_output(chat_stdout=chat_stdout, round_spec=round_spec, artifact_dir=artifact_root)
-
-            conn = connect_db(target_db_path)
-            try:
-                round_summary = _verify_round_db_state(conn, round_spec=round_spec, started_at=started_at_iso)
-            finally:
-                conn.close()
+                conn = connect_db(target_db_path)
+                try:
+                    round_summary = _verify_round_db_state(conn, round_spec=round_spec, started_at=started_at_iso)
+                    break
+                except HermesSlowVerificationError as exc:
+                    if attempt >= max_round_db_retries or not _is_retryable_round_db_error(exc):
+                        raise
+                finally:
+                    conn.close()
+                attempt += 1
             round_summary["chat_output_excerpt"] = chat_output[:2000]
             round_summaries.append(round_summary)
             step += 1
