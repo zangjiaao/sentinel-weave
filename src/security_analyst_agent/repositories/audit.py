@@ -315,12 +315,60 @@ def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_i
     return min(component) if component else case_id
 
 
+def _normalize_escalation_stage(stage: str | None) -> str:
+    normalized = str(stage or "").strip().lower()
+    if normalized in _AUTO_ESCALATION_STAGE_ORDER:
+        return normalized
+    return _AUTO_ESCALATION_MIN_STAGE
+
+
+def _build_stage_dedupe_key(*, anchor_case_id: str, stage: str) -> str:
+    return f"{anchor_case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}:stage:{stage}"
+
+
+def _extract_stage_from_dedupe_key(dedupe_key: str | None) -> str | None:
+    if not dedupe_key:
+        return None
+    marker = ":stage:"
+    if marker not in dedupe_key:
+        return None
+    stage = dedupe_key.rsplit(marker, 1)[-1]
+    normalized = _normalize_escalation_stage(stage)
+    if normalized in _AUTO_ESCALATION_STAGE_ORDER:
+        return normalized
+    return None
+
+
+def _load_max_notified_stage_rank_for_chain(conn: sqlite3.Connection, *, anchor_case_id: str) -> int:
+    prefix = f"{anchor_case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}"
+    rows = conn.execute(
+        """
+        select dedupe_key
+        from escalation_decisions
+        where triggered = 1
+          and dedupe_key like ?
+        order by occurred_at asc
+        """,
+        (f"{prefix}%",),
+    ).fetchall()
+    max_rank = 0
+    for row in rows:
+        dedupe_key = str(row["dedupe_key"] or "")
+        stage = _extract_stage_from_dedupe_key(dedupe_key)
+        if stage is None:
+            max_rank = max(max_rank, _stage_rank(_AUTO_ESCALATION_MIN_STAGE))
+            continue
+        max_rank = max(max_rank, _stage_rank(stage))
+    return max_rank
+
+
 def _send_auto_escalation_notification(
     conn: sqlite3.Connection,
     *,
     case_id: str,
     source_case_id: str | None = None,
     dedupe_case_id: str | None = None,
+    escalation_stage: str | None = None,
 ) -> None:
     from security_analyst_agent.repositories.cases import load_case
     from security_analyst_agent.services.output import build_notify_preview
@@ -329,9 +377,37 @@ def _send_auto_escalation_notification(
     if case is None:
         return
 
+    effective_stage = _normalize_escalation_stage(escalation_stage or case.get("current_stage"))
+    effective_stage_rank = _stage_rank(effective_stage)
+    if effective_stage_rank < _stage_rank(_AUTO_ESCALATION_MIN_STAGE):
+        return
+
     dedupe_anchor_case_id = dedupe_case_id or case_id
-    dedupe_key = f"{dedupe_anchor_case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}"
+    dedupe_key = _build_stage_dedupe_key(anchor_case_id=dedupe_anchor_case_id, stage=effective_stage)
     source_case = source_case_id or case_id
+    max_notified_stage_rank = _load_max_notified_stage_rank_for_chain(conn, anchor_case_id=dedupe_anchor_case_id)
+    if effective_stage_rank <= max_notified_stage_rank:
+        insert_escalation_log(
+            conn,
+            case_id=case_id,
+            triggered=False,
+            channel=_AUTO_ESCALATION_CHANNEL,
+            template=_AUTO_ESCALATION_TEMPLATE,
+            notification_id=None,
+            dedupe_key=dedupe_key,
+            reason="dedupe_hit",
+            detail={
+                "status": "deduped_stage_not_advanced",
+                "auto_policy": "stage_progression_with_convergence",
+                "source_case_id": source_case,
+                "escalation_case_id": case_id,
+                "dedupe_case_id": dedupe_anchor_case_id,
+                "escalation_stage": effective_stage,
+                "max_notified_stage_rank": max_notified_stage_rank,
+            },
+        )
+        return
+
     existing = conn.execute(
         """
         select notification_id
@@ -354,10 +430,11 @@ def _send_auto_escalation_notification(
             reason="dedupe_hit",
             detail={
                 "status": "deduped",
-                "auto_policy": "stage_persistence_with_continuity",
+                "auto_policy": "stage_progression_with_convergence",
                 "source_case_id": source_case,
                 "escalation_case_id": case_id,
                 "dedupe_case_id": dedupe_anchor_case_id,
+                "escalation_stage": effective_stage,
             },
         )
         return
@@ -395,10 +472,11 @@ def _send_auto_escalation_notification(
         reason="threshold_met",
         detail={
             "status": "sent_simulated",
-            "auto_policy": "stage_persistence_with_continuity",
+            "auto_policy": "stage_progression_with_convergence",
             "source_case_id": source_case,
             "escalation_case_id": case_id,
             "dedupe_case_id": dedupe_anchor_case_id,
+            "escalation_stage": effective_stage,
         },
     )
 
@@ -408,10 +486,15 @@ def _auto_escalate_after_case_update(conn: sqlite3.Connection, *, result: dict[s
         return
     for case_id in _extract_case_ids_from_result(result):
         if _should_auto_escalate_case(conn, case_id=case_id):
+            stage_row = conn.execute(
+                "select current_stage from cases where case_id = ?",
+                (case_id,),
+            ).fetchone()
             _send_auto_escalation_notification(
                 conn,
                 case_id=case_id,
                 dedupe_case_id=_resolve_escalation_chain_anchor_case_id(conn, case_id=case_id),
+                escalation_stage=stage_row["current_stage"] if stage_row is not None else None,
             )
 
 
@@ -440,11 +523,16 @@ def _auto_escalate_after_run_convergence(conn: sqlite3.Connection, *, run_id: st
 
     for target_case_id, source_case_id in sorted(first_source_by_target.items()):
         if _should_auto_escalate_case(conn, case_id=target_case_id):
+            stage_row = conn.execute(
+                "select current_stage from cases where case_id = ?",
+                (target_case_id,),
+            ).fetchone()
             _send_auto_escalation_notification(
                 conn,
                 case_id=target_case_id,
                 source_case_id=source_case_id,
                 dedupe_case_id=_resolve_escalation_chain_anchor_case_id(conn, case_id=target_case_id),
+                escalation_stage=stage_row["current_stage"] if stage_row is not None else None,
             )
 
 

@@ -335,7 +335,7 @@ def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
           merge_state,
           status
         from cases
-        where status in ('open', 'investigating', 'observing')
+        where status in ('open', 'active', 'investigating', 'observing')
            or merge_state = 'merged'
         """
     ).fetchall()
@@ -997,7 +997,7 @@ def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
             if member_severity_rank > target_severity_rank:
                 target_severity = member_severity
                 target_severity_rank = member_severity_rank
-            if str(member["status"] or "").lower() in {"open", "investigating", "observing"}:
+            if str(member["status"] or "").lower() in {"open", "active", "investigating", "observing"}:
                 has_active_member = True
 
         status_target = canonical_row["status"]

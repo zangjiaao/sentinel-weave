@@ -902,6 +902,97 @@ def test_case_convergence_backfills_high_signal_alert_actor_coverage_with_single
     conn.close()
 
 
+def test_case_convergence_includes_active_status_case_in_relation_and_merge(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_active_conv_anchor",
+            "title": "active conv anchor",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_active_conv_anchor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_active_conv_child",
+            "title": "active conv child",
+            "status": "active",
+            "overall_severity": "high",
+            "current_stage": "lateral_prep",
+            "primary_actor_id": "actor_active_conv_child",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_active_conv_anchor",
+            "case_active_conv_anchor",
+            "2026-04-12T09:40:00+08:00",
+            "webshell",
+            "active status merge anchor",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_active_conv_anchor",
+        case_id="case_active_conv_anchor",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_active_conv_child",
+        case_id="case_active_conv_child",
+        occurred_at="2026-04-12T10:10:00+08:00",
+        stage="lateral_prep",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    run_case_convergence_for_run(conn, run_id="run_active_case_merge_1")
+    run_case_convergence_for_run(conn, run_id="run_active_case_merge_2")
+    summary = run_case_convergence_for_run(conn, run_id="run_active_case_merge_3")
+    assert summary["confirmed_relations_count"] >= 1
+    assert summary["merge_events_count"] >= 1
+
+    merged_child = conn.execute(
+        """
+        select canonical_case_id, merged_into_case_id, merge_state, status
+        from cases
+        where case_id = 'case_active_conv_child'
+        """
+    ).fetchone()
+    assert merged_child is not None
+    assert merged_child["canonical_case_id"] == "case_active_conv_anchor"
+    assert merged_child["merged_into_case_id"] == "case_active_conv_anchor"
+    assert merged_child["merge_state"] == "merged"
+    assert merged_child["status"] == "closed"
+    conn.close()
+
+
 def test_case_convergence_can_reattach_case_after_stronger_new_relation(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

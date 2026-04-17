@@ -740,7 +740,7 @@ def test_mcp_auto_escalation_dedupes_to_single_canonical_notification(tmp_path) 
 
     notifications = conn.execute(
         """
-        select case_id, channel, template, status
+        select case_id, channel, template, status, dedupe_key
         from notification_outbox
         order by created_at asc
         """
@@ -750,6 +750,7 @@ def test_mcp_auto_escalation_dedupes_to_single_canonical_notification(tmp_path) 
     assert notifications[0]["channel"] == "email"
     assert notifications[0]["template"] == "high_severity"
     assert notifications[0]["status"] == "sent_simulated"
+    assert notifications[0]["dedupe_key"].endswith(":stage:command_execution")
 
     escalation_rows = conn.execute(
         """
@@ -762,6 +763,125 @@ def test_mcp_auto_escalation_dedupes_to_single_canonical_notification(tmp_path) 
     assert escalation_rows[0]["case_id"] == "case_chain_a"
     assert escalation_rows[0]["triggered"] == 1
     assert escalation_rows[0]["reason"] == "threshold_met"
+    conn.close()
+
+
+def test_mcp_stage_progression_escalates_once_per_advanced_stage(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_stage_progress_001",
+            "title": "stage progression",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "recon",
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "evidence.upsert",
+        {
+            "evidence_id": "evi_stage_progress_webshell",
+            "case_id": "case_stage_progress_001",
+            "occurred_at": "2026-04-11T14:20:00+08:00",
+            "evidence_type": "webshell",
+            "summary": "stage progression continuity",
+        },
+        source="mcp",
+    )
+
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_stage_progress_001",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_stage_progress_001",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_stage_progress_001",
+            "overall_severity": "high",
+            "current_stage": "lateral_prep",
+            "status": "open",
+            "force_downgrade": False,
+        },
+        source="mcp",
+    )
+    dispatch_tool(
+        conn,
+        "case.update-risk",
+        {
+            "case_id": "case_stage_progress_001",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "status": "open",
+            "force_downgrade": True,
+        },
+        source="mcp",
+    )
+
+    notifications = conn.execute(
+        """
+        select dedupe_key
+        from notification_outbox
+        where case_id = ?
+        order by created_at asc
+        """,
+        ("case_stage_progress_001",),
+    ).fetchall()
+    assert [row["dedupe_key"] for row in notifications] == [
+        "case_stage_progress_001:email:high_severity:stage:persistence",
+        "case_stage_progress_001:email:high_severity:stage:command_execution",
+        "case_stage_progress_001:email:high_severity:stage:lateral_prep",
+    ]
+
+    escalation_rows = conn.execute(
+        """
+        select triggered, reason, dedupe_key, detail_json
+        from escalation_decisions
+        where case_id = ?
+        order by occurred_at asc
+        """,
+        ("case_stage_progress_001",),
+    ).fetchall()
+    assert len(escalation_rows) == 4
+    assert [row["triggered"] for row in escalation_rows] == [1, 1, 1, 0]
+    assert [row["reason"] for row in escalation_rows] == [
+        "threshold_met",
+        "threshold_met",
+        "threshold_met",
+        "dedupe_hit",
+    ]
+    assert escalation_rows[-1]["dedupe_key"].endswith(":stage:command_execution")
+    assert "deduped_stage_not_advanced" in escalation_rows[-1]["detail_json"]
     conn.close()
 
 
