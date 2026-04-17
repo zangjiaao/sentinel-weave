@@ -1,13 +1,63 @@
 import sqlite3
 
+_SEVERITY_RANK_SQL = (
+    "case alerts.severity "
+    "when 'low' then 1 "
+    "when 'medium' then 2 "
+    "when 'high' then 3 "
+    "when 'critical' then 4 "
+    "else 0 end"
+)
 
-def fetch_alerts(
-    conn: sqlite3.Connection,
-    limit: int,
+_SEVERITY_LABEL_BY_RANK = {
+    4: "critical",
+    3: "high",
+    2: "medium",
+    1: "low",
+}
+_P0_STAGES = ("command_execution", "lateral_prep", "reactivation")
+
+
+def _build_cluster_group_cte(where_clause: str) -> str:
+    return f"""
+    with filtered_alerts as (
+      select
+        alerts.alert_id,
+        alerts.occurred_at,
+        alerts.title,
+        alerts.status,
+        alerts.severity,
+        lower(alerts.attack_stage) as attack_stage,
+        alerts.src_ip,
+        alerts.dst_ip,
+        alerts.asset_id,
+        {_SEVERITY_RANK_SQL} as severity_rank
+      from alerts
+      {where_clause}
+    ),
+    grouped_clusters as (
+      select
+        coalesce(filtered_alerts.src_ip, '') as src_ip_key,
+        coalesce(filtered_alerts.asset_id, '') as asset_id_key,
+        filtered_alerts.attack_stage as attack_stage_key,
+        count(*) as alert_count,
+        min(filtered_alerts.occurred_at) as first_occurred_at,
+        max(filtered_alerts.occurred_at) as last_occurred_at,
+        max(filtered_alerts.severity_rank) as max_severity_rank,
+        sum(case when filtered_alerts.severity_rank >= 3 then 1 else 0 end) as high_severity_count
+      from filtered_alerts
+      group by src_ip_key, asset_id_key, attack_stage_key
+      having count(*) >= ? or max(filtered_alerts.severity_rank) >= 3
+    )
+    """
+
+
+def _build_alert_filters(
+    *,
     statuses: list[str],
-    min_severity: str | None = None,
-    analysis_cutoff_at: str | None = None,
-) -> list[dict]:
+    min_severity: str | None,
+    analysis_cutoff_at: str | None,
+) -> tuple[list[str], list[object]]:
     conditions: list[str] = []
     params: list[object] = []
 
@@ -19,16 +69,58 @@ def fetch_alerts(
     if min_severity:
         rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
         min_rank = rank.get(min_severity.lower(), 1)
-        conditions.append(
-            "case alerts.severity when 'low' then 1 when 'medium' then 2 when 'high' then 3 when 'critical' then 4 else 0 end >= ?"
-        )
+        conditions.append(f"{_SEVERITY_RANK_SQL} >= ?")
         params.append(min_rank)
 
     if analysis_cutoff_at:
         conditions.append("alerts.occurred_at <= ?")
         params.append(analysis_cutoff_at)
 
-    where_clause = f"where {' and '.join(conditions)}" if conditions else ""
+    return conditions, params
+
+
+def _build_where_clause(conditions: list[str]) -> str:
+    if not conditions:
+        return ""
+    return f"where {' and '.join(conditions)}"
+
+
+def count_alerts(
+    conn: sqlite3.Connection,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+) -> int:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    row = conn.execute(
+        f"""
+        select count(*)
+        from alerts
+        {_build_where_clause(conditions)}
+        """,
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def fetch_alerts(
+    conn: sqlite3.Connection,
+    limit: int,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+) -> list[dict]:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
     params.append(limit)
     rows = conn.execute(
         f"""
@@ -58,7 +150,7 @@ def fetch_alerts(
           alerts.dst_ip,
           alerts.asset_id
         from alerts
-        {where_clause}
+        {_build_where_clause(conditions)}
         order by alerts.occurred_at desc
         limit ?
         """,
@@ -71,6 +163,208 @@ def fetch_alerts(
         ),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def fetch_alert_clusters(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    offset: int = 0,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+    cluster_min_count: int = 2,
+    sample_size: int = 3,
+) -> list[dict]:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    where_clause = _build_where_clause(conditions)
+
+    cluster_group_cte = _build_cluster_group_cte(where_clause)
+    p0_stage_placeholders = ", ".join("?" for _ in _P0_STAGES)
+    rows = conn.execute(
+        f"""
+        {cluster_group_cte}
+        select
+          grouped_clusters.src_ip_key,
+          grouped_clusters.asset_id_key,
+          grouped_clusters.attack_stage_key,
+          grouped_clusters.alert_count,
+          grouped_clusters.first_occurred_at,
+          grouped_clusters.last_occurred_at,
+          grouped_clusters.max_severity_rank,
+          grouped_clusters.high_severity_count,
+          case
+            when grouped_clusters.attack_stage_key in ({p0_stage_placeholders}) or grouped_clusters.max_severity_rank >= 4 then 0
+            when grouped_clusters.attack_stage_key = 'persistence' or grouped_clusters.max_severity_rank >= 3 then 1
+            else 2
+          end as priority_rank
+        from grouped_clusters
+        order by priority_rank asc, grouped_clusters.max_severity_rank desc, grouped_clusters.alert_count desc, grouped_clusters.last_occurred_at desc
+        limit ?
+        offset ?
+        """,
+        (*params, cluster_min_count, *_P0_STAGES, limit, offset),
+    ).fetchall()
+
+    clusters: list[dict] = []
+    for row in rows:
+        src_ip_key = str(row["src_ip_key"] or "")
+        asset_id_key = str(row["asset_id_key"] or "")
+        attack_stage_key = str(row["attack_stage_key"] or "")
+        sample_rows = conn.execute(
+            f"""
+            select
+              alerts.alert_id,
+              alerts.occurred_at,
+              alerts.title,
+              alerts.status,
+              alerts.severity,
+              alerts.attack_stage,
+              alerts.src_ip,
+              alerts.dst_ip,
+              alerts.asset_id
+            from alerts
+            {where_clause}
+              {"and" if where_clause else "where"} ((alerts.src_ip is null and ? = '') or alerts.src_ip = ?)
+              and ((alerts.asset_id is null and ? = '') or alerts.asset_id = ?)
+              and lower(alerts.attack_stage) = ?
+            order by alerts.occurred_at desc
+            limit ?
+            """,
+            (*params, src_ip_key, src_ip_key, asset_id_key, asset_id_key, attack_stage_key, sample_size),
+        ).fetchall()
+        samples = [dict(item) for item in sample_rows]
+        max_severity_rank = int(row["max_severity_rank"])
+        cluster_id = (
+            f"clu::{attack_stage_key or 'unknown'}::"
+            f"{src_ip_key or 'unknown'}::{asset_id_key or 'unknown'}"
+        )
+        clusters.append(
+            {
+                "cluster_id": cluster_id,
+                "priority_bucket": "p0" if int(row["priority_rank"]) == 0 else "p1" if int(row["priority_rank"]) == 1 else "p2",
+                "attack_stage": attack_stage_key,
+                "src_ip": src_ip_key or None,
+                "asset_id": asset_id_key or None,
+                "alert_count": int(row["alert_count"]),
+                "high_severity_count": int(row["high_severity_count"]),
+                "max_severity": _SEVERITY_LABEL_BY_RANK.get(max_severity_rank, "low"),
+                "first_occurred_at": row["first_occurred_at"],
+                "last_occurred_at": row["last_occurred_at"],
+                "sample_alert_ids": [item["alert_id"] for item in samples],
+                "sample_alerts": samples,
+            }
+        )
+    return clusters
+
+
+def count_alert_clusters(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+    cluster_min_count: int = 2,
+) -> int:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    where_clause = _build_where_clause(conditions)
+    row = conn.execute(
+        f"""
+        {_build_cluster_group_cte(where_clause)}
+        select count(*)
+        from grouped_clusters
+        """,
+        (*params, cluster_min_count),
+    ).fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def count_alerts_covered_by_clusters(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+    cluster_min_count: int = 2,
+) -> int:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    where_clause = _build_where_clause(conditions)
+    row = conn.execute(
+        f"""
+        {_build_cluster_group_cte(where_clause)}
+        select coalesce(sum(alert_count), 0)
+        from grouped_clusters
+        """,
+        (*params, cluster_min_count),
+    ).fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def summarize_alert_cluster_buckets(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None = None,
+    analysis_cutoff_at: str | None = None,
+    cluster_min_count: int = 2,
+) -> dict[str, dict[str, int]]:
+    conditions, params = _build_alert_filters(
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    where_clause = _build_where_clause(conditions)
+    p0_stage_placeholders = ", ".join("?" for _ in _P0_STAGES)
+    row = conn.execute(
+        f"""
+        {_build_cluster_group_cte(where_clause)}
+        select
+          coalesce(sum(case when grouped_clusters.attack_stage_key in ({p0_stage_placeholders}) or grouped_clusters.max_severity_rank >= 4 then 1 else 0 end), 0) as p0_cluster_count,
+          coalesce(sum(case when grouped_clusters.attack_stage_key in ({p0_stage_placeholders}) or grouped_clusters.max_severity_rank >= 4 then grouped_clusters.alert_count else 0 end), 0) as p0_alert_count,
+          coalesce(sum(case when grouped_clusters.attack_stage_key not in ({p0_stage_placeholders}) and (grouped_clusters.attack_stage_key = 'persistence' or grouped_clusters.max_severity_rank >= 3) then 1 else 0 end), 0) as p1_cluster_count,
+          coalesce(sum(case when grouped_clusters.attack_stage_key not in ({p0_stage_placeholders}) and (grouped_clusters.attack_stage_key = 'persistence' or grouped_clusters.max_severity_rank >= 3) then grouped_clusters.alert_count else 0 end), 0) as p1_alert_count,
+          coalesce(sum(case when grouped_clusters.attack_stage_key not in ({p0_stage_placeholders}) and grouped_clusters.attack_stage_key <> 'persistence' and grouped_clusters.max_severity_rank < 3 then 1 else 0 end), 0) as p2_cluster_count,
+          coalesce(sum(case when grouped_clusters.attack_stage_key not in ({p0_stage_placeholders}) and grouped_clusters.attack_stage_key <> 'persistence' and grouped_clusters.max_severity_rank < 3 then grouped_clusters.alert_count else 0 end), 0) as p2_alert_count
+        from grouped_clusters
+        """,
+        (
+            *params,
+            cluster_min_count,
+            *_P0_STAGES,
+            *_P0_STAGES,
+            *_P0_STAGES,
+            *_P0_STAGES,
+            *_P0_STAGES,
+            *_P0_STAGES,
+        ),
+    ).fetchone()
+    if row is None:
+        return {
+            "p0": {"cluster_count": 0, "alert_count": 0},
+            "p1": {"cluster_count": 0, "alert_count": 0},
+            "p2": {"cluster_count": 0, "alert_count": 0},
+        }
+    return {
+        "p0": {"cluster_count": int(row["p0_cluster_count"]), "alert_count": int(row["p0_alert_count"])},
+        "p1": {"cluster_count": int(row["p1_cluster_count"]), "alert_count": int(row["p1_alert_count"])},
+        "p2": {"cluster_count": int(row["p2_cluster_count"]), "alert_count": int(row["p2_alert_count"])},
+    }
 
 
 def get_alert_by_id(conn: sqlite3.Connection, alert_id: str, analysis_cutoff_at: str | None = None) -> dict | None:

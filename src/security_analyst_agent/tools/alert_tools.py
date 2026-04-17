@@ -2,10 +2,15 @@ import sqlite3
 
 from security_analyst_agent.repositories.alerts import (
     ack_alerts,
+    count_alerts,
+    count_alert_clusters,
+    count_alerts_covered_by_clusters,
     fetch_alerts,
+    fetch_alert_clusters,
     get_alert_by_id,
     get_alert_evidence_summaries,
     get_case_evidence_summaries,
+    summarize_alert_cluster_buckets,
 )
 from security_analyst_agent.repositories.audit import insert_alert_decision_log, load_active_analysis_cutoff
 from security_analyst_agent.schemas.alert_tools import (
@@ -20,18 +25,114 @@ from security_analyst_agent.schemas.common import ToolResponse
 def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     request = AlertFetchRequest.model_validate(payload)
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
-    alerts = fetch_alerts(
-        conn,
-        request.limit,
-        request.status,
-        request.min_severity,
-        analysis_cutoff_at=analysis_cutoff_at,
-    )
+    requested_mode = request.mode
+    total_candidates: int | None = None
+    if requested_mode in {"auto", "clusters"}:
+        total_candidates = count_alerts(
+            conn,
+            statuses=request.status,
+            min_severity=request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+        )
+    effective_mode = requested_mode
+    if requested_mode == "auto":
+        threshold = request.auto_cluster_threshold
+        if (total_candidates or 0) >= threshold:
+            effective_mode = "clusters"
+        else:
+            effective_mode = "alerts"
+
+    warnings: list[str] = []
+    alerts: list[dict] = []
+    clusters: list[dict] = []
+    refs_alert_ids: list[str] = []
+    page_has_more = False
+    page_next_cursor: str | None = None
+    total_cluster_candidates: int | None = None
+    priority_buckets: dict[str, dict[str, int]] | None = None
+    if effective_mode == "clusters":
+        cluster_offset = 0
+        if request.cursor:
+            try:
+                cluster_offset = int(request.cursor)
+                if cluster_offset < 0:
+                    raise ValueError("cursor must be non-negative")
+            except ValueError:
+                warnings.append("invalid_cluster_cursor_reset")
+                cluster_offset = 0
+
+        total_cluster_candidates = count_alert_clusters(
+            conn,
+            statuses=request.status,
+            min_severity=request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+            cluster_min_count=request.cluster_min_count,
+        )
+        clusters = fetch_alert_clusters(
+            conn,
+            limit=request.limit,
+            offset=cluster_offset,
+            statuses=request.status,
+            min_severity=request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+            cluster_min_count=request.cluster_min_count,
+            sample_size=request.cluster_sample_size,
+        )
+        priority_buckets = summarize_alert_cluster_buckets(
+            conn,
+            statuses=request.status,
+            min_severity=request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+            cluster_min_count=request.cluster_min_count,
+        )
+        refs_alert_ids = list(dict.fromkeys([item for cluster in clusters for item in cluster["sample_alert_ids"]]))
+        covered_alert_count = count_alerts_covered_by_clusters(
+            conn,
+            statuses=request.status,
+            min_severity=request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+            cluster_min_count=request.cluster_min_count,
+        )
+        omitted_alert_count = max((total_candidates or 0) - covered_alert_count, 0)
+        if omitted_alert_count > 0:
+            warnings.append("cluster_filter_omitted_low_volume_alerts")
+        page_has_more = cluster_offset + len(clusters) < (total_cluster_candidates or 0)
+        page_next_cursor = str(cluster_offset + len(clusters)) if page_has_more else None
+        if page_has_more:
+            warnings.append("cluster_backlog_remaining")
+        summary = (
+            f"返回 {len(clusters)} 个告警聚合簇（当前偏移 {cluster_offset}，"
+            f"总簇 {total_cluster_candidates or 0}，覆盖 {covered_alert_count} 条告警）"
+        )
+    else:
+        alerts = fetch_alerts(
+            conn,
+            request.limit,
+            request.status,
+            request.min_severity,
+            analysis_cutoff_at=analysis_cutoff_at,
+        )
+        refs_alert_ids = [item["alert_id"] for item in alerts]
+        omitted_alert_count = 0
+        if total_candidates is None:
+            total_candidates = len(alerts)
+        summary = f"返回 {len(alerts)} 条待研判告警摘要"
+
     response = ToolResponse(
         ok=True,
-        summary=f"返回 {len(alerts)} 条待研判告警摘要",
-        data={"alerts": alerts},
-        refs={"alert_ids": [item["alert_id"] for item in alerts]},
+        summary=summary,
+        data={
+            "mode": effective_mode,
+            "alerts": alerts,
+            "clusters": clusters,
+            "total_candidates": total_candidates,
+            "total_cluster_candidates": total_cluster_candidates,
+            "priority_buckets": priority_buckets,
+            "omitted_alert_count": omitted_alert_count,
+        },
+        refs={"alert_ids": refs_alert_ids},
+        warnings=warnings,
+        page={"next_cursor": page_next_cursor, "has_more": page_has_more},
     )
     return response.model_dump(mode="json", by_alias=True)
 

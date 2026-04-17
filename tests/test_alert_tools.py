@@ -6,6 +6,7 @@ from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, al
 def test_alert_fetch_request_defaults_limit_to_20() -> None:
     request = AlertFetchRequest.model_validate({})
     assert request.limit == 20
+    assert request.mode == "auto"
 
 
 def test_tool_response_requires_summary() -> None:
@@ -17,6 +18,7 @@ def test_tool_response_requires_summary() -> None:
 def test_alert_fetch_returns_ranked_queue(db_conn) -> None:
     result = alert_fetch(db_conn, {"status": ["new", "open"], "limit": 10})
     assert result["ok"] is True
+    assert result["data"]["mode"] == "alerts"
     assert result["data"]["alerts"][0]["alert_id"] == "alt_day3_shell_01"
 
 
@@ -100,3 +102,232 @@ def test_alert_detail_batch_reports_missing_ids(db_conn) -> None:
     assert len(result["data"]["alerts"]) == 1
     assert result["data"]["missing_alert_ids"] == ["alt_missing_001"]
     assert "alert_not_found:alt_missing_001" in result["warnings"]
+
+
+def test_alert_fetch_clusters_groups_repeated_alerts_and_keeps_high_singleton(db_conn) -> None:
+    rows = []
+    for index in range(5):
+        rows.append(
+            (
+                f"alt_cluster_noise_{index}",
+                f"2026-04-13T10:0{index}:00+08:00",
+                "重复扫描噪音",
+                "new",
+                "low",
+                "recon",
+                "203.0.113.201",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    rows.extend(
+        [
+            (
+                "alt_cluster_high_singleton",
+                "2026-04-13T10:10:00+08:00",
+                "高危单点持久化",
+                "new",
+                "high",
+                "persistence",
+                "198.51.100.201",
+                "203.0.113.10",
+                "asset_api_prod",
+            ),
+            (
+                "alt_cluster_medium_singleton",
+                "2026-04-13T10:11:00+08:00",
+                "中危单点探测",
+                "new",
+                "medium",
+                "recon",
+                "198.51.100.202",
+                "203.0.113.11",
+                "asset_admin_portal",
+            ),
+        ]
+    )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    result = alert_fetch(
+        db_conn,
+        {
+            "mode": "clusters",
+            "status": ["new"],
+            "limit": 10,
+            "cluster_min_count": 3,
+            "cluster_sample_size": 2,
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["mode"] == "clusters"
+    assert result["data"]["alerts"] == []
+    assert result["data"]["total_candidates"] == 7
+    assert result["data"]["omitted_alert_count"] == 1
+    assert "cluster_filter_omitted_low_volume_alerts" in result["warnings"]
+
+    clusters = result["data"]["clusters"]
+    assert len(clusters) == 2
+    repeated_cluster = next(item for item in clusters if item["src_ip"] == "203.0.113.201")
+    assert repeated_cluster["alert_count"] == 5
+    assert len(repeated_cluster["sample_alert_ids"]) == 2
+    high_singleton_cluster = next(item for item in clusters if item["src_ip"] == "198.51.100.201")
+    assert high_singleton_cluster["alert_count"] == 1
+    assert high_singleton_cluster["max_severity"] == "high"
+
+
+def test_alert_fetch_auto_switches_to_clusters_when_volume_exceeds_threshold(db_conn) -> None:
+    rows = []
+    for index in range(25):
+        rows.append(
+            (
+                f"alt_auto_cluster_{index}",
+                f"2026-04-13T11:{index:02d}:00+08:00",
+                "大批量同源扫描",
+                "new",
+                "low",
+                "recon",
+                "192.0.2.201",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    result = alert_fetch(
+        db_conn,
+        {
+            "mode": "auto",
+            "status": ["new"],
+            "limit": 5,
+            "auto_cluster_threshold": 20,
+            "cluster_min_count": 2,
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["mode"] == "clusters"
+    assert result["data"]["alerts"] == []
+    assert len(result["data"]["clusters"]) >= 1
+
+
+def test_alert_fetch_clusters_supports_backlog_cursor_and_priority_buckets(db_conn) -> None:
+    rows = []
+    for index in range(3):
+        rows.append(
+            (
+                f"alt_backlog_p0_{index}",
+                f"2026-04-13T12:0{index}:00+08:00",
+                "高危命令执行",
+                "new",
+                "critical",
+                "command_execution",
+                "198.51.100.31",
+                "203.0.113.10",
+                "asset_api_prod",
+            )
+        )
+        rows.append(
+            (
+                f"alt_backlog_p1_{index}",
+                f"2026-04-13T12:1{index}:00+08:00",
+                "高危持久化",
+                "new",
+                "high",
+                "persistence",
+                "198.51.100.32",
+                "203.0.113.10",
+                "asset_api_prod",
+            )
+        )
+        rows.append(
+            (
+                f"alt_backlog_p2_{index}",
+                f"2026-04-13T12:2{index}:00+08:00",
+                "中危侦察",
+                "new",
+                "medium",
+                "recon",
+                "198.51.100.33",
+                "203.0.113.11",
+                "asset_admin_portal",
+            )
+        )
+    rows.append(
+        (
+            "alt_backlog_omitted_single",
+            "2026-04-13T12:59:00+08:00",
+            "低危单点噪音",
+            "new",
+            "low",
+            "recon",
+            "203.0.113.201",
+            "203.0.113.12",
+            "asset_static_www",
+        )
+    )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    first = alert_fetch(
+        db_conn,
+        {
+            "mode": "clusters",
+            "status": ["new"],
+            "limit": 1,
+            "cluster_min_count": 2,
+            "cluster_sample_size": 1,
+        },
+    )
+    assert first["ok"] is True
+    assert first["data"]["mode"] == "clusters"
+    assert len(first["data"]["clusters"]) == 1
+    assert first["data"]["clusters"][0]["src_ip"] == "198.51.100.31"
+    assert first["data"]["total_cluster_candidates"] == 3
+    assert first["data"]["priority_buckets"] == {
+        "p0": {"cluster_count": 1, "alert_count": 3},
+        "p1": {"cluster_count": 1, "alert_count": 3},
+        "p2": {"cluster_count": 1, "alert_count": 3},
+    }
+    assert first["data"]["omitted_alert_count"] == 1
+    assert first["page"]["has_more"] is True
+    assert first["page"]["next_cursor"] == "1"
+    assert "cluster_backlog_remaining" in first["warnings"]
+    assert "cluster_filter_omitted_low_volume_alerts" in first["warnings"]
+
+    second = alert_fetch(
+        db_conn,
+        {
+            "mode": "clusters",
+            "status": ["new"],
+            "limit": 1,
+            "cluster_min_count": 2,
+            "cursor": first["page"]["next_cursor"],
+        },
+    )
+    assert second["ok"] is True
+    assert len(second["data"]["clusters"]) == 1
+    assert second["data"]["clusters"][0]["src_ip"] == "198.51.100.32"
+    assert second["page"]["has_more"] is True
+    assert second["page"]["next_cursor"] == "2"

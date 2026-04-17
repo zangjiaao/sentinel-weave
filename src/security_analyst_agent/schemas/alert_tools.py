@@ -12,6 +12,10 @@ class AlertFetchRequest(BaseModel):
     status: list[str] = Field(default_factory=list)
     limit: int = 20
     cursor: str | None = None
+    mode: Literal["auto", "alerts", "clusters"] = "auto"
+    auto_cluster_threshold: int = Field(default=200, ge=1)
+    cluster_min_count: int = Field(default=2, ge=1)
+    cluster_sample_size: int = Field(default=3, ge=1, le=10)
 
 
 class AlertDetailRequest(BaseModel):
