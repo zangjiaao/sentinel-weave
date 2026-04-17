@@ -958,6 +958,360 @@ def test_verify_final_db_state_fails_when_primary_case_actor_missing_for_single_
     conn.close()
 
 
+def test_verify_final_db_state_fails_when_high_signal_alert_missing_actor_coverage(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_actor_cov_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_actor_cov_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_actor_cov_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (case_id, title, status, overall_severity, current_stage, primary_actor_id)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        ("case_actor_cov_001", "case", "open", "high", "command_execution", None),
+    )
+    conn.execute(
+        """
+        insert into alerts (alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_actor_cov_001",
+            "2026-04-14T09:55:00+08:00",
+            "verify actor coverage",
+            "triaged",
+            "high",
+            "command_execution",
+            "198.51.100.91",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_alert_links (case_id, alert_id, linked_at, confidence, reason, is_active)
+        values (?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "case_actor_cov_001",
+            "alt_actor_cov_001",
+            "2026-04-14T09:55:00+08:00",
+            0.9,
+            "coverage seed",
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "require_actor_coverage_for_high_signal_alerts": True,
+        }
+    }
+    with pytest.raises(HermesSlowVerificationError, match="missing actor coverage"):
+        _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    conn.close()
+
+
+def test_verify_final_db_state_fails_when_primary_actor_missing_for_high_signal_cases(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_actor_primary_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_actor_primary_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_actor_primary_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (case_id, title, status, overall_severity, current_stage, primary_actor_id)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        ("case_actor_primary_001", "case", "open", "high", "command_execution", None),
+    )
+    conn.execute(
+        """
+        insert into alerts (alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_actor_primary_001",
+            "2026-04-14T09:55:00+08:00",
+            "verify primary actor",
+            "triaged",
+            "high",
+            "command_execution",
+            "198.51.100.91",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_alert_links (case_id, alert_id, linked_at, confidence, reason, is_active)
+        values (?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "case_actor_primary_001",
+            "alt_actor_primary_001",
+            "2026-04-14T09:55:00+08:00",
+            0.9,
+            "primary seed",
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_actor_profiles (
+          case_actor_id, case_id, label, status, profile_confidence, risk_level,
+          is_primary, current_stage, first_seen_at, last_seen_at, summary, created_at, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "actor_case_primary_001",
+            "case_actor_primary_001",
+            "org actor",
+            "active",
+            0.8,
+            "high",
+            0,
+            "command_execution",
+            "2026-04-14T09:55:00+08:00",
+            "2026-04-14T09:55:00+08:00",
+            "seed",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_actor_links (
+          link_id, case_actor_id, target_type, target_id, link_confidence, link_reason, linked_at
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "calink_primary_001",
+            "actor_case_primary_001",
+            "alert",
+            "alt_actor_primary_001",
+            0.9,
+            "seed",
+            "2026-04-14T09:55:00+08:00",
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "require_actor_coverage_for_high_signal_alerts": True,
+            "require_primary_case_actor_for_high_signal_cases": True,
+        }
+    }
+    with pytest.raises(HermesSlowVerificationError, match="primary case actor missing for high-signal cases"):
+        _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    conn.close()
+
+
+def test_verify_final_db_state_accepts_single_actor_covering_multiple_high_signal_alerts(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_actor_ok_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_actor_ok_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_actor_ok_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.execute(
+        """
+        insert into cases (case_id, title, status, overall_severity, current_stage, primary_actor_id)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        ("case_actor_ok_001", "case", "open", "high", "command_execution", "actor_case_ok_001"),
+    )
+    conn.execute(
+        """
+        insert into case_actor_profiles (
+          case_actor_id, case_id, label, status, profile_confidence, risk_level,
+          is_primary, current_stage, first_seen_at, last_seen_at, summary, created_at, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "actor_case_ok_001",
+            "case_actor_ok_001",
+            "org actor",
+            "active",
+            0.85,
+            "high",
+            1,
+            "command_execution",
+            "2026-04-14T09:55:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "seed",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+        ),
+    )
+    for alert_id, src_ip, occurred_at in [
+        ("alt_actor_ok_001", "198.51.100.77", "2026-04-14T09:55:00+08:00"),
+        ("alt_actor_ok_002", "198.51.100.91", "2026-04-14T10:00:00+08:00"),
+    ]:
+        conn.execute(
+            """
+            insert into alerts (alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                occurred_at,
+                "verify actor coverage",
+                "triaged",
+                "high",
+                "command_execution",
+                src_ip,
+                "203.0.113.10",
+                "asset_api_prod",
+            ),
+        )
+        conn.execute(
+            """
+            insert into case_alert_links (case_id, alert_id, linked_at, confidence, reason, is_active)
+            values (?, ?, ?, ?, ?, 1)
+            """,
+            (
+                "case_actor_ok_001",
+                alert_id,
+                occurred_at,
+                0.9,
+                "seed",
+            ),
+        )
+        conn.execute(
+            """
+            insert into case_actor_links (
+              link_id, case_actor_id, target_type, target_id, link_confidence, link_reason, linked_at
+            ) values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"calink_{alert_id}",
+                "actor_case_ok_001",
+                "alert",
+                alert_id,
+                0.9,
+                "seed",
+                occurred_at,
+            ),
+        )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "require_actor_coverage_for_high_signal_alerts": True,
+            "require_primary_case_actor_for_high_signal_cases": True,
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["failed_tool_calls_count"] == 0
+    conn.close()
+
+
 def test_build_chat_command_includes_query_and_skill() -> None:
     command = build_chat_command(
         query="Run one patrol pass",

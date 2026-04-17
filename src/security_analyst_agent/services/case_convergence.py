@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from itertools import combinations
 from typing import Any
 from uuid import uuid4
 
+from security_analyst_agent.repositories.actors import (
+    add_case_actor_link,
+    add_case_actor_observation,
+    upsert_case_actor_profile,
+)
 from security_analyst_agent.repositories.case_relations import (
     list_confirmed_case_relations,
     upsert_case_relation_candidate,
@@ -34,6 +40,8 @@ _SEVERITY_ORDER = {
     "high": 3,
     "critical": 4,
 }
+_HIGH_SIGNAL_ACTOR_STAGES = {"exploit", "persistence", "command_execution", "lateral_prep"}
+_HIGH_SIGNAL_ACTOR_SEVERITIES = {"high", "critical"}
 
 
 def _now_iso() -> str:
@@ -86,6 +94,234 @@ def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_
     if fallback_row is not None and fallback_row["attack_stage"]:
         return str(fallback_row["attack_stage"])
     return None
+
+
+def _default_case_actor_id(conn: sqlite3.Connection, *, case_id: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", case_id).strip("_").lower()[:36] or "case"
+    candidate = f"actor_auto_{normalized}"
+    exists = conn.execute(
+        """
+        select 1
+        from case_actor_profiles
+        where case_actor_id = ?
+        limit 1
+        """,
+        (candidate,),
+    ).fetchone()
+    if exists is None:
+        return candidate
+    return f"{candidate}_{uuid4().hex[:6]}"
+
+
+def _risk_level_from_case_severity(case_severity: str) -> str:
+    severity = str(case_severity or "").lower()
+    if severity in {"critical", "high"}:
+        return "high"
+    if severity == "medium":
+        return "medium"
+    return "low"
+
+
+def _pick_case_actor_for_high_signal_coverage(
+    conn: sqlite3.Connection,
+    *,
+    case_id: str,
+    case_primary_actor_id: str | None,
+    case_stage: str,
+    case_severity: str,
+    high_signal_alert_rows: list[sqlite3.Row],
+) -> tuple[str, int]:
+    actor_rows = conn.execute(
+        """
+        select case_actor_id, status, profile_confidence, is_primary, current_stage, updated_at
+        from case_actor_profiles
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchall()
+
+    actor_by_id = {row["case_actor_id"]: row for row in actor_rows}
+    if case_primary_actor_id and case_primary_actor_id in actor_by_id:
+        return case_primary_actor_id, 0
+
+    if actor_rows:
+        def _actor_score(item: sqlite3.Row) -> tuple[int, float, int, int, str, str]:
+            status = str(item["status"] or "").lower()
+            status_rank = 2 if status == "active" else (1 if status in {"suspected", "watch"} else 0)
+            return (
+                status_rank,
+                float(item["profile_confidence"] or 0.0),
+                _STAGE_ORDER.get(str(item["current_stage"] or "").lower(), 0),
+                int(item["is_primary"] or 0),
+                str(item["updated_at"] or ""),
+                str(item["case_actor_id"] or ""),
+            )
+
+        return max(actor_rows, key=_actor_score)["case_actor_id"], 0
+
+    src_ips = sorted({str(row["src_ip"]) for row in high_signal_alert_rows if row["src_ip"]})
+    first_seen_at = min((str(row["occurred_at"]) for row in high_signal_alert_rows), default=None)
+    last_seen_at = max((str(row["occurred_at"]) for row in high_signal_alert_rows), default=None)
+    actor_id = _default_case_actor_id(conn, case_id=case_id)
+    if len(src_ips) == 1:
+        actor_label = f"{src_ips[0]} (组织级攻击者)"
+    elif len(src_ips) >= 2:
+        actor_label = f"组织级攻击者（{len(src_ips)} 源IP）"
+    else:
+        actor_label = "组织级攻击者"
+    confidence = min(0.9, 0.65 + 0.05 * len(high_signal_alert_rows))
+    actor = upsert_case_actor_profile(
+        conn,
+        {
+            "case_actor_id": actor_id,
+            "case_id": case_id,
+            "label": actor_label,
+            "status": "active",
+            "profile_confidence": confidence,
+            "risk_level": _risk_level_from_case_severity(case_severity),
+            "is_primary": False,
+            "current_stage": case_stage,
+            "first_seen_at": first_seen_at,
+            "last_seen_at": last_seen_at,
+            "summary": "auto_backfill_high_signal_coverage",
+        },
+    )
+    return str(actor["case_actor_id"]), 1
+
+
+def _backfill_high_signal_alert_actor_coverage(conn: sqlite3.Connection) -> dict[str, int]:
+    case_rows = conn.execute(
+        """
+        select case_id, current_stage, overall_severity, primary_actor_id
+        from cases
+        where coalesce(merge_state, 'standalone') <> 'merged'
+        """
+    ).fetchall()
+    if not case_rows:
+        return {
+            "backfilled_case_actor_count": 0,
+            "backfilled_actor_link_count": 0,
+            "backfilled_actor_observation_count": 0,
+        }
+
+    severities = tuple(sorted(_HIGH_SIGNAL_ACTOR_SEVERITIES))
+    severity_placeholders = ", ".join("?" for _ in severities)
+    stages = tuple(sorted(_HIGH_SIGNAL_ACTOR_STAGES))
+    stage_placeholders = ", ".join("?" for _ in stages)
+    now = _now_iso()
+
+    created_actor_count = 0
+    created_link_count = 0
+    created_observation_count = 0
+
+    for case_row in case_rows:
+        case_id = case_row["case_id"]
+        alert_rows = conn.execute(
+            f"""
+            select
+              alerts.alert_id,
+              alerts.src_ip,
+              alerts.occurred_at,
+              alerts.attack_stage,
+              alerts.severity,
+              case_alert_links.confidence as link_confidence
+            from case_alert_links
+            join alerts on alerts.alert_id = case_alert_links.alert_id
+            where case_alert_links.case_id = ?
+              and case_alert_links.is_active = 1
+              and case_alert_links.confidence >= ?
+              and lower(alerts.severity) in ({severity_placeholders})
+              and lower(alerts.attack_stage) in ({stage_placeholders})
+            order by alerts.occurred_at asc, case_alert_links.linked_at asc, case_alert_links.rowid asc
+            """,
+            (case_id, _MIN_LINK_CONFIDENCE_FOR_RELATION, *severities, *stages),
+        ).fetchall()
+        if not alert_rows:
+            continue
+
+        case_actor_id, actor_created = _pick_case_actor_for_high_signal_coverage(
+            conn,
+            case_id=case_id,
+            case_primary_actor_id=case_row["primary_actor_id"],
+            case_stage=case_row["current_stage"],
+            case_severity=case_row["overall_severity"],
+            high_signal_alert_rows=alert_rows,
+        )
+        created_actor_count += actor_created
+
+        conn.execute(
+            """
+            update case_actor_profiles
+            set current_stage = ?, updated_at = ?
+            where case_actor_id = ?
+            """,
+            (case_row["current_stage"], now, case_actor_id),
+        )
+
+        for alert_row in alert_rows:
+            alert_id = alert_row["alert_id"]
+            has_alert_mapping = conn.execute(
+                """
+                select 1
+                from case_actor_links
+                join case_actor_profiles on case_actor_profiles.case_actor_id = case_actor_links.case_actor_id
+                where case_actor_profiles.case_id = ?
+                  and case_actor_links.target_type = 'alert'
+                  and case_actor_links.target_id = ?
+                limit 1
+                """,
+                (case_id, alert_id),
+            ).fetchone()
+            if has_alert_mapping is None:
+                add_case_actor_link(
+                    conn,
+                    {
+                        "case_actor_id": case_actor_id,
+                        "target_type": "alert",
+                        "target_id": alert_id,
+                        "link_confidence": max(float(alert_row["link_confidence"] or 0.0), 0.6),
+                        "link_reason": "auto_backfill_high_signal_alert",
+                        "linked_at": alert_row["occurred_at"],
+                    },
+                )
+                created_link_count += 1
+
+            src_ip = str(alert_row["src_ip"] or "").strip()
+            if not src_ip:
+                continue
+            observation_exists = conn.execute(
+                """
+                select 1
+                from case_actor_observations
+                where case_actor_id = ?
+                  and observation_type = 'src_ip'
+                  and observation_key = ?
+                limit 1
+                """,
+                (case_actor_id, src_ip),
+            ).fetchone()
+            if observation_exists is not None:
+                continue
+            add_case_actor_observation(
+                conn,
+                {
+                    "case_actor_id": case_actor_id,
+                    "observation_type": "src_ip",
+                    "observation_key": src_ip,
+                    "observation_value": src_ip,
+                    "confidence": max(float(alert_row["link_confidence"] or 0.0), 0.6),
+                    "first_seen_at": alert_row["occurred_at"],
+                    "last_seen_at": alert_row["occurred_at"],
+                    "source_count": 1,
+                },
+            )
+            created_observation_count += 1
+
+    return {
+        "backfilled_case_actor_count": created_actor_count,
+        "backfilled_actor_link_count": created_link_count,
+        "backfilled_actor_observation_count": created_observation_count,
+    }
 
 
 def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -900,6 +1136,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         clustered_case_ids=clustered_case_ids,
     )
     rolled_up_cases_count = _rollup_canonical_case_state(conn)
+    actor_backfill_stats = _backfill_high_signal_alert_actor_coverage(conn)
     rolled_up_case_actors_count = _rollup_canonical_primary_actor_state(conn)
     confirmed_relations_after = list_confirmed_case_relations(conn)
 
@@ -913,4 +1150,5 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "detached_cases_count": len(detached_case_ids),
         "rolled_up_cases_count": rolled_up_cases_count,
         "rolled_up_case_actors_count": rolled_up_case_actors_count,
+        **actor_backfill_stats,
     }

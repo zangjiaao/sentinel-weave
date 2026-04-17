@@ -490,6 +490,93 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
                     f"primary case actor missing for case_id={case_id}",
                 )
 
+    require_actor_coverage = bool(final_assertions.get("require_actor_coverage_for_high_signal_alerts", False))
+    require_primary_for_high_signal_cases = bool(
+        final_assertions.get("require_primary_case_actor_for_high_signal_cases", False)
+    )
+    if require_actor_coverage or require_primary_for_high_signal_cases:
+        high_signal_stages = [
+            str(item).lower()
+            for item in final_assertions.get(
+                "high_signal_actor_stages",
+                ["exploit", "persistence", "command_execution", "lateral_prep"],
+            )
+        ]
+        high_signal_severities = [
+            str(item).lower() for item in final_assertions.get("high_signal_actor_severities", ["high", "critical"])
+        ]
+        if high_signal_stages and high_signal_severities:
+            stage_placeholders = ", ".join("?" for _ in high_signal_stages)
+            severity_placeholders = ", ".join("?" for _ in high_signal_severities)
+            high_signal_alert_rows = conn.execute(
+                f"""
+                select case_alert_links.case_id, case_alert_links.alert_id
+                from case_alert_links
+                join alerts on alerts.alert_id = case_alert_links.alert_id
+                where case_alert_links.is_active = 1
+                  and lower(alerts.attack_stage) in ({stage_placeholders})
+                  and lower(alerts.severity) in ({severity_placeholders})
+                order by case_alert_links.case_id asc, case_alert_links.alert_id asc
+                """,
+                (*high_signal_stages, *high_signal_severities),
+            ).fetchall()
+
+            if require_actor_coverage:
+                uncovered_alerts: list[str] = []
+                for row in high_signal_alert_rows:
+                    mapping = conn.execute(
+                        """
+                        select 1
+                        from case_actor_links
+                        join case_actor_profiles on case_actor_profiles.case_actor_id = case_actor_links.case_actor_id
+                        where case_actor_profiles.case_id = ?
+                          and case_actor_links.target_type = 'alert'
+                          and case_actor_links.target_id = ?
+                        limit 1
+                        """,
+                        (row["case_id"], row["alert_id"]),
+                    ).fetchone()
+                    if mapping is None:
+                        uncovered_alerts.append(f"{row['case_id']}::{row['alert_id']}")
+                if uncovered_alerts:
+                    raise HermesSlowVerificationError(
+                        "final_db_assertions",
+                        f"high-signal alerts missing actor coverage: {uncovered_alerts}",
+                    )
+
+            if require_primary_for_high_signal_cases:
+                high_signal_case_ids = sorted({row["case_id"] for row in high_signal_alert_rows})
+                missing_primary_case_ids: list[str] = []
+                for case_id in high_signal_case_ids:
+                    row = conn.execute(
+                        """
+                        select primary_actor_id
+                        from cases
+                        where case_id = ?
+                        limit 1
+                        """,
+                        (case_id,),
+                    ).fetchone()
+                    if row is None or not row["primary_actor_id"]:
+                        missing_primary_case_ids.append(case_id)
+                        continue
+                    actor_exists = conn.execute(
+                        """
+                        select 1
+                        from case_actor_profiles
+                        where case_id = ? and case_actor_id = ?
+                        limit 1
+                        """,
+                        (case_id, row["primary_actor_id"]),
+                    ).fetchone()
+                    if actor_exists is None:
+                        missing_primary_case_ids.append(case_id)
+                if missing_primary_case_ids:
+                    raise HermesSlowVerificationError(
+                        "final_db_assertions",
+                        f"primary case actor missing for high-signal cases: {missing_primary_case_ids}",
+                    )
+
     converged_case_clusters_count = conn.execute(
         """
         select count(*)

@@ -787,6 +787,121 @@ def test_case_convergence_rolls_up_case_actor_and_primary_actor_to_canonical(tmp
     conn.close()
 
 
+def test_case_convergence_backfills_high_signal_alert_actor_coverage_with_single_actor(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_actor_backfill_org",
+            "title": "actor backfill org",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": None,
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_backfill_high_1",
+        case_id="case_actor_backfill_org",
+        occurred_at="2026-04-12T11:03:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.77",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_backfill_high_2",
+        case_id="case_actor_backfill_org",
+        occurred_at="2026-04-14T08:30:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_backfill_low_noise",
+        case_id="case_actor_backfill_org",
+        occurred_at="2026-04-14T08:35:00+08:00",
+        stage="recon",
+        src_ip="192.0.2.56",
+        severity="low",
+        confidence=0.6,
+        asset_id="asset_admin_portal",
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_actor_backfill_1")
+    assert summary["backfilled_case_actor_count"] == 1
+    assert summary["backfilled_actor_link_count"] == 2
+    assert summary["backfilled_actor_observation_count"] == 2
+
+    summary_repeat = run_case_convergence_for_run(conn, run_id="run_actor_backfill_2")
+    assert summary_repeat["backfilled_case_actor_count"] == 0
+    assert summary_repeat["backfilled_actor_link_count"] == 0
+    assert summary_repeat["backfilled_actor_observation_count"] == 0
+
+    case_row = conn.execute(
+        """
+        select primary_actor_id
+        from cases
+        where case_id = 'case_actor_backfill_org'
+        """
+    ).fetchone()
+    assert case_row is not None
+    assert case_row["primary_actor_id"] is not None
+
+    actor_rows = conn.execute(
+        """
+        select case_actor_id, is_primary
+        from case_actor_profiles
+        where case_id = 'case_actor_backfill_org'
+        order by case_actor_id asc
+        """
+    ).fetchall()
+    assert len(actor_rows) == 1
+    assert actor_rows[0]["is_primary"] == 1
+
+    mapped_alerts = conn.execute(
+        """
+        select case_actor_links.target_id
+        from case_actor_links
+        join case_actor_profiles on case_actor_profiles.case_actor_id = case_actor_links.case_actor_id
+        where case_actor_profiles.case_id = 'case_actor_backfill_org'
+          and case_actor_links.target_type = 'alert'
+        order by case_actor_links.target_id asc
+        """
+    ).fetchall()
+    assert [row["target_id"] for row in mapped_alerts] == [
+        "alt_actor_backfill_high_1",
+        "alt_actor_backfill_high_2",
+    ]
+
+    observation_ips = conn.execute(
+        """
+        select observation_key
+        from case_actor_observations
+        where case_actor_id = ?
+          and observation_type = 'src_ip'
+        order by observation_key asc
+        """,
+        (case_row["primary_actor_id"],),
+    ).fetchall()
+    assert [row["observation_key"] for row in observation_ips] == ["198.51.100.77", "198.51.100.91"]
+    conn.close()
+
+
 def test_case_convergence_can_reattach_case_after_stronger_new_relation(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

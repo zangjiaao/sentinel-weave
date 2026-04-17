@@ -47,6 +47,9 @@
     ],
     "min_entity_assessments": 1,
     "min_alert_decisions": 0,
-    "require_primary_case_actor_for_single_chain": true
+    "require_actor_coverage_for_high_signal_alerts": true,
+    "require_primary_case_actor_for_high_signal_cases": true,
+    "high_signal_actor_stages": ["persistence", "command_execution", "lateral_prep"],
+    "high_signal_actor_severities": ["high", "critical"]
   }
 }
