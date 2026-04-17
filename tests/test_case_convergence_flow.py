@@ -1782,3 +1782,230 @@ def test_case_convergence_absorbs_recon_case_into_followup_attack_chain(tmp_path
     assert recon_case["merged_into_case_id"] == "case_absorb_attack"
     assert recon_case["status"] == "closed"
     conn.close()
+
+
+def test_case_convergence_keeps_quiet_merged_case_attached_when_not_in_current_cluster(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_detach_anchor",
+            "title": "detach anchor",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_detach_anchor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_detach_child",
+            "title": "detach child",
+            "status": "closed",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_detach_child",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        update cases
+        set canonical_case_id = 'case_detach_anchor',
+            merged_into_case_id = 'case_detach_anchor',
+            merge_state = 'merged'
+        where case_id = 'case_detach_child'
+        """
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_detach_anchor_1",
+        case_id="case_detach_anchor",
+        occurred_at="2026-04-12T11:30:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_detach_guard_1")
+    assert summary["detached_cases_count"] == 0
+
+    child_row = conn.execute(
+        """
+        select status, canonical_case_id, merged_into_case_id, merge_state
+        from cases
+        where case_id = 'case_detach_child'
+        """
+    ).fetchone()
+    assert child_row is not None
+    assert child_row["status"] == "closed"
+    assert child_row["canonical_case_id"] == "case_detach_anchor"
+    assert child_row["merged_into_case_id"] == "case_detach_anchor"
+    assert child_row["merge_state"] == "merged"
+    conn.close()
+
+
+def test_case_convergence_reabsorbs_orphan_case_to_previous_canonical(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_orphan_anchor",
+            "title": "orphan anchor",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_orphan_anchor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_orphan_child",
+            "title": "orphan child",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_orphan_child",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_orphan_anchor_1",
+        case_id="case_orphan_anchor",
+        occurred_at="2026-04-12T12:00:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.execute(
+        """
+        insert into entity_assessments (
+          assessment_id,
+          occurred_at,
+          run_id,
+          entity_type,
+          entity_key,
+          entity_label,
+          related_case_id,
+          risk_level,
+          assessment_confidence,
+          verdict,
+          reason_summary,
+          supporting_alert_ids_json,
+          supporting_evidence_ids_json,
+          first_seen_at,
+          last_seen_at,
+          analysis_cutoff_at,
+          is_current
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "eass_orphan_case_001",
+            "2026-04-12T12:05:00+08:00",
+            "run_orphan_seed",
+            "ip",
+            "198.51.100.23",
+            "198.51.100.23",
+            "case_orphan_child",
+            "high",
+            0.92,
+            "attacker",
+            "orphan scoped current",
+            "[]",
+            "[]",
+            "2026-04-12T12:00:00+08:00",
+            "2026-04-12T12:05:00+08:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        insert into case_merge_events (
+          event_id,
+          occurred_at,
+          run_id,
+          cluster_id,
+          old_canonical_case_id,
+          new_canonical_case_id,
+          affected_case_ids_json,
+          reason,
+          detail_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "merge_orphan_seed_001",
+            "2026-04-12T12:06:00+08:00",
+            "run_orphan_seed",
+            "case_orphan_anchor|case_orphan_child",
+            "case_orphan_child",
+            "case_orphan_anchor",
+            "[\"case_orphan_anchor\", \"case_orphan_child\"]",
+            "auto_case_convergence",
+            "{\"seed\":true}",
+        ),
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_orphan_absorb_1")
+    assert summary["orphan_absorbed_cases_count"] >= 1
+
+    child_row = conn.execute(
+        """
+        select status, canonical_case_id, merged_into_case_id, merge_state
+        from cases
+        where case_id = 'case_orphan_child'
+        """
+    ).fetchone()
+    assert child_row is not None
+    assert child_row["status"] == "closed"
+    assert child_row["canonical_case_id"] == "case_orphan_anchor"
+    assert child_row["merged_into_case_id"] == "case_orphan_anchor"
+    assert child_row["merge_state"] == "merged"
+
+    current_rows = conn.execute(
+        """
+        select related_case_id
+        from entity_assessments
+        where entity_type = 'ip'
+          and entity_key = '198.51.100.23'
+          and is_current = 1
+        """
+    ).fetchall()
+    assert len(current_rows) == 1
+    assert current_rows[0]["related_case_id"] == "case_orphan_anchor"
+
+    latest_merge = conn.execute(
+        """
+        select reason
+        from case_merge_events
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert latest_merge is not None
+    assert latest_merge["reason"] == "auto_case_convergence_orphan_absorb"
+    conn.close()

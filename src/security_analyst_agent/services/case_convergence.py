@@ -998,6 +998,17 @@ def _reconcile_detached_cases(
         case_id = row["case_id"]
         if case_id in clustered_case_ids:
             continue
+        if str(row["merge_state"] or "").lower() == "merged":
+            active_links_count = conn.execute(
+                """
+                select count(*)
+                from case_alert_links
+                where case_id = ? and is_active = 1
+                """,
+                (case_id,),
+            ).fetchone()[0]
+            if int(active_links_count or 0) == 0:
+                continue
 
         status_target = row["status"]
         if str(row["merge_state"] or "").lower() == "merged" and str(row["status"] or "").lower() == "closed":
@@ -1043,6 +1054,273 @@ def _reconcile_detached_cases(
         )
 
     return detached_case_ids
+
+
+def _load_case_residual_signal_snapshot(conn: sqlite3.Connection, *, case_id: str) -> dict[str, int]:
+    historical_link_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchone()[0]
+    evidence_count = conn.execute(
+        """
+        select count(*)
+        from evidence
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchone()[0]
+    timeline_count = conn.execute(
+        """
+        select count(*)
+        from timeline_events
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchone()[0]
+    actor_count = conn.execute(
+        """
+        select count(*)
+        from case_actor_profiles
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchone()[0]
+    current_assessment_count = conn.execute(
+        """
+        select count(*)
+        from entity_assessments
+        where related_case_id = ?
+          and is_current = 1
+        """,
+        (case_id,),
+    ).fetchone()[0]
+    return {
+        "historical_link_count": int(historical_link_count or 0),
+        "evidence_count": int(evidence_count or 0),
+        "timeline_count": int(timeline_count or 0),
+        "actor_count": int(actor_count or 0),
+        "current_assessment_count": int(current_assessment_count or 0),
+    }
+
+
+def _pick_orphan_absorb_target(
+    conn: sqlite3.Connection,
+    *,
+    orphan_case_id: str,
+) -> str | None:
+    rows = conn.execute(
+        """
+        select
+          case_merge_events.new_canonical_case_id as target_case_id,
+          max(case_merge_events.occurred_at) as last_merged_at
+        from case_merge_events
+        join json_each(case_merge_events.affected_case_ids_json) as affected_cases
+          on 1 = 1
+        where affected_cases.value = ?
+          and case_merge_events.new_canonical_case_id <> ?
+          and case_merge_events.reason in ('auto_case_convergence', 'auto_case_convergence_orphan_absorb')
+        group by case_merge_events.new_canonical_case_id
+        order by last_merged_at desc, target_case_id asc
+        """,
+        (orphan_case_id, orphan_case_id),
+    ).fetchall()
+    if not rows:
+        return None
+    for row in rows:
+        target_case_id = str(row["target_case_id"] or "")
+        if not target_case_id:
+            continue
+        target_case_row = conn.execute(
+            """
+            select merge_state, status
+            from cases
+            where case_id = ?
+            """,
+            (target_case_id,),
+        ).fetchone()
+        if target_case_row is None:
+            continue
+        if str(target_case_row["merge_state"] or "").lower() == "merged":
+            continue
+        if str(target_case_row["status"] or "").lower() not in {"open", "active", "investigating", "observing"}:
+            continue
+        target_active_links_count = conn.execute(
+            """
+            select count(*)
+            from case_alert_links
+            where case_id = ?
+              and is_active = 1
+            """,
+            (target_case_id,),
+        ).fetchone()[0]
+        if int(target_active_links_count or 0) <= 0:
+            continue
+        return target_case_id
+    return None
+
+
+def _merge_case_into_target(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    case_id: str,
+    target_case_id: str,
+    reason: str,
+    detail_json: dict[str, Any],
+) -> bool:
+    if case_id == target_case_id:
+        return False
+    now = _now_iso()
+    case_row = conn.execute(
+        """
+        select status, canonical_case_id, merged_into_case_id, merge_state
+        from cases
+        where case_id = ?
+        """,
+        (case_id,),
+    ).fetchone()
+    target_row = conn.execute(
+        """
+        select status, canonical_case_id, merged_into_case_id, merge_state
+        from cases
+        where case_id = ?
+        """,
+        (target_case_id,),
+    ).fetchone()
+    if case_row is None or target_row is None:
+        return False
+
+    if (
+        str(case_row["merge_state"] or "").lower() == "merged"
+        and str(case_row["canonical_case_id"] or case_id) == target_case_id
+        and str(case_row["merged_into_case_id"] or "") == target_case_id
+        and str(case_row["status"] or "").lower() == "closed"
+    ):
+        return False
+
+    target_status = target_row["status"]
+    if str(target_status or "").lower() == "closed":
+        target_status = "open"
+    conn.execute(
+        """
+        update cases
+        set status = ?,
+            canonical_case_id = ?,
+            merged_into_case_id = null,
+            merge_state = 'standalone',
+            merge_updated_at = ?
+        where case_id = ?
+        """,
+        (target_status, target_case_id, now, target_case_id),
+    )
+    conn.execute(
+        """
+        update cases
+        set status = 'closed',
+            canonical_case_id = ?,
+            merged_into_case_id = ?,
+            merge_state = 'merged',
+            merge_updated_at = ?
+        where case_id = ?
+        """,
+        (target_case_id, target_case_id, now, case_id),
+    )
+    normalize_stats = _normalize_cluster_case_links_and_artifacts(
+        conn,
+        canonical_case_id=target_case_id,
+        case_ids=[target_case_id, case_id],
+    )
+    conn.execute(
+        """
+        insert into case_merge_events (
+          event_id,
+          occurred_at,
+          run_id,
+          cluster_id,
+          old_canonical_case_id,
+          new_canonical_case_id,
+          affected_case_ids_json,
+          reason,
+          detail_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"merge_{uuid4().hex[:12]}",
+            now,
+            run_id,
+            "|".join(sorted([target_case_id, case_id])),
+            case_row["canonical_case_id"] or case_id,
+            target_case_id,
+            json.dumps([target_case_id, case_id], ensure_ascii=False),
+            reason,
+            json.dumps({**detail_json, **normalize_stats}, ensure_ascii=False),
+        ),
+    )
+    return True
+
+
+def _reabsorb_orphan_standalone_cases(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    clustered_case_ids: set[str],
+) -> list[str]:
+    rows = conn.execute(
+        """
+        select case_id, status
+        from cases
+        where coalesce(merge_state, 'standalone') = 'standalone'
+          and coalesce(canonical_case_id, case_id) = case_id
+          and status in ('open', 'active', 'investigating', 'observing')
+        """
+    ).fetchall()
+    if not rows:
+        return []
+
+    absorbed_case_ids: list[str] = []
+    for row in rows:
+        case_id = str(row["case_id"])
+        if case_id in clustered_case_ids:
+            continue
+        active_links_count = conn.execute(
+            """
+            select count(*)
+            from case_alert_links
+            where case_id = ?
+              and is_active = 1
+            """,
+            (case_id,),
+        ).fetchone()[0]
+        if int(active_links_count or 0) > 0:
+            continue
+
+        residual_snapshot = _load_case_residual_signal_snapshot(conn, case_id=case_id)
+        if sum(residual_snapshot.values()) <= 0:
+            continue
+
+        target_case_id = _pick_orphan_absorb_target(conn, orphan_case_id=case_id)
+        if not target_case_id:
+            continue
+        merged = _merge_case_into_target(
+            conn,
+            run_id=run_id,
+            case_id=case_id,
+            target_case_id=target_case_id,
+            reason="auto_case_convergence_orphan_absorb",
+            detail_json={
+                "orphan_case_id": case_id,
+                "target_case_id": target_case_id,
+                "active_links_count": int(active_links_count or 0),
+                **residual_snapshot,
+            },
+        )
+        if merged:
+            absorbed_case_ids.append(case_id)
+    return absorbed_case_ids
 
 
 def _json_list(raw: Any) -> list[str]:
@@ -1412,6 +1690,11 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         run_id=run_id,
         clustered_case_ids=clustered_case_ids,
     )
+    orphan_absorbed_case_ids = _reabsorb_orphan_standalone_cases(
+        conn,
+        run_id=run_id,
+        clustered_case_ids=clustered_case_ids,
+    )
     rolled_up_entity_assessments_count = _rollup_canonical_entity_assessment_state(conn, run_id=run_id)
     suppressed_global_entity_currents_count = _suppress_global_current_when_case_current_exists(conn)
     rolled_up_cases_count = _rollup_canonical_case_state(conn)
@@ -1428,6 +1711,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "confirmed_relations_count": len(confirmed_relations_after),
         "merge_events_count": len(merge_events),
         "detached_cases_count": len(detached_case_ids),
+        "orphan_absorbed_cases_count": len(orphan_absorbed_case_ids),
         "rolled_up_entity_assessments_count": rolled_up_entity_assessments_count,
         "suppressed_global_entity_currents_count": suppressed_global_entity_currents_count,
         "rolled_up_cases_count": rolled_up_cases_count,
