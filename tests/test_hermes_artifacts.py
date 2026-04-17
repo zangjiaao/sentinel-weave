@@ -53,6 +53,7 @@ def test_runtime_runbook_contains_smoke_loop_steps() -> None:
     assert "hermes mcp test secagent" in text
     assert "/Users/zangjiaao/.hermes/SOUL.md" in text
     assert "/Users/zangjiaao/.hermes-patrol" in text
+    assert "hermes chat --continue" in text
     assert "secagent-patrol" in text
     assert "hermes/patrol-loop.json" in text
     assert "Confirm `alert.fetch` is called first" in text

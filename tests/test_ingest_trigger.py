@@ -67,7 +67,13 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
     assert result["triggered"] is True
     assert result["processed_events"] == 2
     assert result["status"] == "success"
-    assert commands == [["hermes", "cron", "run", "job_demo_001"], ["hermes", "cron", "tick"]]
+    assert len(commands) == 1
+    assert commands[0][:3] == ["hermes", "chat", "-q"]
+    assert "--continue" in commands[0]
+    assert "--max-turns" in commands[0]
+    assert "18" in commands[0]
+    assert "-s" in commands[0]
+    assert "secagent-patrol" in commands[0]
     assert envs and all(item["HERMES_HOME"] == str(patrol_home) for item in envs)
     assert (patrol_home / "SOUL.md").exists()
     assert (patrol_home / "auth.json").exists()
@@ -114,3 +120,31 @@ def test_trigger_patrol_marks_failed_and_retries(tmp_path) -> None:
     retried = trigger_patrol_from_ingest(db_path, job_id="job_demo_002", command_runner=success_runner)
     assert retried["status"] == "success"
     assert retried["processed_events"] == 1
+
+
+def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_005")], source="siem")
+    source_home = tmp_path / "source-hermes-home"
+    patrol_home = tmp_path / "patrol-hermes-home"
+    source_home.mkdir(parents=True, exist_ok=True)
+
+    commands: list[list[str]] = []
+
+    def flaky_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if "--continue" in command:
+            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="no session")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        command_runner=flaky_runner,
+        hermes_home=patrol_home,
+        source_hermes_home=source_home,
+    )
+    assert result["status"] == "success"
+    assert len(commands) == 2
+    assert "--continue" in commands[0]
+    assert "--continue" not in commands[1]

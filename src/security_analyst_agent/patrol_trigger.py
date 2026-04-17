@@ -13,7 +13,10 @@ from uuid import uuid4
 from security_analyst_agent.config import (
     DEFAULT_HERMES_CRON_JOB_ID,
     DEFAULT_HERMES_HOME,
+    DEFAULT_HERMES_PATROL_MAX_TURNS,
     DEFAULT_HERMES_PATROL_HOME,
+    DEFAULT_HERMES_PATROL_PROMPT_PATH,
+    DEFAULT_HERMES_PATROL_TRIGGER_MODE,
     PROJECT_ROOT,
 )
 from security_analyst_agent.db import connect_db, create_schema
@@ -22,6 +25,13 @@ CommandRunner = Callable[[list[str], dict[str, str] | None], subprocess.Complete
 LegacyCommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 RUNTIME_FILES_TO_COPY = ("config.yaml", ".env", "auth.json")
+DEFAULT_PATROL_CHAT_QUERY = (
+    "Run exactly one patrol pass against the current alert queue. First call alert.fetch. "
+    "Triaged alerts must be acked in one batch when possible. "
+    "Return with exact markdown headers: "
+    "## Patrol Action Summary, ## Remaining Uncertainty, ## Memory Summary."
+)
+DEFAULT_PATROL_SKILL = "secagent-patrol"
 
 
 def _default_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -97,6 +107,40 @@ def _run_with_compat_runner(
     return cast(LegacyCommandRunner, runner)(command)
 
 
+def _load_patrol_chat_query(prompt_path: Path) -> str:
+    if prompt_path.exists():
+        text = prompt_path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return DEFAULT_PATROL_CHAT_QUERY
+
+
+def _build_patrol_chat_command(*, query: str, max_turns: int, continue_latest: bool) -> list[str]:
+    command = [
+        "hermes",
+        "chat",
+        "-q",
+        query,
+        "-Q",
+        "--max-turns",
+        str(max_turns),
+        "--source",
+        "tool",
+        "-s",
+        DEFAULT_PATROL_SKILL,
+    ]
+    if continue_latest:
+        command.append("--continue")
+    return command
+
+
+def _trim_command_error(result: subprocess.CompletedProcess[str]) -> str:
+    message = (result.stderr or result.stdout or "").strip()
+    if len(message) <= 300:
+        return message
+    return f"{message[:300]}..."
+
+
 def trigger_patrol_from_ingest(
     db_path: Path,
     job_id: str = DEFAULT_HERMES_CRON_JOB_ID,
@@ -104,6 +148,9 @@ def trigger_patrol_from_ingest(
     dry_run: bool = False,
     hermes_home: Path | None = None,
     source_hermes_home: Path | None = None,
+    trigger_mode: str = DEFAULT_HERMES_PATROL_TRIGGER_MODE,
+    patrol_max_turns: int = DEFAULT_HERMES_PATROL_MAX_TURNS,
+    patrol_prompt_path: Path = DEFAULT_HERMES_PATROL_PROMPT_PATH,
 ) -> dict[str, object]:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -139,17 +186,48 @@ def trigger_patrol_from_ingest(
             source_runtime_home = source_hermes_home or DEFAULT_HERMES_HOME
             _ensure_patrol_hermes_home(patrol_runtime_home, source_runtime_home)
             env = _build_hermes_env(patrol_runtime_home)
-
-            run_result = _run_with_compat_runner(runner, ["hermes", "cron", "run", job_id], env)
-            tick_result = _run_with_compat_runner(runner, ["hermes", "cron", "tick"], env)
-            if run_result.returncode == 0 and tick_result.returncode == 0:
-                status = "success"
-                detail = "hermes cron run/tick completed"
-            else:
-                detail = (
-                    f"run_rc={run_result.returncode}, tick_rc={tick_result.returncode}, "
-                    f"run_err={run_result.stderr.strip()}, tick_err={tick_result.stderr.strip()}"
+            normalized_mode = trigger_mode.strip().lower()
+            if normalized_mode == "chat":
+                query = _load_patrol_chat_query(patrol_prompt_path)
+                continue_result = _run_with_compat_runner(
+                    runner,
+                    _build_patrol_chat_command(query=query, max_turns=patrol_max_turns, continue_latest=True),
+                    env,
                 )
+                if continue_result.returncode == 0:
+                    status = "success"
+                    detail = "hermes chat --continue completed"
+                else:
+                    fresh_result = _run_with_compat_runner(
+                        runner,
+                        _build_patrol_chat_command(query=query, max_turns=patrol_max_turns, continue_latest=False),
+                        env,
+                    )
+                    if fresh_result.returncode == 0:
+                        status = "success"
+                        detail = (
+                            "hermes chat new session completed after continue fallback "
+                            f"(continue_rc={continue_result.returncode})"
+                        )
+                    else:
+                        detail = (
+                            f"continue_rc={continue_result.returncode}, fresh_rc={fresh_result.returncode}, "
+                            f"continue_err={_trim_command_error(continue_result)}, "
+                            f"fresh_err={_trim_command_error(fresh_result)}"
+                        )
+            elif normalized_mode == "cron":
+                run_result = _run_with_compat_runner(runner, ["hermes", "cron", "run", job_id], env)
+                tick_result = _run_with_compat_runner(runner, ["hermes", "cron", "tick"], env)
+                if run_result.returncode == 0 and tick_result.returncode == 0:
+                    status = "success"
+                    detail = "hermes cron run/tick completed"
+                else:
+                    detail = (
+                        f"run_rc={run_result.returncode}, tick_rc={tick_result.returncode}, "
+                        f"run_err={_trim_command_error(run_result)}, tick_err={_trim_command_error(tick_result)}"
+                    )
+            else:
+                detail = f"unsupported trigger mode: {trigger_mode}"
     except Exception as exc:
         detail = f"exception: {exc}"
 

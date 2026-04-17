@@ -84,8 +84,8 @@
    - 对 patrol job 执行 `--clear-skills`，再只添加 `secagent-patrol`
    - 用 `hermes/patrol-prompt.md` 覆盖 patrol job prompt
 3. 运行触发器时，系统会自动使用 `HERMES_PATROL_HOME`（默认 `~/.hermes-patrol`）执行：
-   - `hermes cron run <job_id>`
-   - `hermes cron tick`
+   - `hermes chat --continue`（优先复用最近 patrol 会话）
+   - 若继续会话失败，自动回退到新会话 `hermes chat -q "<patrol prompt>"`
 4. 如需兼容旧路径，仍可保留 `make sync-hermes` + `~/.hermes` 流程
 
 ## Create Main Analyst Agent
