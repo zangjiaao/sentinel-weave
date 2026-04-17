@@ -840,6 +840,106 @@ def test_case_convergence_rolls_up_current_entity_assessment_to_canonical_case(t
     conn.close()
 
 
+def test_case_convergence_suppresses_global_current_when_case_scoped_exists(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_entity_global_suppress",
+            "title": "entity global suppress",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_entity_global_suppress",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into entity_assessments (
+          assessment_id,
+          occurred_at,
+          run_id,
+          entity_type,
+          entity_key,
+          entity_label,
+          related_case_id,
+          risk_level,
+          assessment_confidence,
+          verdict,
+          reason_summary,
+          supporting_alert_ids_json,
+          supporting_evidence_ids_json,
+          first_seen_at,
+          last_seen_at,
+          analysis_cutoff_at,
+          is_current
+        ) values
+          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
+          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "eass_case_current_001",
+            "2026-04-12T10:00:00+08:00",
+            "run_seed_case_current",
+            "ip",
+            "198.51.100.250",
+            "198.51.100.250",
+            "case_entity_global_suppress",
+            "high",
+            0.9,
+            "attacker",
+            "seed case scoped",
+            "[]",
+            "[]",
+            "2026-04-12T10:00:00+08:00",
+            "2026-04-12T10:00:00+08:00",
+            None,
+            1,
+            "eass_global_current_001",
+            "2026-04-12T10:01:00+08:00",
+            "run_seed_global_current",
+            "ip",
+            "198.51.100.250",
+            "198.51.100.250",
+            None,
+            "high",
+            0.8,
+            "attacker",
+            "seed global current",
+            "[]",
+            "[]",
+            "2026-04-12T10:01:00+08:00",
+            "2026-04-12T10:01:00+08:00",
+            None,
+            1,
+        ),
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_entity_global_suppress_1")
+    assert summary["suppressed_global_entity_currents_count"] >= 1
+
+    current_rows = conn.execute(
+        """
+        select related_case_id
+        from entity_assessments
+        where entity_type = 'ip'
+          and entity_key = '198.51.100.250'
+          and is_current = 1
+        """
+    ).fetchall()
+    assert len(current_rows) == 1
+    assert current_rows[0]["related_case_id"] == "case_entity_global_suppress"
+    conn.close()
+
+
 def test_case_convergence_rolls_up_case_actor_and_primary_actor_to_canonical(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

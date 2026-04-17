@@ -31,7 +31,7 @@ def test_load_integration_manifest_returns_expected_scenario() -> None:
         "round_06_reactivation",
     ]
     assert manifest["round_defaults"]["required_tool_names"][0] == "alert.fetch"
-    assert manifest["round_defaults"]["max_tool_calls"] == 16
+    assert manifest["round_defaults"]["max_tool_calls"] == 18
 
 
 def test_resolve_round_specs_merges_defaults_and_round_overrides() -> None:

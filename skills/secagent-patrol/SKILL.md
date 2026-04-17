@@ -18,7 +18,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 5. 预算优先：若 run 有 `max_turns`（例如 18），采用分层预算并预留至少 3 次回合用于输出最终总结：
    - 纯 recon/noise 轮次：目标 `<=8` 次 tool 调用
    - 高信号轮次（含 persistence/command_execution/lateral_prep）：目标 `<=15` 次 tool 调用
-   - 绝对硬上限：`<=16` 次 tool 调用
+   - 绝对硬上限：`<=18` 次 tool 调用
    - 单轮默认“单次写入”策略：`assessment.upsert-batch` 至多 1 次、`case.update-risk` 至多 1 次、`alert.ack` 至多 1 次；除非前一次写入失败才重试
    - `evidence.upsert` 只写关键代表性证据，禁止按同质告警逐条 fan-out 写入
 6. 对同一攻击链内“同阶段、同类型、同来源”的告警，优先做代表性取样，避免逐条 fan-out 调用。

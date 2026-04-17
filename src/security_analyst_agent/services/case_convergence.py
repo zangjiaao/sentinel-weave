@@ -1201,6 +1201,30 @@ def _rollup_canonical_entity_assessment_state(conn: sqlite3.Connection, *, run_i
     return updates
 
 
+def _suppress_global_current_when_case_current_exists(conn: sqlite3.Connection) -> int:
+    result = conn.execute(
+        """
+        update entity_assessments
+        set is_current = 0
+        where assessment_id in (
+          select global_current.assessment_id
+          from entity_assessments as global_current
+          where global_current.is_current = 1
+            and global_current.related_case_id is null
+            and exists (
+              select 1
+              from entity_assessments as case_current
+              where case_current.is_current = 1
+                and case_current.related_case_id is not null
+                and case_current.entity_type = global_current.entity_type
+                and case_current.entity_key = global_current.entity_key
+            )
+        )
+        """
+    )
+    return int(result.rowcount or 0)
+
+
 def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         """
@@ -1389,6 +1413,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         clustered_case_ids=clustered_case_ids,
     )
     rolled_up_entity_assessments_count = _rollup_canonical_entity_assessment_state(conn, run_id=run_id)
+    suppressed_global_entity_currents_count = _suppress_global_current_when_case_current_exists(conn)
     rolled_up_cases_count = _rollup_canonical_case_state(conn)
     actor_backfill_stats = _backfill_high_signal_alert_actor_coverage(conn)
     backfilled_compromised_host_count = _backfill_high_signal_compromised_host_assessments(conn, run_id=run_id)
@@ -1404,6 +1429,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "merge_events_count": len(merge_events),
         "detached_cases_count": len(detached_case_ids),
         "rolled_up_entity_assessments_count": rolled_up_entity_assessments_count,
+        "suppressed_global_entity_currents_count": suppressed_global_entity_currents_count,
         "rolled_up_cases_count": rolled_up_cases_count,
         "rolled_up_case_actors_count": rolled_up_case_actors_count,
         "backfilled_compromised_host_assessments_count": backfilled_compromised_host_count,

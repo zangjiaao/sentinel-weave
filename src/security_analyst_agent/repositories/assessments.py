@@ -29,6 +29,7 @@ def upsert_entity_assessment(
     analysis_cutoff_at: str | None,
 ) -> dict[str, object]:
     occurred_at = _now_iso()
+    is_current_target = 1
     conn.execute(
         """
         update entity_assessments
@@ -40,6 +41,33 @@ def upsert_entity_assessment(
         """,
         (entity_type, entity_key, related_case_id),
     )
+    if related_case_id:
+        conn.execute(
+            """
+            update entity_assessments
+            set is_current = 0
+            where entity_type = ?
+              and entity_key = ?
+              and related_case_id is null
+              and is_current = 1
+            """,
+            (entity_type, entity_key),
+        )
+    else:
+        has_case_scoped_current = conn.execute(
+            """
+            select 1
+            from entity_assessments
+            where entity_type = ?
+              and entity_key = ?
+              and related_case_id is not null
+              and is_current = 1
+            limit 1
+            """,
+            (entity_type, entity_key),
+        ).fetchone()
+        if has_case_scoped_current is not None:
+            is_current_target = 0
 
     assessment_id = f"eass_{uuid4().hex[:12]}"
     conn.execute(
@@ -62,7 +90,7 @@ def upsert_entity_assessment(
           last_seen_at,
           analysis_cutoff_at,
           is_current
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             assessment_id,
@@ -81,6 +109,7 @@ def upsert_entity_assessment(
             first_seen_at,
             last_seen_at,
             analysis_cutoff_at,
+            is_current_target,
         ),
     )
     return {
@@ -100,5 +129,5 @@ def upsert_entity_assessment(
         "first_seen_at": first_seen_at,
         "last_seen_at": last_seen_at,
         "analysis_cutoff_at": analysis_cutoff_at,
-        "is_current": 1,
+        "is_current": is_current_target,
     }

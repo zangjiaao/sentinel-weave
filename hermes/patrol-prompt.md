@@ -5,7 +5,7 @@ Execution rules:
 - Keep the run budget-aware with tiered limits:
   - recon/noise-only round: target `<=8` tool calls
   - high-signal round (persistence/command_execution/lateral_prep): target `<=15` tool calls
-  - absolute hard cap: `<=16` tool calls
+  - absolute hard cap: `<=18` tool calls
   - reserve turns for final output.
 - Process at most `10` alerts this run.
 - Treat only `alerts`, `assets`, and `intel_cache` as preloaded facts in the spike; `cases`, `case_alert_links`, `timeline_events`, and `evidence` must be created or refreshed by your tool calls.

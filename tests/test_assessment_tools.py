@@ -87,3 +87,75 @@ def test_assessment_upsert_batch_empty_payload_is_noop_success(db_conn) -> None:
     assert result["data"]["assessments"] == []
     assert result["data"]["failures"] == []
     assert "assessment_batch_empty_noop" in result["warnings"]
+
+
+def test_assessment_upsert_infers_related_case_id_from_alert_links(db_conn) -> None:
+    result = assessment_upsert(
+        db_conn,
+        {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.77",
+            "entity_label": "198.51.100.77",
+            "related_case_id": None,
+            "risk_level": "high",
+            "assessment_confidence": 0.85,
+            "verdict": "attacker",
+            "reason_summary": "infer case from linked alert",
+            "supporting_alert_ids": ["alt_day3_shell_01"],
+            "supporting_evidence_ids": [],
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["assessment"]["related_case_id"] == "case_demo_001"
+    assert "related_case_id_inferred_from_alert_links" in result["warnings"]
+
+
+def test_assessment_upsert_global_current_is_suppressed_when_case_current_exists(db_conn) -> None:
+    scoped = assessment_upsert(
+        db_conn,
+        {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.77",
+            "entity_label": "198.51.100.77",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.9,
+            "verdict": "attacker",
+            "reason_summary": "case scoped attacker",
+            "supporting_alert_ids": ["alt_day3_shell_01"],
+            "supporting_evidence_ids": [],
+        },
+    )
+    global_row = assessment_upsert(
+        db_conn,
+        {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.77",
+            "entity_label": "198.51.100.77",
+            "related_case_id": None,
+            "risk_level": "high",
+            "assessment_confidence": 0.8,
+            "verdict": "attacker",
+            "reason_summary": "global attacker without case",
+            "supporting_alert_ids": [],
+            "supporting_evidence_ids": [],
+        },
+    )
+
+    assert scoped["ok"] is True
+    assert scoped["data"]["assessment"]["is_current"] == 1
+    assert global_row["ok"] is True
+    assert global_row["data"]["assessment"]["is_current"] == 0
+
+    current_rows = db_conn.execute(
+        """
+        select related_case_id
+        from entity_assessments
+        where entity_type = 'ip'
+          and entity_key = '198.51.100.77'
+          and is_current = 1
+        """
+    ).fetchall()
+    assert len(current_rows) == 1
+    assert current_rows[0]["related_case_id"] == "case_demo_001"
