@@ -69,7 +69,25 @@ def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
     elif effective_case_id:
         effective_case_id = resolve_canonical_case_id(conn, effective_case_id)
 
+    if alert is None:
+        response = ToolResponse(
+            ok=False,
+            summary=f"未找到告警 {request.alert_id}",
+            data={"candidates": []},
+            warnings=[f"alert_not_found:{request.alert_id}"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+
     case = load_case(conn, effective_case_id) if effective_case_id else None
+    if not effective_case_id:
+        response = ToolResponse(
+            ok=True,
+            summary="告警未关联案件，暂无案内画像候选",
+            data={"case": None, "alert": alert, "candidates": []},
+            refs={"alert_ids": [request.alert_id]},
+            warnings=["case_id_missing_for_candidate_lookup"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
     if case is None:
         case_id_for_warning = request.case_id or effective_case_id or ""
         response = ToolResponse(
@@ -77,14 +95,6 @@ def actor_case_find_candidates(conn: sqlite3.Connection, payload: dict) -> dict:
             summary=f"未找到案件 {case_id_for_warning}",
             data={"candidates": []},
             warnings=[f"case_not_found:{case_id_for_warning}"],
-        )
-        return response.model_dump(mode="json", by_alias=True)
-    if alert is None:
-        response = ToolResponse(
-            ok=False,
-            summary=f"未找到告警 {request.alert_id}",
-            data={"candidates": []},
-            warnings=[f"alert_not_found:{request.alert_id}"],
         )
         return response.model_dump(mode="json", by_alias=True)
     contexts = load_case_actor_candidate_contexts(conn, case_id=effective_case_id, alert_id=request.alert_id)

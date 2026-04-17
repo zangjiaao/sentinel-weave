@@ -287,6 +287,37 @@ def test_actor_case_find_candidates_infers_case_when_case_id_missing(db_conn) ->
     assert result["refs"]["case_ids"] == ["case_demo_001"]
 
 
+def test_actor_case_find_candidates_returns_empty_when_alert_has_no_case(db_conn) -> None:
+    db_conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_actor_unlinked_001",
+            "2026-04-12T12:00:00+08:00",
+            "unlinked alert",
+            "open",
+            "high",
+            "command_execution",
+            "198.51.100.199",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    db_conn.commit()
+
+    result = actor_case_find_candidates(
+        db_conn,
+        {"alert_id": "alt_actor_unlinked_001", "limit": 3},
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["candidates"] == []
+    assert "case_id_missing_for_candidate_lookup" in result["warnings"]
+
+
 def test_actor_case_batch_tools_write_multiple_items(db_conn) -> None:
     actor_case_upsert(
         db_conn,

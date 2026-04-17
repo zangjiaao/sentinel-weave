@@ -10,6 +10,8 @@ Execution rules:
 - Process at most `10` alerts this run.
 - Treat only `alerts`, `assets`, and `intel_cache` as preloaded facts in the spike; `cases`, `case_alert_links`, `timeline_events`, and `evidence` must be created or refreshed by your tool calls.
 - Use `case.get`, `case.timeline`, and `case.explain-link` to reconstruct evidence and attack flow.
+- Never fabricate a `case_id` for `case.get`; only use `case_id` returned by tool outputs (`alert.fetch`/`alert.detail-batch`/`case.*`).
+- If representative alerts already carry a `case_id`, read and maintain that case first; only create a new case when no usable `case_id` exists.
 - If no case exists yet for the current attack chain, call `alert.detail-batch` with at least one representative alert before creating a new case.
 - Use `alert.detail-batch` for both single-alert and multi-alert detail lookup; for one alert, send a one-item `alert_ids` array.
 - For homogeneous alerts in the same stage/case, use representative sampling instead of one-call-per-alert fan-out.

@@ -26,16 +26,18 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 8. `alert.ack` 尽量批量一次提交本轮已处理告警，避免拆成多次调用。
 9. 告警详情统一走 `alert.detail-batch`：单条详情也传单元素 `alert_ids`，避免反复单条调用。
 10. For each material alert, call `case.get` and `case.timeline`, then `case.explain-link` when explicit linkage evidence is needed.
-11. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
-12. If a case record is missing or stale, create or refresh it with `case.upsert-batch` (single case also uses one-item batch), then maintain it with `case.link-alert-batch` and `case.update-risk`.
-13. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
-14. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
-15. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert-batch` (single entity also uses one-item batch).
-16. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
-17. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
-18. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
-19. Call `report.draft` only when the user explicitly requests a report.
-20. If there is genuinely nothing new to report, return exactly `[SILENT]`.
+11. Never fabricate `case_id` for `case.get`; only use IDs returned by tools (`alert.fetch` / `alert.detail-batch` / `case.*`).
+12. If representative alerts already contain `case_id`, maintain that case first and avoid splitting into a new case unless evidence clearly diverges.
+13. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
+14. If a case record is missing or stale, create or refresh it with `case.upsert-batch` (single case also uses one-item batch), then maintain it with `case.link-alert-batch` and `case.update-risk`.
+15. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
+16. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
+17. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert-batch` (single entity also uses one-item batch).
+18. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
+19. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
+20. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
+21. Call `report.draft` only when the user explicitly requests a report.
+22. If there is genuinely nothing new to report, return exactly `[SILENT]`.
 
 ## Tool Usage Rules
 
@@ -46,6 +48,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - Use `case.timeline` before describing the attack chain across multiple days, IPs, or targets.
 - Use `case.explain-link` with payload `{"case_id":"<case_id>","target_type":"alert","target_id":"<alert_id>"}`.
 - 如果当前还没有案件记录，先对至少一条代表性高信号告警调用 `alert.detail-batch`，再决定是否 `case.upsert-batch` 建案；不要只凭 `alert.fetch` 摘要直接下最终结论。
+- 如果代表性告警已携带 `case_id`，优先沿用该案件继续维护，不要平行新建同链案件。
 - 不要对同一个 `alert_id` 重复调用 `case.explain-link`，除非出现新的矛盾证据需要重新解释。
 - Use `alert.ack` with payload `{"alert_ids":["<alert_id>"],"status":"triaged"}` after analysis is complete for those alerts.
 - Use `case.upsert-batch` when a case needs to be created or refreshed；不要假设 fixture 已经替你建好案件。

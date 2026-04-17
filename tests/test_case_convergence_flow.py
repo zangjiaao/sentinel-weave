@@ -641,6 +641,205 @@ def test_case_convergence_rolls_up_canonical_stage_and_severity(tmp_path) -> Non
     conn.close()
 
 
+def test_case_convergence_rollup_prefers_highest_stage_over_latest_timestamp(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_stage_highwater",
+            "title": "stage highwater",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "exploit",
+            "primary_actor_id": "actor_stage_highwater",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_stage_highwater_lateral",
+        case_id="case_stage_highwater",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="lateral_prep",
+        src_ip="198.51.100.120",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_stage_highwater_cmd",
+        case_id="case_stage_highwater",
+        occurred_at="2026-04-12T11:00:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.120",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    run_case_convergence_for_run(conn, run_id="run_stage_highwater_1")
+    case_row = conn.execute(
+        """
+        select current_stage
+        from cases
+        where case_id = 'case_stage_highwater'
+        """
+    ).fetchone()
+    assert case_row is not None
+    assert case_row["current_stage"] == "lateral_prep"
+    conn.close()
+
+
+def test_case_convergence_rolls_up_current_entity_assessment_to_canonical_case(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_entity_rollup_anchor",
+            "title": "entity rollup anchor",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_entity_rollup_anchor",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_entity_rollup_child",
+            "title": "entity rollup child",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_entity_rollup_child",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into evidence (evidence_id, case_id, occurred_at, evidence_type, summary)
+        values (?, ?, ?, ?, ?)
+        """,
+        (
+            "evi_entity_rollup_anchor",
+            "case_entity_rollup_anchor",
+            "2026-04-12T09:00:00+08:00",
+            "webshell",
+            "entity rollup merge anchor",
+        ),
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_entity_rollup_anchor",
+        case_id="case_entity_rollup_anchor",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.199",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_entity_rollup_child",
+        case_id="case_entity_rollup_child",
+        occurred_at="2026-04-12T10:10:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.199",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    dispatch_tool(
+        conn,
+        "assessment.upsert-batch",
+        {
+            "items": [
+                {
+                    "entity_type": "ip",
+                    "entity_key": "198.51.100.199",
+                    "entity_label": "198.51.100.199",
+                    "related_case_id": "case_entity_rollup_anchor",
+                    "risk_level": "medium",
+                    "assessment_confidence": 0.72,
+                    "verdict": "attacker",
+                    "reason_summary": "anchor verdict",
+                    "supporting_alert_ids": ["alt_entity_rollup_anchor"],
+                    "supporting_evidence_ids": [],
+                }
+            ]
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "assessment.upsert-batch",
+        {
+            "items": [
+                {
+                    "entity_type": "ip",
+                    "entity_key": "198.51.100.199",
+                    "entity_label": "198.51.100.199",
+                    "related_case_id": "case_entity_rollup_child",
+                    "risk_level": "high",
+                    "assessment_confidence": 0.91,
+                    "verdict": "attacker",
+                    "reason_summary": "child verdict",
+                    "supporting_alert_ids": ["alt_entity_rollup_child"],
+                    "supporting_evidence_ids": [],
+                }
+            ]
+        },
+        source="cli",
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_entity_rollup_1")
+    assert summary["merge_events_count"] >= 1
+
+    merged_child = conn.execute(
+        """
+        select merge_state, merged_into_case_id
+        from cases
+        where case_id = 'case_entity_rollup_child'
+        """
+    ).fetchone()
+    assert merged_child is not None
+    assert merged_child["merge_state"] == "merged"
+    assert merged_child["merged_into_case_id"] == "case_entity_rollup_anchor"
+
+    current_rows = conn.execute(
+        """
+        select related_case_id, risk_level, assessment_confidence
+        from entity_assessments
+        where entity_type = 'ip'
+          and entity_key = '198.51.100.199'
+          and is_current = 1
+        """
+    ).fetchall()
+    assert len(current_rows) == 1
+    assert current_rows[0]["related_case_id"] == "case_entity_rollup_anchor"
+    assert current_rows[0]["risk_level"] == "high"
+    assert current_rows[0]["assessment_confidence"] >= 0.9
+    conn.close()
+
+
 def test_case_convergence_rolls_up_case_actor_and_primary_actor_to_canonical(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
@@ -757,7 +956,7 @@ def test_case_convergence_rolls_up_case_actor_and_primary_actor_to_canonical(tmp
         """
     ).fetchone()
     assert canonical_case is not None
-    assert canonical_case["current_stage"] == "command_execution"
+    assert canonical_case["current_stage"] == "lateral_prep"
     assert canonical_case["primary_actor_id"] == "actor_rollup_child"
 
     child_case = conn.execute(
@@ -899,6 +1098,72 @@ def test_case_convergence_backfills_high_signal_alert_actor_coverage_with_single
         (case_row["primary_actor_id"],),
     ).fetchall()
     assert [row["observation_key"] for row in observation_ips] == ["198.51.100.77", "198.51.100.91"]
+    conn.close()
+
+
+def test_case_convergence_backfills_compromised_host_assessment_for_high_signal_case(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_asset_backfill",
+            "title": "asset backfill",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": None,
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_asset_backfill_1",
+        case_id="case_asset_backfill",
+        occurred_at="2026-04-12T11:03:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.77",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_asset_backfill_2",
+        case_id="case_asset_backfill",
+        occurred_at="2026-04-12T11:10:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_asset_backfill_1")
+    assert summary["backfilled_compromised_host_assessments_count"] >= 1
+
+    row = conn.execute(
+        """
+        select related_case_id, risk_level, verdict, is_current
+        from entity_assessments
+        where entity_type = 'asset'
+          and entity_key = 'asset_api_prod'
+          and related_case_id = 'case_asset_backfill'
+          and is_current = 1
+        order by occurred_at desc
+        limit 1
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["risk_level"] == "high"
+    assert row["verdict"] == "compromised_host"
+    assert row["is_current"] == 1
     conn.close()
 
 

@@ -157,6 +157,7 @@ def test_mcp_prompt_assessment_upsert_batch_contains_usage_guidance() -> None:
     assert "严格使用 `assessment.upsert-batch` 的后端请求 schema 字段" in text
     assert "必填字段：" in text
     assert "`items`" in text
+    assert "`items` 不能为空" in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
 
 

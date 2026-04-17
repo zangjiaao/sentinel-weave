@@ -43,6 +43,16 @@ def assessment_upsert(conn: sqlite3.Connection, payload: dict) -> dict:
 
 
 def assessment_upsert_batch(conn: sqlite3.Connection, payload: dict) -> dict:
+    raw_items = payload.get("items") if isinstance(payload, dict) else None
+    if raw_items == [] or raw_items is None:
+        response = ToolResponse(
+            ok=True,
+            summary="未提供实体评估条目，已跳过写入",
+            data={"assessments": [], "failures": []},
+            warnings=["assessment_batch_empty_noop"],
+        )
+        return response.model_dump(mode="json", by_alias=True)
+
     request = AssessmentUpsertBatchRequest.model_validate(payload)
     assessments: list[dict] = []
     failures: list[dict] = []

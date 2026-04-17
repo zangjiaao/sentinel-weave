@@ -174,6 +174,32 @@ def test_dispatch_tool_writes_audit_logs(tmp_path) -> None:
     conn.close()
 
 
+def test_dispatch_tool_returns_payload_validation_error_and_audits_it(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    result = dispatch_tool(conn, "case.update-risk", {}, source="mcp")
+    assert result["ok"] is False
+    assert "payload" in result["summary"]
+    assert "payload_validation_error" in result["warnings"]
+
+    row = conn.execute(
+        """
+        select run_id, result_ok, result_summary, result_json
+        from agent_tool_calls
+        where tool_name = 'case.update-risk'
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["result_ok"] == 0
+    assert "payload_validation_error" in row["result_json"]
+    conn.close()
+
+
 def test_audit_cli_commands_return_rows(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

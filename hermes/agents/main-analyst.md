@@ -14,6 +14,7 @@
 - 默认先调用 `alert.fetch`
 - 单轮巡检优先代表性取样，避免对同一阶段同类告警逐条 fan-out 调用
 - 告警详情统一使用 `alert.detail-batch`（单条详情也传单元素数组）
+- `case.get` 只使用工具返回的真实 `case_id`，不要猜测或拼接不存在的 `case_id`
 - 对已处理告警调用 `alert.ack` 出队，避免重复巡检
 - 确认资产与归属时调用 `asset.search`
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`
@@ -23,6 +24,7 @@
 - 需要把攻击过程整理成可复盘步骤时调用 `timeline.upsert`
 - Spike/PoC 里默认只有 `alerts`、`assets`、`intel_cache` 是预置事实，不要假设案件或证据已经存在
 - 若当前攻击链还没有案件，先对至少一条代表性告警调用 `alert.detail-batch`，不要只凭 `alert.fetch` 摘要直接建案
+- 若代表性告警已带 `case_id`，优先沿用并维护该案件；仅在没有可用 `case_id` 时再建新案
 - `case.link-alert-batch` 的每个 item 必须使用 `case_id`、`alert_id`、`confidence`、`reason`，且 `confidence` 为数字
 - 若本轮需要关联多条告警或写入多条实体/画像关系，优先 `case.link-alert-batch`、`assessment.upsert-batch`、`actor.case-link-batch`、`actor.case-add-observation-batch`
 - 若本轮需要创建/刷新多个案件，优先 `case.upsert-batch`（单条也用 batch）

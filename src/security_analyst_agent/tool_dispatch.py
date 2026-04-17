@@ -2,6 +2,8 @@ import sqlite3
 import time
 from typing import Callable
 
+from pydantic import ValidationError
+
 from security_analyst_agent.repositories.audit import (
     bind_run_context,
     finalize_mcp_auto_run_after_tool,
@@ -71,6 +73,18 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
 }
 
 
+def _validation_error_summary(exc: ValidationError) -> str:
+    errors = exc.errors()
+    if not errors:
+        return "payload 校验失败"
+    first = errors[0]
+    location = ".".join(str(item) for item in first.get("loc", []))
+    message = str(first.get("msg") or "invalid payload")
+    if location:
+        return f"payload 校验失败：{location} {message}"
+    return f"payload 校验失败：{message}"
+
+
 def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, source: str = "unknown") -> dict:
     if tool_name not in TOOL_HANDLERS:
         raise ValueError(f"unsupported tool: {tool_name}")
@@ -82,6 +96,34 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
         result: dict
         try:
             result = TOOL_HANDLERS[tool_name](conn, payload)
+        except ValidationError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            validation_result = {
+                "ok": False,
+                "summary": _validation_error_summary(exc),
+                "data": {"tool": tool_name, "validation_errors": exc.errors()},
+                "warnings": ["payload_validation_error"],
+                "refs": {},
+                "page": {"next_cursor": None, "has_more": False},
+                "meta": {},
+            }
+            finalize_mcp_auto_run_after_tool(
+                conn,
+                source=source,
+                run_id=run_id,
+                tool_name=tool_name,
+                result=validation_result,
+            )
+            insert_tool_call_log(
+                conn,
+                source=source,
+                tool_name=tool_name,
+                payload=payload,
+                result=validation_result,
+                latency_ms=latency_ms,
+            )
+            conn.commit()
+            return validation_result
         except Exception:
             latency_ms = int((time.perf_counter() - start) * 1000)
             fallback_result = {

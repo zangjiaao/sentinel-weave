@@ -13,6 +13,7 @@ from security_analyst_agent.repositories.actors import (
     add_case_actor_observation,
     upsert_case_actor_profile,
 )
+from security_analyst_agent.repositories.assessments import upsert_entity_assessment
 from security_analyst_agent.repositories.case_relations import (
     list_confirmed_case_relations,
     upsert_case_relation_candidate,
@@ -70,7 +71,7 @@ def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_
           and case_alert_links.is_active = 1
           and case_alert_links.confidence >= ?
           and lower(alerts.severity) in ({placeholders})
-        order by alerts.occurred_at desc, {stage_rank_sql} desc, case_alert_links.linked_at desc, case_alert_links.rowid desc
+        order by {stage_rank_sql} desc, alerts.occurred_at desc, case_alert_links.linked_at desc, case_alert_links.rowid desc
         limit 1
         """,
         (case_id, _MIN_LINK_CONFIDENCE_FOR_RELATION, *allowed_severities),
@@ -86,7 +87,7 @@ def _select_latest_high_signal_stage_for_case(conn: sqlite3.Connection, *, case_
         where case_alert_links.case_id = ?
           and case_alert_links.is_active = 1
           and lower(alerts.severity) in ({placeholders})
-        order by alerts.occurred_at desc, {stage_rank_sql} desc, case_alert_links.linked_at desc, case_alert_links.rowid desc
+        order by {stage_rank_sql} desc, alerts.occurred_at desc, case_alert_links.linked_at desc, case_alert_links.rowid desc
         limit 1
         """,
         (case_id, *allowed_severities),
@@ -322,6 +323,102 @@ def _backfill_high_signal_alert_actor_coverage(conn: sqlite3.Connection) -> dict
         "backfilled_actor_link_count": created_link_count,
         "backfilled_actor_observation_count": created_observation_count,
     }
+
+
+def _backfill_high_signal_compromised_host_assessments(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+) -> int:
+    case_rows = conn.execute(
+        """
+        select case_id, current_stage, overall_severity
+        from cases
+        where coalesce(merge_state, 'standalone') <> 'merged'
+        """
+    ).fetchall()
+    if not case_rows:
+        return 0
+
+    severities = tuple(sorted(_HIGH_SIGNAL_ACTOR_SEVERITIES))
+    severity_placeholders = ", ".join("?" for _ in severities)
+    stages = tuple(sorted(_HIGH_SIGNAL_ACTOR_STAGES))
+    stage_placeholders = ", ".join("?" for _ in stages)
+    created_count = 0
+
+    for case_row in case_rows:
+        case_id = str(case_row["case_id"])
+        alert_rows = conn.execute(
+            f"""
+            select
+              alerts.alert_id,
+              alerts.asset_id,
+              alerts.occurred_at,
+              case_alert_links.confidence as link_confidence
+            from case_alert_links
+            join alerts on alerts.alert_id = case_alert_links.alert_id
+            where case_alert_links.case_id = ?
+              and case_alert_links.is_active = 1
+              and case_alert_links.confidence >= ?
+              and lower(alerts.severity) in ({severity_placeholders})
+              and lower(alerts.attack_stage) in ({stage_placeholders})
+            order by alerts.occurred_at asc, case_alert_links.linked_at asc, case_alert_links.rowid asc
+            """,
+            (case_id, _MIN_LINK_CONFIDENCE_FOR_RELATION, *severities, *stages),
+        ).fetchall()
+        if not alert_rows:
+            continue
+
+        asset_rows: dict[str, list[sqlite3.Row]] = {}
+        for alert_row in alert_rows:
+            asset_id = str(alert_row["asset_id"] or "").strip()
+            if not asset_id:
+                continue
+            asset_rows.setdefault(asset_id, []).append(alert_row)
+        if not asset_rows:
+            continue
+
+        for asset_id, rows in asset_rows.items():
+            existing = conn.execute(
+                """
+                select 1
+                from entity_assessments
+                where entity_type = 'asset'
+                  and entity_key = ?
+                  and related_case_id = ?
+                  and verdict = 'compromised_host'
+                  and is_current = 1
+                limit 1
+                """,
+                (asset_id, case_id),
+            ).fetchone()
+            if existing is not None:
+                continue
+
+            supporting_alert_ids = list(dict.fromkeys(str(item["alert_id"]) for item in rows if item["alert_id"]))
+            first_seen_at = min((str(item["occurred_at"]) for item in rows if item["occurred_at"]), default=None)
+            last_seen_at = max((str(item["occurred_at"]) for item in rows if item["occurred_at"]), default=None)
+            confidence = max((float(item["link_confidence"] or 0.0) for item in rows), default=0.8)
+            upsert_entity_assessment(
+                conn,
+                entity_type="asset",
+                entity_key=asset_id,
+                entity_label=asset_id,
+                related_case_id=case_id,
+                risk_level=_risk_level_from_case_severity(str(case_row["overall_severity"] or "")),
+                assessment_confidence=max(0.8, min(confidence, 0.98)),
+                verdict="compromised_host",
+                reason_summary="auto_backfill_compromised_host_high_signal",
+                supporting_alert_ids=supporting_alert_ids,
+                supporting_evidence_ids=[],
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                run_id=run_id,
+                analysis_cutoff_at=None,
+            )
+            created_count += 1
+
+    return created_count
 
 
 def _load_case_contexts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -948,6 +1045,162 @@ def _reconcile_detached_cases(
     return detached_case_ids
 
 
+def _json_list(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item is not None and str(item)]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if item is not None and str(item)]
+    return []
+
+
+def _rollup_canonical_entity_assessment_state(conn: sqlite3.Connection, *, run_id: str) -> int:
+    case_rows = conn.execute(
+        """
+        select case_id, coalesce(canonical_case_id, case_id) as canonical_case_id
+        from cases
+        """
+    ).fetchall()
+    if not case_rows:
+        return 0
+
+    members_by_canonical: dict[str, list[str]] = {}
+    for row in case_rows:
+        members_by_canonical.setdefault(str(row["canonical_case_id"]), []).append(str(row["case_id"]))
+
+    now = _now_iso()
+    updates = 0
+    for canonical_case_id, member_case_ids in members_by_canonical.items():
+        scoped_case_ids = list(dict.fromkeys(member_case_ids + [canonical_case_id]))
+        if not scoped_case_ids:
+            continue
+        placeholders = ", ".join("?" for _ in scoped_case_ids)
+        rows = conn.execute(
+            f"""
+            select
+              assessment_id,
+              occurred_at,
+              run_id,
+              entity_type,
+              entity_key,
+              entity_label,
+              related_case_id,
+              risk_level,
+              assessment_confidence,
+              verdict,
+              reason_summary,
+              supporting_alert_ids_json,
+              supporting_evidence_ids_json,
+              first_seen_at,
+              last_seen_at,
+              analysis_cutoff_at,
+              is_current
+            from entity_assessments
+            where is_current = 1
+              and related_case_id in ({placeholders})
+            """,
+            tuple(scoped_case_ids),
+        ).fetchall()
+        if not rows:
+            continue
+
+        grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault((str(row["entity_type"]), str(row["entity_key"])), []).append(row)
+
+        for entity_key, candidates in grouped.items():
+            if len(candidates) == 1 and str(candidates[0]["related_case_id"] or "") == canonical_case_id:
+                continue
+
+            winner = max(
+                candidates,
+                key=lambda item: (
+                    _SEVERITY_ORDER.get(str(item["risk_level"] or "").lower(), 0),
+                    float(item["assessment_confidence"] or 0.0),
+                    str(item["occurred_at"] or ""),
+                    str(item["assessment_id"] or ""),
+                ),
+            )
+            winner_case_id = str(winner["related_case_id"] or "")
+            if len(candidates) == 1 and winner_case_id == canonical_case_id:
+                continue
+
+            first_seen_candidates = [str(item["first_seen_at"]) for item in candidates if item["first_seen_at"]]
+            last_seen_candidates = [str(item["last_seen_at"]) for item in candidates if item["last_seen_at"]]
+            first_seen_at = min(first_seen_candidates) if first_seen_candidates else winner["first_seen_at"]
+            last_seen_at = max(last_seen_candidates) if last_seen_candidates else winner["last_seen_at"]
+
+            alert_ids: list[str] = []
+            evidence_ids: list[str] = []
+            for item in candidates:
+                alert_ids.extend(_json_list(item["supporting_alert_ids_json"]))
+                evidence_ids.extend(_json_list(item["supporting_evidence_ids_json"]))
+            merged_alert_ids = list(dict.fromkeys(alert_ids))
+            merged_evidence_ids = list(dict.fromkeys(evidence_ids))
+
+            demoted_ids = [str(item["assessment_id"]) for item in candidates]
+            demote_placeholders = ", ".join("?" for _ in demoted_ids)
+            conn.execute(
+                f"""
+                update entity_assessments
+                set is_current = 0
+                where assessment_id in ({demote_placeholders})
+                """,
+                tuple(demoted_ids),
+            )
+            assessment_id = f"eass_{uuid4().hex[:12]}"
+            conn.execute(
+                """
+                insert into entity_assessments (
+                  assessment_id,
+                  occurred_at,
+                  run_id,
+                  entity_type,
+                  entity_key,
+                  entity_label,
+                  related_case_id,
+                  risk_level,
+                  assessment_confidence,
+                  verdict,
+                  reason_summary,
+                  supporting_alert_ids_json,
+                  supporting_evidence_ids_json,
+                  first_seen_at,
+                  last_seen_at,
+                  analysis_cutoff_at,
+                  is_current
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    assessment_id,
+                    now,
+                    run_id,
+                    winner["entity_type"],
+                    winner["entity_key"],
+                    winner["entity_label"] or winner["entity_key"],
+                    canonical_case_id,
+                    winner["risk_level"],
+                    winner["assessment_confidence"],
+                    winner["verdict"],
+                    "auto_case_convergence_entity_rollup",
+                    json.dumps(merged_alert_ids, ensure_ascii=False),
+                    json.dumps(merged_evidence_ids, ensure_ascii=False),
+                    first_seen_at,
+                    last_seen_at,
+                    winner["analysis_cutoff_at"],
+                ),
+            )
+            updates += 1
+
+    return updates
+
+
 def _rollup_canonical_case_state(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         """
@@ -1135,8 +1388,10 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         run_id=run_id,
         clustered_case_ids=clustered_case_ids,
     )
+    rolled_up_entity_assessments_count = _rollup_canonical_entity_assessment_state(conn, run_id=run_id)
     rolled_up_cases_count = _rollup_canonical_case_state(conn)
     actor_backfill_stats = _backfill_high_signal_alert_actor_coverage(conn)
+    backfilled_compromised_host_count = _backfill_high_signal_compromised_host_assessments(conn, run_id=run_id)
     rolled_up_case_actors_count = _rollup_canonical_primary_actor_state(conn)
     confirmed_relations_after = list_confirmed_case_relations(conn)
 
@@ -1148,7 +1403,9 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "confirmed_relations_count": len(confirmed_relations_after),
         "merge_events_count": len(merge_events),
         "detached_cases_count": len(detached_case_ids),
+        "rolled_up_entity_assessments_count": rolled_up_entity_assessments_count,
         "rolled_up_cases_count": rolled_up_cases_count,
         "rolled_up_case_actors_count": rolled_up_case_actors_count,
+        "backfilled_compromised_host_assessments_count": backfilled_compromised_host_count,
         **actor_backfill_stats,
     }

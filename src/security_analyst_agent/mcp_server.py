@@ -142,6 +142,7 @@ PROMPT_EXTRA_GUIDANCE: dict[str, list[str]] = {
     "alert.ack": ["`status` 仅支持 `triaged` 或 `closed`。"],
     "case.explain-link": ["当前仅支持 `target_type=alert`。"],
     "case.update-risk": ["默认阻止阶段回退；仅在确有需要时传入 `force_downgrade=true`。"],
+    "assessment.upsert-batch": ["`items` 不能为空；单条写入也要传一条 item。"],
 }
 
 
