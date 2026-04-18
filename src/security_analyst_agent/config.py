@@ -12,6 +12,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _path_env(name: str, default: Path) -> Path:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return Path(raw_value).expanduser()
+
+
 def _load_env_file(path: Path, *, override: bool = False) -> None:
     if not path.exists():
         return
@@ -56,13 +63,14 @@ FIXTURE_DIR = PROJECT_ROOT / "fixtures" / "spike"
 SPIKE_MEMORY_DIR = PROJECT_ROOT / "fixtures" / "spike_memory"
 DEFAULT_DB_PATH = PROJECT_ROOT / "spike.db"
 DEFAULT_MEMORY_SPIKE_DB_PATH = PROJECT_ROOT / "memory-spike.db"
-DEFAULT_HERMES_HOME = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes")))
-DEFAULT_HERMES_PATROL_HOME = Path(os.getenv("HERMES_PATROL_HOME", str(Path.home() / ".hermes-patrol")))
+DEFAULT_HERMES_HOME = _path_env("HERMES_HOME", Path.home() / ".hermes")
+DEFAULT_HERMES_PATROL_HOME = _path_env("HERMES_PATROL_HOME", Path.home() / ".hermes-patrol")
 DEFAULT_HERMES_CRON_JOB_ID = os.getenv("HERMES_PATROL_JOB_ID", "d27a82c0fa79")
 DEFAULT_HERMES_PATROL_TRIGGER_MODE = os.getenv("HERMES_PATROL_TRIGGER_MODE", "chat")
 DEFAULT_HERMES_PATROL_MAX_TURNS = _int_env("HERMES_PATROL_MAX_TURNS", 18)
-DEFAULT_HERMES_PATROL_PROMPT_PATH = Path(
-    os.getenv("HERMES_PATROL_PROMPT_PATH", str(PROJECT_ROOT / "hermes" / "patrol-prompt.md"))
+DEFAULT_HERMES_PATROL_PROMPT_PATH = _path_env(
+    "HERMES_PATROL_PROMPT_PATH",
+    PROJECT_ROOT / "hermes" / "patrol-prompt.md",
 )
 DEFAULT_OPENAI_PATROL_MODEL = os.getenv("OPENAI_PATROL_MODEL", "gpt-5-mini")
 DEFAULT_OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip() or None

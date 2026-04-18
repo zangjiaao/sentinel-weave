@@ -87,6 +87,7 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
         command_runner=fake_runner,
         hermes_home=patrol_home,
         source_hermes_home=source_home,
+        trigger_mode="chat",
     )
     assert result["triggered"] is True
     assert result["processed_events"] == 2
@@ -134,7 +135,12 @@ def test_trigger_patrol_marks_failed_and_retries(tmp_path) -> None:
     def fail_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="boom")
 
-    failed = trigger_patrol_from_ingest(db_path, job_id="job_demo_002", command_runner=fail_runner)
+    failed = trigger_patrol_from_ingest(
+        db_path,
+        job_id="job_demo_002",
+        command_runner=fail_runner,
+        trigger_mode="chat",
+    )
     assert failed["status"] == "failed"
 
     conn = connect_db(db_path)
@@ -148,7 +154,12 @@ def test_trigger_patrol_marks_failed_and_retries(tmp_path) -> None:
     def success_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
 
-    retried = trigger_patrol_from_ingest(db_path, job_id="job_demo_002", command_runner=success_runner)
+    retried = trigger_patrol_from_ingest(
+        db_path,
+        job_id="job_demo_002",
+        command_runner=success_runner,
+        trigger_mode="chat",
+    )
     assert retried["status"] == "success"
     assert retried["processed_events"] == 1
 
@@ -192,6 +203,7 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_resume_and_continue_
         command_runner=flaky_runner,
         hermes_home=patrol_home,
         source_hermes_home=source_home,
+        trigger_mode="chat",
     )
     assert result["status"] == "success"
     assert len(commands) == 4
@@ -234,6 +246,7 @@ def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_pat
         command_runner=fake_runner,
         hermes_home=patrol_home,
         source_hermes_home=source_home,
+        trigger_mode="chat",
     )
     assert first_result["status"] == "success"
     first_round_command_count = len(commands)
@@ -253,6 +266,7 @@ def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_pat
         command_runner=fake_runner,
         hermes_home=patrol_home,
         source_hermes_home=source_home,
+        trigger_mode="chat",
     )
     assert second_result["status"] == "success"
     second_round_first_command = commands[first_round_command_count]
@@ -304,6 +318,11 @@ def test_trigger_patrol_openai_mode_executes_tools_and_persists_response_state(t
         openai_client_factory=lambda: fake_client,
     )
     assert result["status"] == "success"
+    first_openai_call = fake_client.responses.calls[0]
+    instructions = str(first_openai_call.get("instructions", ""))
+    assert "Run patrol loop for the security analyst spike." in instructions
+    assert "Patrol Runtime SOUL Template" in instructions
+    assert "SecAgent Patrol" in instructions
 
     conn = connect_db(db_path)
     state_rows = conn.execute("select state_key, state_value_json from patrol_state").fetchall()

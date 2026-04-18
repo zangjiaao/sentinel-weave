@@ -37,6 +37,9 @@ DEFAULT_PATROL_CHAT_QUERY = (
 )
 DEFAULT_PATROL_SKILL = "secagent-patrol"
 DEFAULT_PATROL_LOOP_PATH = PROJECT_ROOT / "hermes" / "patrol-loop.json"
+DEFAULT_PATROL_SOUL_TEMPLATE_PATH = PROJECT_ROOT / "hermes" / "SOUL.patrol.template.md"
+DEFAULT_PATROL_FALLBACK_SOUL_TEMPLATE_PATH = PROJECT_ROOT / "hermes" / "SOUL.template.md"
+DEFAULT_PATROL_SKILL_PATH = PROJECT_ROOT / "skills" / "secagent-patrol" / "SKILL.md"
 DEFAULT_PATROL_MEMORY_FLUSH_QUERY = (
     "Patrol run has just finished. Do not call MCP secagent tools. "
     "If there are durable cross-run facts (user preference, stable environment convention, or reliable workflow rule), "
@@ -136,6 +139,35 @@ def _load_patrol_chat_query(prompt_path: Path) -> str:
         if text:
             return text
     return DEFAULT_PATROL_CHAT_QUERY
+
+
+def _load_text_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8").strip()
+    return text
+
+
+def _load_patrol_soul_text() -> str:
+    text = _load_text_file(DEFAULT_PATROL_SOUL_TEMPLATE_PATH)
+    if text:
+        return text
+    return _load_text_file(DEFAULT_PATROL_FALLBACK_SOUL_TEMPLATE_PATH)
+
+
+def _build_openai_patrol_instructions(prompt_path: Path) -> str:
+    base_prompt = _load_patrol_chat_query(prompt_path)
+    sections = [base_prompt]
+
+    soul_text = _load_patrol_soul_text()
+    if soul_text:
+        sections.append(soul_text)
+
+    skill_text = _load_text_file(DEFAULT_PATROL_SKILL_PATH)
+    if skill_text:
+        sections.append(skill_text)
+
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 def _build_patrol_chat_command(
@@ -458,6 +490,7 @@ def trigger_patrol_from_ingest(
                 existing_response_id = openai_session_state.get("response_id")
                 has_existing_response = isinstance(existing_response_id, str) and existing_response_id.strip() != ""
                 bootstrap_query = _load_patrol_chat_query(patrol_prompt_path)
+                instructions = _build_openai_patrol_instructions(patrol_prompt_path)
                 if has_existing_response:
                     primary_query = _build_lightweight_patrol_query(event_ids)
                 else:
@@ -466,7 +499,7 @@ def trigger_patrol_from_ingest(
                 openai_result = run_openai_patrol(
                     conn,
                     model=openai_model,
-                    instructions=bootstrap_query,
+                    instructions=instructions,
                     query=primary_query,
                     previous_response_id=str(existing_response_id) if has_existing_response else None,
                     max_turns=patrol_max_turns,

@@ -1,5 +1,6 @@
 import importlib
 import os
+from pathlib import Path
 import sys
 import types
 
@@ -50,3 +51,16 @@ def test_config_reads_openai_base_url_from_env(monkeypatch) -> None:
 
     reloaded = importlib.reload(config)
     assert reloaded.DEFAULT_OPENAI_BASE_URL == "https://edge.example.test/v1"
+
+
+def test_config_expands_tilde_for_path_env(monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", "~/.hermes")
+    monkeypatch.setenv("HERMES_PATROL_HOME", "~/.hermes-patrol")
+    monkeypatch.setenv("HERMES_PATROL_PROMPT_PATH", "~/custom/patrol-prompt.md")
+    import security_analyst_agent.config as config
+
+    reloaded = importlib.reload(config)
+    home = str(Path.home())
+    assert str(reloaded.DEFAULT_HERMES_HOME).startswith(home)
+    assert str(reloaded.DEFAULT_HERMES_PATROL_HOME).startswith(home)
+    assert str(reloaded.DEFAULT_HERMES_PATROL_PROMPT_PATH).startswith(home)
