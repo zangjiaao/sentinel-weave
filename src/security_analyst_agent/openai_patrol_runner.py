@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from security_analyst_agent.config import DEFAULT_OPENAI_BASE_URL
 from security_analyst_agent.mcp_server import CORE_TOOL_NAMES, TOOL_DESCRIPTIONS, TOOL_REQUEST_MODELS
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
@@ -23,6 +24,8 @@ def _default_openai_client_factory() -> Any:
         from openai import OpenAI
     except ImportError as exc:
         raise RuntimeError("openai package is required for trigger_mode=openai") from exc
+    if DEFAULT_OPENAI_BASE_URL:
+        return OpenAI(base_url=DEFAULT_OPENAI_BASE_URL)
     return OpenAI()
 
 

@@ -12,8 +12,46 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _load_env_file(path: Path, *, override: bool = False) -> None:
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].strip()
+        if "=" not in stripped:
+            continue
+
+        key, raw_value = stripped.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        value = raw_value.strip()
+        is_quoted = (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in {'"', "'"}
+        )
+        if is_quoted:
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+
+        if override or key not in os.environ:
+            os.environ[key] = value
+
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent.parent
+_load_env_file(PROJECT_ROOT / ".env", override=False)
 FIXTURE_DIR = PROJECT_ROOT / "fixtures" / "spike"
 SPIKE_MEMORY_DIR = PROJECT_ROOT / "fixtures" / "spike_memory"
 DEFAULT_DB_PATH = PROJECT_ROOT / "spike.db"
@@ -27,3 +65,4 @@ DEFAULT_HERMES_PATROL_PROMPT_PATH = Path(
     os.getenv("HERMES_PATROL_PROMPT_PATH", str(PROJECT_ROOT / "hermes" / "patrol-prompt.md"))
 )
 DEFAULT_OPENAI_PATROL_MODEL = os.getenv("OPENAI_PATROL_MODEL", "gpt-5-mini")
+DEFAULT_OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
