@@ -344,6 +344,97 @@ def test_trigger_patrol_openai_mode_executes_tools_and_persists_response_state(t
     assert all(row["run_id"] == result["run_id"] for row in tool_calls)
 
 
+def test_trigger_patrol_openai_mode_runs_case_convergence_after_success(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_conv_001")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_conv_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_conv_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_conv_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_ack",
+                        "call_id": "call_openai_conv_ack",
+                        "arguments": '{"alert_ids":["alt_ingest_openai_conv_001"],"status":"triaged"}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_conv_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    convergence_run_ids: list[str] = []
+
+    def _fake_convergence(_conn, *, run_id: str):
+        convergence_run_ids.append(run_id)
+        return {"confirmed_relations_count": 0, "merge_events_count": 0, "orphan_absorbed_cases_count": 0}
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.run_case_convergence_for_run", _fake_convergence)
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "success"
+    assert convergence_run_ids == [result["run_id"]]
+
+
+def test_trigger_patrol_openai_mode_skips_case_convergence_on_failure(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_conv_002")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_conv_fail_001",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+            {
+                "id": "resp_openai_conv_fail_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    convergence_run_ids: list[str] = []
+
+    def _fake_convergence(_conn, *, run_id: str):
+        convergence_run_ids.append(run_id)
+        return {"confirmed_relations_count": 0, "merge_events_count": 0, "orphan_absorbed_cases_count": 0}
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.run_case_convergence_for_run", _fake_convergence)
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "failed"
+    assert convergence_run_ids == []
+
+
 def test_trigger_patrol_openai_mode_reuses_previous_response_id(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

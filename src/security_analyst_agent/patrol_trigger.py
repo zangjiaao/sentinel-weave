@@ -29,6 +29,7 @@ from security_analyst_agent.config import (
 )
 from security_analyst_agent.db import connect_db, create_schema
 from security_analyst_agent.openai_patrol_runner import OpenAIClientFactory, run_openai_patrol
+from security_analyst_agent.services.case_convergence import run_case_convergence_for_run
 
 CommandRunner = Callable[[list[str], dict[str, str] | None], subprocess.CompletedProcess[str]]
 LegacyCommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -689,6 +690,18 @@ def trigger_patrol_from_ingest(
                 detail = f"unsupported trigger mode: {trigger_mode}"
     except Exception as exc:
         detail = f"exception: {exc}"
+
+    if status == "success":
+        try:
+            convergence_summary = run_case_convergence_for_run(conn, run_id=run_id)
+            detail = (
+                f"{detail}; case_convergence=ok("
+                f"confirmed_relations={convergence_summary.get('confirmed_relations_count', 0)}, "
+                f"merge_events={convergence_summary.get('merge_events_count', 0)}, "
+                f"orphan_absorbed={convergence_summary.get('orphan_absorbed_cases_count', 0)})"
+            )
+        except Exception as exc:
+            detail = f"{detail}; case_convergence_failed={type(exc).__name__}:{exc}"
 
     final_event_state = "processed" if status in {"success", "dry_run_success"} else "failed"
     conn.execute(
