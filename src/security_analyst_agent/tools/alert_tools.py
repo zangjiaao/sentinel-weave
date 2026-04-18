@@ -84,6 +84,65 @@ def _build_cluster_guardrails_and_actions(
     return processing_guardrails, recommended_next_actions, detail_fanout_guardrail_applied
 
 
+def _build_ack_recommendations(clusters: list[dict]) -> list[dict[str, object]]:
+    recommendations: list[dict[str, object]] = []
+    for cluster in clusters:
+        ack_score = 0
+        reason_codes: list[str] = []
+        priority_bucket = str(cluster.get("priority_bucket", "p2"))
+        max_severity = str(cluster.get("max_severity", "low"))
+        high_severity_count = int(cluster.get("high_severity_count", 0))
+        alert_count = int(cluster.get("alert_count", 0))
+        attack_stage = str(cluster.get("attack_stage", "unknown"))
+
+        if priority_bucket == "p2":
+            ack_score += 45
+            reason_codes.append("low_priority_cluster")
+        else:
+            reason_codes.append("high_priority_cluster")
+
+        if max_severity in {"low", "medium"}:
+            ack_score += 25
+            reason_codes.append("low_or_medium_severity_only")
+        else:
+            ack_score -= 40
+            reason_codes.append("high_or_critical_severity_present")
+
+        if high_severity_count == 0:
+            ack_score += 20
+            reason_codes.append("no_high_severity_alerts")
+        else:
+            ack_score -= 30
+            reason_codes.append("contains_high_severity_alerts")
+
+        if alert_count >= 10:
+            ack_score += 20
+            reason_codes.append("repeated_alert_pattern")
+        elif alert_count >= 5:
+            ack_score += 10
+            reason_codes.append("small_repeated_pattern")
+
+        if attack_stage == "recon":
+            ack_score += 10
+            reason_codes.append("recon_stage_noise_likely")
+
+        ack_score = max(0, min(100, ack_score))
+        should_suggest_ack = ack_score >= 75
+        recommendations.append(
+            {
+                "cluster_id": cluster.get("cluster_id"),
+                "verdict": "suggest_ack_triaged" if should_suggest_ack else "needs_manual_review",
+                "ack_score": ack_score,
+                "confidence": round(ack_score / 100.0, 2),
+                "suggested_status": "triaged" if should_suggest_ack else None,
+                "reason_codes": reason_codes,
+                "estimated_alert_count": alert_count,
+                "sample_alert_ids": list(cluster.get("sample_alert_ids", [])),
+            }
+        )
+    return recommendations
+
+
 def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     request = AlertFetchRequest.model_validate(payload)
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
@@ -116,6 +175,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     hotspot_summary: dict[str, object] | None = None
     processing_guardrails: dict[str, object] | None = None
     recommended_next_actions: list[dict[str, object]] | None = None
+    ack_recommendations: list[dict[str, object]] | None = None
     if effective_mode == "clusters":
         cluster_offset = 0
         if request.cursor:
@@ -202,6 +262,9 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
                 page_next_cursor=page_next_cursor,
             )
         )
+        ack_recommendations = _build_ack_recommendations(clusters)
+        if any(item.get("verdict") == "suggest_ack_triaged" for item in ack_recommendations):
+            warnings.append("ack_recommendations_available")
         if detail_fanout_guardrail_applied:
             warnings.append("detail_fanout_guardrail_applied")
         summary = (
@@ -236,6 +299,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             "hotspot_summary": hotspot_summary,
             "processing_guardrails": processing_guardrails,
             "recommended_next_actions": recommended_next_actions,
+            "ack_recommendations": ack_recommendations,
             "omitted_alert_count": omitted_alert_count,
         },
         refs={"alert_ids": refs_alert_ids},

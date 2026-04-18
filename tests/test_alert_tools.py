@@ -411,6 +411,23 @@ def test_alert_fetch_clusters_returns_budget_guardrails_and_next_actions(db_conn
         "should_ack_homogeneous_noise": False,
         "detail_fanout_guardrail_applied": True,
     }
+    assert result["data"]["ack_recommendations"] == [
+        {
+            "cluster_id": "clu::command_execution::198.51.100.71::asset_api_prod",
+            "verdict": "needs_manual_review",
+            "ack_score": 0,
+            "confidence": 0.0,
+            "suggested_status": None,
+            "reason_codes": [
+                "high_priority_cluster",
+                "high_or_critical_severity_present",
+                "contains_high_severity_alerts",
+                "repeated_alert_pattern",
+            ],
+            "estimated_alert_count": 18,
+            "sample_alert_ids": ["alt_guardrail_exec_17", "alt_guardrail_exec_16", "alt_guardrail_exec_15"],
+        }
+    ]
     assert result["data"]["recommended_next_actions"] == [
         {
             "tool_name": "alert.detail-batch",
@@ -432,3 +449,62 @@ def test_alert_fetch_clusters_returns_budget_guardrails_and_next_actions(db_conn
         },
     ]
     assert "detail_fanout_guardrail_applied" in result["warnings"]
+
+
+def test_alert_fetch_clusters_returns_ack_recommendation_for_homogeneous_noise(db_conn) -> None:
+    rows = []
+    for index in range(12):
+        rows.append(
+            (
+                f"alt_noise_ack_{index}",
+                f"2026-04-13T14:{index:02d}:00+08:00",
+                "低危重复扫描",
+                "new",
+                "low",
+                "recon",
+                "203.0.113.210",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    result = alert_fetch(
+        db_conn,
+        {
+            "mode": "clusters",
+            "status": ["new"],
+            "limit": 5,
+            "cluster_min_count": 2,
+            "cluster_sample_size": 3,
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["processing_guardrails"]["should_ack_homogeneous_noise"] is True
+    assert result["data"]["ack_recommendations"] == [
+        {
+            "cluster_id": "clu::recon::203.0.113.210::asset_static_www",
+            "verdict": "suggest_ack_triaged",
+            "ack_score": 100,
+            "confidence": 1.0,
+            "suggested_status": "triaged",
+            "reason_codes": [
+                "low_priority_cluster",
+                "low_or_medium_severity_only",
+                "no_high_severity_alerts",
+                "repeated_alert_pattern",
+                "recon_stage_noise_likely",
+            ],
+            "estimated_alert_count": 12,
+            "sample_alert_ids": ["alt_noise_ack_11", "alt_noise_ack_10", "alt_noise_ack_9"],
+        }
+    ]
+    assert "ack_recommendations_available" in result["warnings"]
