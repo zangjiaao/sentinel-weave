@@ -600,6 +600,92 @@ def test_mcp_auto_run_keeps_running_when_cluster_fetch_falls_back_to_alerts(tmp_
     conn.close()
 
 
+def test_mcp_alert_fetch_coerces_alerts_mode_to_auto_with_cluster_threshold(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("delete from alerts")
+    rows = []
+    for index in range(8):
+        rows.append(
+            (
+                f"alt_run_cluster_auto_{index}",
+                f"2026-04-13T12:{index:02d}:00+08:00",
+                "同源同资产重复低危扫描",
+                "new",
+                "low",
+                "recon",
+                "198.51.100.201",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+
+    fetch_result = dispatch_tool(
+        conn,
+        "alert.fetch",
+        {"mode": "alerts", "status": ["new", "open"], "limit": 5},
+        source="mcp",
+    )
+    assert fetch_result["ok"] is True
+    assert fetch_result["data"]["mode"] == "clusters"
+    assert len(fetch_result["data"]["clusters"]) >= 1
+
+    fetch_call = conn.execute(
+        """
+        select payload_json
+        from agent_tool_calls
+        where source = 'mcp' and tool_name = 'alert.fetch'
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert fetch_call is not None
+    payload = json.loads(fetch_call["payload_json"])
+    assert payload["mode"] == "auto"
+    assert payload["auto_cluster_threshold"] == 8
+    conn.close()
+
+
+def test_non_mcp_alert_fetch_keeps_alerts_mode_payload_unchanged(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fetch_result = dispatch_tool(
+        conn,
+        "alert.fetch",
+        {"mode": "alerts", "status": ["new", "open"], "limit": 5},
+        source="cli",
+    )
+    assert fetch_result["ok"] is True
+    assert fetch_result["data"]["mode"] == "alerts"
+
+    fetch_call = conn.execute(
+        """
+        select payload_json
+        from agent_tool_calls
+        where source = 'cli' and tool_name = 'alert.fetch'
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert fetch_call is not None
+    payload = json.loads(fetch_call["payload_json"])
+    assert payload["mode"] == "alerts"
+    assert "auto_cluster_threshold" not in payload
+    conn.close()
+
+
 def test_mcp_alert_fetch_reuses_active_auto_run_without_creating_new_run(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

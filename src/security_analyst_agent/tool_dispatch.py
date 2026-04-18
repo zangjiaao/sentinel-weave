@@ -5,7 +5,10 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from security_analyst_agent.config import DEFAULT_NEUTRAL_CASE_LINK_GUARD
+from security_analyst_agent.config import (
+    DEFAULT_MCP_ALERT_FETCH_AUTO_CLUSTER_THRESHOLD,
+    DEFAULT_NEUTRAL_CASE_LINK_GUARD,
+)
 from security_analyst_agent.repositories.audit import (
     bind_run_context,
     finalize_mcp_auto_run_after_tool,
@@ -119,6 +122,28 @@ def _fetch_alert_signal_map(conn: sqlite3.Connection, alert_ids: list[str]) -> d
             "attack_stage": str(row["attack_stage"] or "").lower(),
         }
     return signal_map
+
+
+def _normalize_alert_fetch_payload_for_mcp(payload: dict, *, source: str) -> dict:
+    if source != "mcp":
+        return payload
+    if not isinstance(payload, dict):
+        return payload
+
+    next_payload = dict(payload)
+    raw_mode = next_payload.get("mode")
+    mode = str(raw_mode).strip().lower() if isinstance(raw_mode, str) else ""
+
+    if mode == "alerts" and "cursor" not in next_payload:
+        next_payload["mode"] = "auto"
+        mode = "auto"
+    elif not mode:
+        next_payload["mode"] = "auto"
+        mode = "auto"
+
+    if mode == "auto" and "auto_cluster_threshold" not in next_payload:
+        next_payload["auto_cluster_threshold"] = max(1, DEFAULT_MCP_ALERT_FETCH_AUTO_CLUSTER_THRESHOLD)
+    return next_payload
 
 
 def _is_low_recon_noise(signal_item: dict[str, str] | None) -> bool:
@@ -350,6 +375,8 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
     token = bind_run_context(run_id, analysis_cutoff_at)
     try:
         skipped_noise_alert_ids: list[str] = []
+        if tool_name == "alert.fetch":
+            payload = _normalize_alert_fetch_payload_for_mcp(payload, source=source)
         if tool_name == "alert.detail-batch":
             prevalidated = _validate_alert_detail_batch_ids(
                 conn,
