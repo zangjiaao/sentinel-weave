@@ -87,11 +87,27 @@ def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
         warnings.append("case_redirected_to_canonical")
     case = load_case(conn, effective_case_id)
     if case is None:
+        not_found_warnings = [
+            f"case_not_found:{request.case_id}",
+            "case_discovery_required:list_then_search",
+        ]
         response = ToolResponse(
             ok=False,
             summary=f"未找到案件 {request.case_id}",
-            data={"case": None},
-            warnings=[f"case_not_found:{request.case_id}"],
+            data={
+                "case": None,
+                "recommended_next_actions": [
+                    {
+                        "tool": "case.list",
+                        "reason": "case_id unknown and no reliable lookup keys yet",
+                    },
+                    {
+                        "tool": "case.search",
+                        "reason": "refine candidates after obtaining src_ip/asset_id/attack_stage/keyword",
+                    },
+                ],
+            },
+            warnings=not_found_warnings,
         )
         return response.model_dump(mode="json", by_alias=True)
 

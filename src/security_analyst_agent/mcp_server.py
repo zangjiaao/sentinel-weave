@@ -81,7 +81,7 @@ TOOL_DESCRIPTIONS = {
     "actor.case-link-batch": "批量将案内画像关联到告警、证据或时间线节点。",
     "case.get": "读取案件头部摘要与当前风险结论。",
     "case.list": "按状态/严重度/阶段列出案件摘要，避免盲猜 case_id。",
-    "case.search": "按 src_ip/asset/stage/关键词检索候选案件，辅助复用既有案件。",
+    "case.search": "按 src_ip/asset/stage/关键词检索候选案件（至少提供一个检索键），辅助复用既有案件。",
     "case.timeline": "读取案件时间线与攻击阶段演进。",
     "case.explain-link": "解释事件与案件之间的关联依据。",
     "case.upsert-batch": "批量创建或更新案件主记录。",

@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from security_analyst_agent.tools.case_tools import (
     case_explain_link,
     case_get,
@@ -40,6 +43,17 @@ def test_case_get_returns_actor_and_target_summary(db_conn) -> None:
     assert digest_row is not None
 
 
+def test_case_get_not_found_returns_discovery_guidance(db_conn) -> None:
+    result = case_get(db_conn, {"case_id": "case_missing_404"})
+    assert result["ok"] is False
+    assert result["summary"] == "未找到案件 case_missing_404"
+    assert "case_not_found:case_missing_404" in result["warnings"]
+    assert "case_discovery_required:list_then_search" in result["warnings"]
+    actions = result["data"]["recommended_next_actions"]
+    assert actions[0]["tool"] == "case.list"
+    assert actions[1]["tool"] == "case.search"
+
+
 def test_case_list_returns_open_case_summaries(db_conn) -> None:
     result = case_list(db_conn, {"status": ["open"], "limit": 10})
     assert result["ok"] is True
@@ -63,6 +77,18 @@ def test_case_search_finds_case_by_src_and_stage(db_conn) -> None:
     assert result["ok"] is True
     assert len(result["data"]["cases"]) >= 1
     assert any(item["case_id"] == "case_demo_001" for item in result["data"]["cases"])
+
+
+def test_case_search_requires_lookup_key(db_conn) -> None:
+    with pytest.raises(ValidationError, match="case.search requires at least one lookup key"):
+        case_search(
+            db_conn,
+            {
+                "status": ["open"],
+                "min_severity": "medium",
+                "limit": 10,
+            },
+        )
 
 
 def test_case_timeline_returns_ordered_attack_steps(db_conn) -> None:

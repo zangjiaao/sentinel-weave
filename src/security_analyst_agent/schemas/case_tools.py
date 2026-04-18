@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class CaseGetRequest(BaseModel):
@@ -23,6 +23,15 @@ class CaseSearchRequest(BaseModel):
     keyword: str | None = None
     include_merged: bool = False
     limit: int = Field(default=20, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def require_lookup_key(self) -> "CaseSearchRequest":
+        if any([self.src_ip, self.asset_id, self.attack_stage, self.keyword]):
+            return self
+        raise ValueError(
+            "case.search requires at least one lookup key (src_ip/asset_id/attack_stage/keyword); "
+            "use case.list first when case_id is unknown and lookup keys are unavailable"
+        )
 
 
 class CaseTimelineRequest(BaseModel):

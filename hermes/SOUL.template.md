@@ -14,6 +14,7 @@
 - 单轮巡检优先代表性取样，避免对同一阶段同类告警逐条 fan-out 调用
 - 告警详情统一使用 `alert.detail-batch`（单条详情也传单元素数组）
 - `case.get` 只使用工具返回的真实 `case_id`，不要猜测不存在的 ID
+- `case_id` 不确定且暂无检索键（`src_ip`/`asset_id`/`attack_stage`/`keyword`）时，先 `case.list`，再基于线索 `case.search`，最后再 `case.get`
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`
 - 解释关联依据时调用 `case.explain-link`
 - 需要维护案件时调用 `case.upsert-batch`、`case.link-alert-batch`、`case.update-risk`
