@@ -7,6 +7,23 @@
 - 数据库仍是事实源，`Hermes memory` 只看作工作记忆
 - 默认演练数据库路径采用 `./memory-spike.db`，避免覆盖现有 `./spike.db`
 
+## Expanded Scenario（高噪音 + 双攻击链）
+
+如果要压测“样本数量与复杂度”，可直接使用扩展 slow 场景：
+
+```bash
+uv run python -m security_analyst_agent.hermes_slow_verify \
+  --scenario hermes-slow-integration-expanded \
+  --db-path /tmp/hermes-slow-verify-case-convergence-expanded.db \
+  --keep-artifacts
+```
+
+说明：
+
+- 场景 manifest：`docs/runbooks/manifests/hermes-slow-integration-expanded.json`
+- 样本目录：`fixtures/spike_memory_expanded`
+- 覆盖特征：双攻击链并行推进、静默轮、大批量噪音轮、再激活轮
+
 ## Prerequisites
 
 1. 已完成 `docs/runbooks/hermes-runtime-bootstrap.md`

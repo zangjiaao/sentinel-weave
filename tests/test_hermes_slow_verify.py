@@ -17,6 +17,7 @@ from security_analyst_agent.hermes_slow_verify import (
     build_chat_command,
     load_integration_manifest,
     prepare_isolated_hermes_home,
+    resolve_fixture_dir,
     resolve_round_specs,
 )
 
@@ -35,6 +36,41 @@ def test_load_integration_manifest_returns_expected_scenario() -> None:
     ]
     assert manifest["round_defaults"]["required_tool_names"][0] == "alert.fetch"
     assert manifest["round_defaults"]["max_tool_calls"] == 18
+
+
+def test_load_expanded_integration_manifest_uses_expanded_fixture_and_rounds() -> None:
+    manifest = load_integration_manifest("hermes-slow-integration-expanded")
+    assert manifest["scenario"] == "hermes-slow-integration-expanded"
+    assert manifest["fixture_dir"] == "fixtures/spike_memory_expanded"
+    assert len(manifest["rounds"]) == 10
+    assert manifest["rounds"][0]["round_id"] == "round_01_dual_recon"
+    assert manifest["rounds"][-1]["round_id"] == "round_10_chain_b_reactivation"
+
+
+def test_resolve_fixture_dir_defaults_to_spike_memory() -> None:
+    manifest = {"scenario": "unit-test"}
+    resolved = resolve_fixture_dir(manifest)
+    assert resolved.name == "spike_memory"
+    assert resolved.exists() is True
+
+
+def test_resolve_fixture_dir_supports_relative_path() -> None:
+    manifest = {
+        "scenario": "unit-test",
+        "fixture_dir": "fixtures/spike_memory",
+    }
+    resolved = resolve_fixture_dir(manifest)
+    assert resolved.name == "spike_memory"
+    assert resolved.exists() is True
+
+
+def test_resolve_fixture_dir_raises_when_missing() -> None:
+    manifest = {
+        "scenario": "unit-test",
+        "fixture_dir": "fixtures/not_exists_memory_fixture",
+    }
+    with pytest.raises(HermesSlowVerificationError, match="fixture_dir not found"):
+        resolve_fixture_dir(manifest)
 
 
 def test_resolve_round_specs_merges_defaults_and_round_overrides() -> None:

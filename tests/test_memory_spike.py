@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from security_analyst_agent.config import PROJECT_ROOT
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.memory_spike import (
     apply_memory_spike_round,
@@ -25,12 +26,30 @@ def test_load_memory_spike_rounds_returns_six_rounds() -> None:
     ]
 
 
+def test_load_expanded_memory_spike_rounds_returns_ten_rounds() -> None:
+    rounds = load_memory_spike_rounds(PROJECT_ROOT / "fixtures" / "spike_memory_expanded")
+    assert len(rounds) == 10
+    assert rounds[0]["round_id"] == "round_01_dual_recon"
+    assert rounds[-1]["round_id"] == "round_10_chain_b_reactivation"
+
+
 def test_bootstrap_memory_spike_loads_base_bundle(tmp_path) -> None:
     db_path = tmp_path / "memory-spike.db"
     bootstrap_memory_spike_database(db_path)
 
     conn = connect_db(db_path)
     assert conn.execute("select count(*) from assets").fetchone()[0] == 3
+    assert conn.execute("select count(*) from alerts").fetchone()[0] == 0
+    assert conn.execute("select count(*) from cases").fetchone()[0] == 0
+    assert conn.execute("select count(*) from verify_spike_round_runs").fetchone()[0] == 0
+
+
+def test_bootstrap_expanded_memory_spike_loads_expanded_assets(tmp_path) -> None:
+    db_path = tmp_path / "memory-spike-expanded.db"
+    bootstrap_memory_spike_database(db_path, fixture_dir=PROJECT_ROOT / "fixtures" / "spike_memory_expanded")
+
+    conn = connect_db(db_path)
+    assert conn.execute("select count(*) from assets").fetchone()[0] == 6
     assert conn.execute("select count(*) from alerts").fetchone()[0] == 0
     assert conn.execute("select count(*) from cases").fetchone()[0] == 0
     assert conn.execute("select count(*) from verify_spike_round_runs").fetchone()[0] == 0

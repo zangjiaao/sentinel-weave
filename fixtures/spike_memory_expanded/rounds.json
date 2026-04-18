@@ -1,0 +1,970 @@
+[
+  {
+    "round_id": "round_01_dual_recon",
+    "previous_round_id": null,
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr1_a_api_scan",
+        "occurred_at": "2026-04-10T09:10:00+08:00",
+        "title": "扫描统一认证 API 登录入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr1_a_admin_scan",
+        "occurred_at": "2026-04-10T09:11:00+08:00",
+        "title": "扫描运营后台入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr1_a_www_scan",
+        "occurred_at": "2026-04-10T09:12:00+08:00",
+        "title": "扫描官网静态站历史路径",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr1_b_billing_scan",
+        "occurred_at": "2026-04-10T09:13:00+08:00",
+        "title": "扫描计费 API 登录入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.88",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr1_b_finance_scan",
+        "occurred_at": "2026-04-10T09:14:00+08:00",
+        "title": "扫描财务后台入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.88",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr1_b_pay_scan",
+        "occurred_at": "2026-04-10T09:15:00+08:00",
+        "title": "扫描支付网关入口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.88",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr1_noise_probe_01",
+        "occurred_at": "2026-04-10T09:16:00+08:00",
+        "title": "低价值目录探测命中通用规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.11",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr1_noise_probe_02",
+        "occurred_at": "2026-04-10T09:17:00+08:00",
+        "title": "代理出口探测误命中",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.12",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr1_noise_probe_03",
+        "occurred_at": "2026-04-10T09:18:00+08:00",
+        "title": "健康检查流量误命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.200",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr1_noise_probe_04",
+        "occurred_at": "2026-04-10T09:19:00+08:00",
+        "title": "无状态 API 探测命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.13",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_02_chain_a_persistence",
+    "previous_round_id": "round_01_dual_recon",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr2_a_webshell_drop",
+        "occurred_at": "2026-04-11T14:20:00+08:00",
+        "title": "漏洞利用后写入 webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "persistence",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr2_a_upload_anomaly",
+        "occurred_at": "2026-04-11T14:21:00+08:00",
+        "title": "异常文件上传行为命中高危规则",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "exploit",
+        "src_ip": "198.51.100.23",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr2_noise_01",
+        "occurred_at": "2026-04-11T14:05:00+08:00",
+        "title": "重复目录探测命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.200",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr2_noise_02",
+        "occurred_at": "2026-04-11T14:06:00+08:00",
+        "title": "灰度发布探测误命中",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.31",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr2_noise_03",
+        "occurred_at": "2026-04-11T14:07:00+08:00",
+        "title": "代理出口随机探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.32",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr2_noise_04",
+        "occurred_at": "2026-04-11T14:08:00+08:00",
+        "title": "低价值路径探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.33",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr2_noise_05",
+        "occurred_at": "2026-04-11T14:09:00+08:00",
+        "title": "静态资源规则误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.34",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_03_chain_b_persistence",
+    "previous_round_id": "round_02_chain_a_persistence",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr3_b_jsp_shell_drop",
+        "occurred_at": "2026-04-11T18:10:00+08:00",
+        "title": "计费服务写入 JSP webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "persistence",
+        "src_ip": "203.0.113.88",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr3_b_config_tamper",
+        "occurred_at": "2026-04-11T18:11:00+08:00",
+        "title": "配置篡改行为命中持久化规则",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "persistence",
+        "src_ip": "203.0.113.88",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr3_noise_01",
+        "occurred_at": "2026-04-11T18:00:00+08:00",
+        "title": "弱口令探测噪音命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.41",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr3_noise_02",
+        "occurred_at": "2026-04-11T18:01:00+08:00",
+        "title": "低质量扫描器重复命中",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.42",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr3_noise_03",
+        "occurred_at": "2026-04-11T18:02:00+08:00",
+        "title": "NAT 出口波动触发误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.43",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr3_noise_04",
+        "occurred_at": "2026-04-11T18:03:00+08:00",
+        "title": "规则回归导致低质量告警",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.44",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr3_noise_05",
+        "occurred_at": "2026-04-11T18:04:00+08:00",
+        "title": "健康检查探测误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "198.51.100.200",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_04_chain_a_command",
+    "previous_round_id": "round_03_chain_b_persistence",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr4_a_shell_new_ip",
+        "occurred_at": "2026-04-12T11:03:00+08:00",
+        "title": "新 IP 连接既有 webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "198.51.100.77",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr4_a_cmd_burst",
+        "occurred_at": "2026-04-12T11:04:00+08:00",
+        "title": "命令执行行为激增",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "198.51.100.77",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr4_noise_01",
+        "occurred_at": "2026-04-12T11:05:00+08:00",
+        "title": "代理出口变化导致目录探测波动",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.51",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr4_noise_02",
+        "occurred_at": "2026-04-12T11:06:00+08:00",
+        "title": "资产探测噪音重复命中",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.52",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr4_noise_03",
+        "occurred_at": "2026-04-12T11:07:00+08:00",
+        "title": "低价值 API 探测误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.53",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr4_noise_04",
+        "occurred_at": "2026-04-12T11:08:00+08:00",
+        "title": "低价值支付入口探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.54",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": [
+      {
+        "indicator": "198.51.100.77",
+        "indicator_type": "ip",
+        "verdict": "unknown",
+        "confidence": 0.0,
+        "queried_at": "2026-04-12T11:10:00+08:00"
+      }
+    ]
+  },
+  {
+    "round_id": "round_05_chain_b_command",
+    "previous_round_id": "round_04_chain_a_command",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr5_b_shell_new_ip",
+        "occurred_at": "2026-04-12T15:18:00+08:00",
+        "title": "计费服务新源 IP 连接落点",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "203.0.113.89",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr5_b_cmd_exec",
+        "occurred_at": "2026-04-12T15:19:00+08:00",
+        "title": "计费服务疑似批量命令执行",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "203.0.113.89",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr5_noise_01",
+        "occurred_at": "2026-04-12T15:10:00+08:00",
+        "title": "静态站目录探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.61",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr5_noise_02",
+        "occurred_at": "2026-04-12T15:11:00+08:00",
+        "title": "财务后台误报探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.62",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr5_noise_03",
+        "occurred_at": "2026-04-12T15:12:00+08:00",
+        "title": "支付入口低价值探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.63",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr5_noise_04",
+        "occurred_at": "2026-04-12T15:13:00+08:00",
+        "title": "代理出口命中旧规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.64",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": [
+      {
+        "indicator": "203.0.113.89",
+        "indicator_type": "ip",
+        "verdict": "unknown",
+        "confidence": 0.0,
+        "queried_at": "2026-04-12T15:20:00+08:00"
+      }
+    ]
+  },
+  {
+    "round_id": "round_06_chain_a_lateral",
+    "previous_round_id": "round_05_chain_b_command",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr6_a_internal_scan",
+        "occurred_at": "2026-04-12T16:20:00+08:00",
+        "title": "命令执行后触发内网扫描准备",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "lateral_prep",
+        "src_ip": "198.51.100.77",
+        "dst_ip": "10.0.0.12",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr6_a_smb_probe",
+        "occurred_at": "2026-04-12T16:21:00+08:00",
+        "title": "横向阶段出现 SMB 探测",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "lateral_prep",
+        "src_ip": "198.51.100.77",
+        "dst_ip": "10.0.0.25",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr6_noise_01",
+        "occurred_at": "2026-04-12T16:15:00+08:00",
+        "title": "后台探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.71",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr6_noise_02",
+        "occurred_at": "2026-04-12T16:16:00+08:00",
+        "title": "支付网关探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.72",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr6_noise_03",
+        "occurred_at": "2026-04-12T16:17:00+08:00",
+        "title": "低质量 API 探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.73",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr6_noise_04",
+        "occurred_at": "2026-04-12T16:18:00+08:00",
+        "title": "静态站误报探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.74",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_07_chain_b_lateral",
+    "previous_round_id": "round_06_chain_a_lateral",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr7_b_internal_scan",
+        "occurred_at": "2026-04-12T17:40:00+08:00",
+        "title": "计费服务后出现内网扫描准备",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "lateral_prep",
+        "src_ip": "203.0.113.89",
+        "dst_ip": "10.0.1.18",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr7_b_db_probe",
+        "occurred_at": "2026-04-12T17:41:00+08:00",
+        "title": "探测财务数据库端口",
+        "status": "open",
+        "severity": "medium",
+        "attack_stage": "lateral_prep",
+        "src_ip": "203.0.113.89",
+        "dst_ip": "10.0.1.26",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr7_noise_01",
+        "occurred_at": "2026-04-12T17:34:00+08:00",
+        "title": "财务后台低质量噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.81",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr7_noise_02",
+        "occurred_at": "2026-04-12T17:35:00+08:00",
+        "title": "支付入口低价值噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.82",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr7_noise_03",
+        "occurred_at": "2026-04-12T17:36:00+08:00",
+        "title": "官网低价值目录探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.83",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr7_noise_04",
+        "occurred_at": "2026-04-12T17:37:00+08:00",
+        "title": "代理出口命中旧探测规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.84",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_08_noise_flood",
+    "previous_round_id": "round_07_chain_b_lateral",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr8_noise_01",
+        "occurred_at": "2026-04-13T10:00:00+08:00",
+        "title": "扫描器重复命中通用规则",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.201",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr8_noise_02",
+        "occurred_at": "2026-04-13T10:01:00+08:00",
+        "title": "低质量 API 探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.202",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr8_noise_03",
+        "occurred_at": "2026-04-13T10:02:00+08:00",
+        "title": "后台目录探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.203",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr8_noise_04",
+        "occurred_at": "2026-04-13T10:03:00+08:00",
+        "title": "支付入口误报探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.204",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr8_noise_05",
+        "occurred_at": "2026-04-13T10:04:00+08:00",
+        "title": "财务后台探测误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.205",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      },
+      {
+        "alert_id": "alt_xr8_noise_06",
+        "occurred_at": "2026-04-13T10:05:00+08:00",
+        "title": "代理出口噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.206",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr8_noise_07",
+        "occurred_at": "2026-04-13T10:06:00+08:00",
+        "title": "低价值路径探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.207",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr8_noise_08",
+        "occurred_at": "2026-04-13T10:07:00+08:00",
+        "title": "静态资源误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.208",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr8_noise_09",
+        "occurred_at": "2026-04-13T10:08:00+08:00",
+        "title": "API 轻量探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.209",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr8_noise_10",
+        "occurred_at": "2026-04-13T10:09:00+08:00",
+        "title": "后台入口探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.210",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr8_noise_11",
+        "occurred_at": "2026-04-13T10:10:00+08:00",
+        "title": "支付网关误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.211",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr8_noise_12",
+        "occurred_at": "2026-04-13T10:11:00+08:00",
+        "title": "财务 API 探测误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.212",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr8_noise_13",
+        "occurred_at": "2026-04-13T10:12:00+08:00",
+        "title": "静态站点路径扫描",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.213",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr8_noise_14",
+        "occurred_at": "2026-04-13T10:13:00+08:00",
+        "title": "后台健康检查误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.214",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr8_noise_15",
+        "occurred_at": "2026-04-13T10:14:00+08:00",
+        "title": "支付入口探测误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.215",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr8_noise_16",
+        "occurred_at": "2026-04-13T10:15:00+08:00",
+        "title": "财务后台探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "203.0.113.216",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": []
+  },
+  {
+    "round_id": "round_09_chain_a_reactivation",
+    "previous_round_id": "round_08_noise_flood",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr9_a_shell_reactivation",
+        "occurred_at": "2026-04-14T08:30:00+08:00",
+        "title": "静默后再次连接既有 webshell",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "198.51.100.91",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr9_a_callback_beacon",
+        "occurred_at": "2026-04-14T08:31:00+08:00",
+        "title": "命令执行后出现回连特征",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "198.51.100.91",
+        "dst_ip": "203.0.113.10",
+        "asset_id": "asset_api_prod"
+      },
+      {
+        "alert_id": "alt_xr9_noise_01",
+        "occurred_at": "2026-04-14T08:32:00+08:00",
+        "title": "静态站低价值扫描",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.91",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr9_noise_02",
+        "occurred_at": "2026-04-14T08:33:00+08:00",
+        "title": "后台探测误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.92",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr9_noise_03",
+        "occurred_at": "2026-04-14T08:34:00+08:00",
+        "title": "计费 API 探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.93",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr9_noise_04",
+        "occurred_at": "2026-04-14T08:35:00+08:00",
+        "title": "财务后台误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.94",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": [
+      {
+        "indicator": "198.51.100.91",
+        "indicator_type": "ip",
+        "verdict": "unknown",
+        "confidence": 0.0,
+        "queried_at": "2026-04-14T08:35:00+08:00"
+      }
+    ]
+  },
+  {
+    "round_id": "round_10_chain_b_reactivation",
+    "previous_round_id": "round_09_chain_a_reactivation",
+    "cases_upsert": [],
+    "alerts": [
+      {
+        "alert_id": "alt_xr10_b_shell_reactivation",
+        "occurred_at": "2026-04-14T09:10:00+08:00",
+        "title": "计费服务静默后再次连接落点",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "203.0.113.90",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr10_b_callback_beacon",
+        "occurred_at": "2026-04-14T09:11:00+08:00",
+        "title": "计费服务命令执行后回连",
+        "status": "open",
+        "severity": "high",
+        "attack_stage": "command_execution",
+        "src_ip": "203.0.113.90",
+        "dst_ip": "203.0.113.20",
+        "asset_id": "asset_billing_api"
+      },
+      {
+        "alert_id": "alt_xr10_noise_01",
+        "occurred_at": "2026-04-14T09:12:00+08:00",
+        "title": "支付网关低价值探测",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.101",
+        "dst_ip": "203.0.113.22",
+        "asset_id": "asset_pay_gateway"
+      },
+      {
+        "alert_id": "alt_xr10_noise_02",
+        "occurred_at": "2026-04-14T09:13:00+08:00",
+        "title": "官网扫描误报",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.102",
+        "dst_ip": "203.0.113.12",
+        "asset_id": "asset_static_www"
+      },
+      {
+        "alert_id": "alt_xr10_noise_03",
+        "occurred_at": "2026-04-14T09:14:00+08:00",
+        "title": "后台探测噪音",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.103",
+        "dst_ip": "203.0.113.11",
+        "asset_id": "asset_admin_portal"
+      },
+      {
+        "alert_id": "alt_xr10_noise_04",
+        "occurred_at": "2026-04-14T09:15:00+08:00",
+        "title": "财务后台低价值扫描",
+        "status": "open",
+        "severity": "low",
+        "attack_stage": "recon",
+        "src_ip": "192.0.2.104",
+        "dst_ip": "203.0.113.21",
+        "asset_id": "asset_finance_admin"
+      }
+    ],
+    "timeline_events": [],
+    "evidence": [],
+    "intel_cache_upsert": [
+      {
+        "indicator": "203.0.113.90",
+        "indicator_type": "ip",
+        "verdict": "unknown",
+        "confidence": 0.0,
+        "queried_at": "2026-04-14T09:15:00+08:00"
+      }
+    ]
+  }
+]

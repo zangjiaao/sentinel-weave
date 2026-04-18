@@ -15,7 +15,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from security_analyst_agent.config import PROJECT_ROOT
+from security_analyst_agent.config import PROJECT_ROOT, SPIKE_MEMORY_DIR
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.memory_spike import apply_memory_spike_round, bootstrap_memory_spike_database
 
@@ -57,6 +57,19 @@ def load_integration_manifest(scenario: str) -> dict[str, Any]:
     if manifest.get("scenario") != scenario:
         raise HermesSlowVerificationError("manifest", f"scenario mismatch: {manifest.get('scenario')}")
     return manifest
+
+
+def resolve_fixture_dir(manifest: dict[str, Any]) -> Path:
+    fixture_dir_value = manifest.get("fixture_dir")
+    if not fixture_dir_value:
+        return SPIKE_MEMORY_DIR
+    fixture_dir = Path(str(fixture_dir_value))
+    if not fixture_dir.is_absolute():
+        fixture_dir = PROJECT_ROOT / fixture_dir
+    fixture_dir = fixture_dir.resolve()
+    if not fixture_dir.exists():
+        raise HermesSlowVerificationError("manifest", f"fixture_dir not found: {fixture_dir}")
+    return fixture_dir
 
 
 def resolve_round_specs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -273,8 +286,8 @@ def _preflight_hermes_chat(
     return output
 
 
-def _bootstrap_db(db_path: Path) -> None:
-    bootstrap_memory_spike_database(db_path)
+def _bootstrap_db(db_path: Path, *, fixture_dir: Path) -> None:
+    bootstrap_memory_spike_database(db_path, fixture_dir=fixture_dir)
 
 
 def _assert_tool_requirements(*, tool_names: list[str], expectations: dict[str, Any], stage: str) -> None:
@@ -863,6 +876,7 @@ def run_slow_integration(
 ) -> dict[str, Any]:
     reporter = progress or (lambda _step, _total, _message: None)
     manifest = load_integration_manifest(scenario)
+    fixture_dir = resolve_fixture_dir(manifest)
     round_specs = resolve_round_specs(manifest)
     total_steps = 6 + len(round_specs) * 2
 
@@ -881,7 +895,7 @@ def run_slow_integration(
     )
 
     reporter(3, total_steps, "初始化测试数据库")
-    _bootstrap_db(target_db_path)
+    _bootstrap_db(target_db_path, fixture_dir=fixture_dir)
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)
     env["SPIKE_DB_PATH"] = str(target_db_path)
@@ -905,7 +919,7 @@ def run_slow_integration(
         for round_spec in round_specs:
             round_id = round_spec["round_id"]
             reporter(step, total_steps, f"应用 {round_id}")
-            apply_memory_spike_round(target_db_path, round_id)
+            apply_memory_spike_round(target_db_path, round_id, fixture_dir=fixture_dir)
             step += 1
 
             reporter(step, total_steps, f"运行并校验 Hermes patrol {round_id}")

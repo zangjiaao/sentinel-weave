@@ -1,0 +1,57 @@
+{
+  "scenario": "hermes-slow-integration-expanded",
+  "fixture_dir": "fixtures/spike_memory_expanded",
+  "skills": [],
+  "preflight_query": "Reply exactly READY",
+  "round_defaults": {
+    "query": "Run exactly one patrol pass against the current alert queue. Start with alert.fetch. Use available secagent tools to triage alerts, maintain cases, and maintain attacker profiles only when evidence supports it. Infer attack chains from concrete continuity (timeline, target asset, stage progression, repeated source behavior). When evidence is incomplete, keep uncertainty explicit and avoid rushing to final conclusions. Keep tool usage budget-aware and avoid repetitive per-alert fan-out on homogeneous alerts. Output with exact Markdown headers: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
+    "max_turns": 22,
+    "max_tool_calls": 24,
+    "required_output_headers": [
+      "## Patrol Action Summary",
+      "## Remaining Uncertainty",
+      "## Memory Summary"
+    ],
+    "required_tool_names": ["alert.fetch"],
+    "required_any_tool_names": [],
+    "min_tool_calls": 1,
+    "first_tool_name": "alert.fetch"
+  },
+  "rounds": [
+    {"round_id": "round_01_dual_recon"},
+    {"round_id": "round_02_chain_a_persistence"},
+    {"round_id": "round_03_chain_b_persistence"},
+    {"round_id": "round_04_chain_a_command"},
+    {"round_id": "round_05_chain_b_command"},
+    {"round_id": "round_06_chain_a_lateral"},
+    {"round_id": "round_07_chain_b_lateral"},
+    {"round_id": "round_08_noise_flood"},
+    {"round_id": "round_09_chain_a_reactivation"},
+    {"round_id": "round_10_chain_b_reactivation"}
+  ],
+  "final_assertions": {
+    "min_patrol_runs": 10,
+    "min_tool_calls": 24,
+    "required_tool_names": ["alert.fetch", "alert.ack"],
+    "required_any_tool_names": [
+      ["alert.detail-batch", "case.get", "case.timeline", "case.explain-link"],
+      ["assessment.upsert-batch", "case.link-alert-batch", "case.update-risk"]
+    ],
+    "max_failed_tool_calls": 0,
+    "min_case_assessments": 1,
+    "min_converged_case_clusters": 0,
+    "required_current_entities": [],
+    "min_entity_assessments": 2,
+    "min_alert_decisions": 0,
+    "require_actor_coverage_for_high_signal_alerts": true,
+    "require_primary_case_actor_for_high_signal_cases": true,
+    "allow_single_chain_case_fallback": true,
+    "min_single_chain_cases": 1,
+    "single_chain_min_alerts": 3,
+    "single_chain_min_distinct_stages": 3,
+    "single_chain_stages": ["exploit", "persistence", "command_execution", "reactivation", "lateral_prep"],
+    "single_chain_severities": ["high", "critical"],
+    "high_signal_actor_stages": ["persistence", "command_execution", "reactivation", "lateral_prep"],
+    "high_signal_actor_severities": ["high", "critical"]
+  }
+}
