@@ -23,6 +23,67 @@ from security_analyst_agent.schemas.alert_tools import (
 from security_analyst_agent.schemas.common import ToolResponse
 
 
+def _is_homogeneous_noise_clusters(clusters: list[dict]) -> bool:
+    if not clusters:
+        return False
+    for cluster in clusters:
+        if cluster.get("priority_bucket") != "p2":
+            return False
+        if int(cluster.get("high_severity_count", 0)) > 0:
+            return False
+    return True
+
+
+def _build_cluster_guardrails_and_actions(
+    *,
+    request: AlertFetchRequest,
+    clusters: list[dict],
+    page_next_cursor: str | None,
+) -> tuple[dict[str, object], list[dict[str, object]], bool]:
+    max_detail_batch_size = max(1, min(5, request.limit))
+    recommended_detail_batch_size = min(2, max_detail_batch_size)
+    should_ack_homogeneous_noise = _is_homogeneous_noise_clusters(clusters)
+
+    detail_alert_ids: list[str] = []
+    if clusters:
+        first_cluster_ids = list(clusters[0].get("sample_alert_ids", []))
+        detail_alert_ids = first_cluster_ids[:recommended_detail_batch_size]
+    detail_fanout_guardrail_applied = len(detail_alert_ids) > 0 and len(detail_alert_ids) < len(
+        list(clusters[0].get("sample_alert_ids", [])) if clusters else []
+    )
+
+    processing_guardrails = {
+        "recommended_detail_batch_size": recommended_detail_batch_size,
+        "max_detail_batch_size": max_detail_batch_size,
+        "should_ack_homogeneous_noise": should_ack_homogeneous_noise,
+        "detail_fanout_guardrail_applied": detail_fanout_guardrail_applied,
+    }
+
+    recommended_next_actions: list[dict[str, object]] = []
+    if detail_alert_ids:
+        recommended_next_actions.append(
+            {
+                "tool_name": "alert.detail-batch",
+                "reason": "优先补证当前页高优先级簇样本，控制单轮 fan-out",
+                "payload": {"alert_ids": detail_alert_ids},
+            }
+        )
+    recommended_next_actions.append(
+        {
+            "tool_name": "alert.fetch",
+            "reason": "继续消化聚类积压，按游标推进",
+            "payload": {
+                "mode": "clusters",
+                "status": request.status,
+                "limit": request.limit,
+                "cluster_min_count": request.cluster_min_count,
+                "cursor": page_next_cursor,
+            },
+        }
+    )
+    return processing_guardrails, recommended_next_actions, detail_fanout_guardrail_applied
+
+
 def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     request = AlertFetchRequest.model_validate(payload)
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
@@ -53,6 +114,8 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     priority_buckets: dict[str, dict[str, int]] | None = None
     backlog_schedule: dict[str, int | str | None] | None = None
     hotspot_summary: dict[str, object] | None = None
+    processing_guardrails: dict[str, object] | None = None
+    recommended_next_actions: list[dict[str, object]] | None = None
     if effective_mode == "clusters":
         cluster_offset = 0
         if request.cursor:
@@ -132,6 +195,15 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
         }
         if page_has_more:
             warnings.append("cluster_backlog_remaining")
+        processing_guardrails, recommended_next_actions, detail_fanout_guardrail_applied = (
+            _build_cluster_guardrails_and_actions(
+                request=request,
+                clusters=clusters,
+                page_next_cursor=page_next_cursor,
+            )
+        )
+        if detail_fanout_guardrail_applied:
+            warnings.append("detail_fanout_guardrail_applied")
         summary = (
             f"返回 {len(clusters)} 个告警聚合簇（当前偏移 {cluster_offset}，"
             f"总簇 {total_cluster_candidates or 0}，覆盖 {covered_alert_count} 条告警）"
@@ -162,6 +234,8 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             "priority_buckets": priority_buckets,
             "backlog_schedule": backlog_schedule,
             "hotspot_summary": hotspot_summary,
+            "processing_guardrails": processing_guardrails,
+            "recommended_next_actions": recommended_next_actions,
             "omitted_alert_count": omitted_alert_count,
         },
         refs={"alert_ids": refs_alert_ids},
