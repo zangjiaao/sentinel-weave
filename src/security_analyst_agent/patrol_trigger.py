@@ -20,7 +20,10 @@ from security_analyst_agent.config import (
     DEFAULT_HERMES_PATROL_PROMPT_PATH,
     DEFAULT_HERMES_PATROL_TRIGGER_MODE,
     DEFAULT_OPENAI_PATROL_MODEL,
+    DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL,
     DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS,
+    DEFAULT_OPENAI_PATROL_SESSION_MAX_INPUT_TOKENS,
+    DEFAULT_OPENAI_PATROL_SESSION_MAX_RUNS,
     DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
     PROJECT_ROOT,
 )
@@ -294,6 +297,44 @@ def _build_lightweight_patrol_query(event_ids: list[str]) -> str:
     )
 
 
+def _state_int(state: dict, key: str, default: int = 0) -> int:
+    value = state.get(key)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            return int(float(text))
+        except ValueError:
+            return default
+    return default
+
+
+def _is_no_backend_tool_failure(detail: str) -> bool:
+    return "no backend tool calls" in detail.lower()
+
+
+def _format_openai_usage_suffix(
+    *,
+    turns: int,
+    tool_calls: int,
+    usage_input_tokens: int,
+    usage_output_tokens: int,
+    usage_cached_input_tokens: int,
+) -> str:
+    return (
+        "turns="
+        f"{turns}, tool_calls={tool_calls}, usage_in={usage_input_tokens}, "
+        f"usage_out={usage_output_tokens}, usage_cached_in={usage_cached_input_tokens}"
+    )
+
+
 def _should_flush_memory(conn: sqlite3.Connection, *, now: datetime, min_interval_seconds: int) -> bool:
     if min_interval_seconds <= 0:
         return True
@@ -501,13 +542,36 @@ def trigger_patrol_from_ingest(
                 openai_session_state = _load_patrol_state_value(conn, PATROL_OPENAI_SESSION_STATE_KEY) or {}
                 existing_response_id = openai_session_state.get("response_id")
                 has_existing_response = isinstance(existing_response_id, str) and existing_response_id.strip() != ""
+                previous_run_count = _state_int(openai_session_state, "run_count", default=0)
+                previous_input_tokens = _state_int(openai_session_state, "cumulative_input_tokens", default=0)
+                previous_output_tokens = _state_int(openai_session_state, "cumulative_output_tokens", default=0)
+                previous_cached_input_tokens = _state_int(
+                    openai_session_state,
+                    "cumulative_cached_input_tokens",
+                    default=0,
+                )
+                rollover_reasons: list[str] = []
+                if has_existing_response:
+                    if (
+                        DEFAULT_OPENAI_PATROL_SESSION_MAX_RUNS > 0
+                        and previous_run_count >= DEFAULT_OPENAI_PATROL_SESSION_MAX_RUNS
+                    ):
+                        rollover_reasons.append("max_runs")
+                    if (
+                        DEFAULT_OPENAI_PATROL_SESSION_MAX_INPUT_TOKENS > 0
+                        and previous_input_tokens >= DEFAULT_OPENAI_PATROL_SESSION_MAX_INPUT_TOKENS
+                    ):
+                        rollover_reasons.append("max_input_tokens")
+                should_reuse_response = has_existing_response and not rollover_reasons
                 bootstrap_query = _load_patrol_chat_query(patrol_prompt_path)
-                use_compact_resume_instructions = has_existing_response and DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS
+                use_compact_resume_instructions = (
+                    should_reuse_response and DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS
+                )
                 if use_compact_resume_instructions:
                     instructions = _build_openai_patrol_resume_instructions()
                 else:
                     instructions = _build_openai_patrol_instructions(patrol_prompt_path)
-                if has_existing_response:
+                if should_reuse_response:
                     primary_query = _build_lightweight_patrol_query(event_ids)
                 else:
                     primary_query = bootstrap_query
@@ -517,22 +581,98 @@ def trigger_patrol_from_ingest(
                     model=openai_model,
                     instructions=instructions,
                     query=primary_query,
-                    previous_response_id=str(existing_response_id) if has_existing_response else None,
+                    previous_response_id=str(existing_response_id) if should_reuse_response else None,
                     max_turns=patrol_max_turns,
                     client_factory=openai_client_factory,
                     tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
                 )
+                retried_fresh_after_no_tool = False
+                if (
+                    openai_result.status != "success"
+                    and should_reuse_response
+                    and DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL
+                    and _is_no_backend_tool_failure(openai_result.detail)
+                ):
+                    retried_fresh_after_no_tool = True
+                    openai_result = run_openai_patrol(
+                        conn,
+                        model=openai_model,
+                        instructions=_build_openai_patrol_instructions(patrol_prompt_path),
+                        query=bootstrap_query,
+                        previous_response_id=None,
+                        max_turns=patrol_max_turns,
+                        client_factory=openai_client_factory,
+                        tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
+                    )
                 status = openai_result.status
-                detail = openai_result.detail
+                detail_parts = [
+                    openai_result.detail,
+                    _format_openai_usage_suffix(
+                        turns=openai_result.turns,
+                        tool_calls=openai_result.tool_calls,
+                        usage_input_tokens=openai_result.usage_input_tokens,
+                        usage_output_tokens=openai_result.usage_output_tokens,
+                        usage_cached_input_tokens=openai_result.usage_cached_input_tokens,
+                    ),
+                ]
+                if rollover_reasons:
+                    detail_parts.append(f"session_rollover={'+'.join(rollover_reasons)}")
+                if retried_fresh_after_no_tool:
+                    detail_parts.append("retried_fresh_after_no_tool=1")
+                detail = "; ".join(detail_parts)
                 if status == "success":
+                    if should_reuse_response and not retried_fresh_after_no_tool:
+                        next_run_count = previous_run_count + 1
+                        next_cumulative_input_tokens = previous_input_tokens + openai_result.usage_input_tokens
+                        next_cumulative_output_tokens = previous_output_tokens + openai_result.usage_output_tokens
+                        next_cumulative_cached_input_tokens = (
+                            previous_cached_input_tokens + openai_result.usage_cached_input_tokens
+                        )
+                    else:
+                        next_run_count = 1
+                        next_cumulative_input_tokens = openai_result.usage_input_tokens
+                        next_cumulative_output_tokens = openai_result.usage_output_tokens
+                        next_cumulative_cached_input_tokens = openai_result.usage_cached_input_tokens
+                    next_state = {
+                        "response_id": openai_result.response_id,
+                        "last_run_id": run_id,
+                        "last_success_at": finished_at,
+                        "model": openai_model,
+                        "run_count": next_run_count,
+                        "cumulative_input_tokens": next_cumulative_input_tokens,
+                        "cumulative_output_tokens": next_cumulative_output_tokens,
+                        "cumulative_cached_input_tokens": next_cumulative_cached_input_tokens,
+                        "last_usage": {
+                            "input_tokens": openai_result.usage_input_tokens,
+                            "output_tokens": openai_result.usage_output_tokens,
+                            "cached_input_tokens": openai_result.usage_cached_input_tokens,
+                            "turns": openai_result.turns,
+                            "tool_calls": openai_result.tool_calls,
+                        },
+                    }
+                    if rollover_reasons:
+                        next_state["last_rollover_reason"] = "+".join(rollover_reasons)
+                    if retried_fresh_after_no_tool:
+                        next_state["last_recovery"] = "fresh_retry_after_no_tool"
+                    _upsert_patrol_state_value(
+                        conn,
+                        PATROL_OPENAI_SESSION_STATE_KEY,
+                        next_state,
+                    )
+                elif has_existing_response and _is_no_backend_tool_failure(openai_result.detail):
                     _upsert_patrol_state_value(
                         conn,
                         PATROL_OPENAI_SESSION_STATE_KEY,
                         {
-                            "response_id": openai_result.response_id,
+                            "response_id": None,
                             "last_run_id": run_id,
-                            "last_success_at": finished_at,
+                            "last_failure_at": finished_at,
+                            "last_failure_reason": "no_backend_tool_calls",
                             "model": openai_model,
+                            "run_count": previous_run_count,
+                            "cumulative_input_tokens": previous_input_tokens,
+                            "cumulative_output_tokens": previous_output_tokens,
+                            "cumulative_cached_input_tokens": previous_cached_input_tokens,
                         },
                     )
             elif normalized_mode == "cron":

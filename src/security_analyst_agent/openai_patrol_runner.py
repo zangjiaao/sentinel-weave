@@ -19,6 +19,11 @@ class OpenAIPatrolResult:
     status: str
     detail: str
     response_id: str | None
+    turns: int = 0
+    tool_calls: int = 0
+    usage_input_tokens: int = 0
+    usage_output_tokens: int = 0
+    usage_cached_input_tokens: int = 0
 
 
 def _default_openai_client_factory() -> Any:
@@ -146,6 +151,46 @@ def _invoke_response_create(client: Any, request: dict[str, Any]) -> Any:
     if not callable(create):
         raise RuntimeError("openai client missing responses.create")
     return create(**request)
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            return int(float(text))
+        except ValueError:
+            return default
+    return default
+
+
+def _extract_usage_snapshot(response: Any) -> dict[str, int]:
+    usage = _read_attr_or_key(response, "usage", None)
+    input_tokens = _to_int(
+        _read_attr_or_key(usage, "input_tokens", _read_attr_or_key(usage, "prompt_tokens", 0)),
+        default=0,
+    )
+    output_tokens = _to_int(
+        _read_attr_or_key(usage, "output_tokens", _read_attr_or_key(usage, "completion_tokens", 0)),
+        default=0,
+    )
+    input_details = _read_attr_or_key(usage, "input_tokens_details", None)
+    cached_input_tokens = _to_int(
+        _read_attr_or_key(input_details, "cached_tokens", _read_attr_or_key(usage, "cached_input_tokens", 0)),
+        default=0,
+    )
+    return {
+        "input_tokens": max(0, input_tokens),
+        "output_tokens": max(0, output_tokens),
+        "cached_input_tokens": max(0, cached_input_tokens),
+    }
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -487,20 +532,29 @@ def run_openai_patrol(
     tool_call_count = 0
     last_response_id: str | None = previous_response_id
     response_text = ""
-    include_static_context = True
+    include_instructions = True
+    turn_count = 0
+    usage_input_tokens = 0
+    usage_output_tokens = 0
+    usage_cached_input_tokens = 0
 
     for _ in range(max_turns):
+        turn_count += 1
         request: dict[str, Any] = {
             "model": model,
             "input": next_input,
+            "tools": tools,
         }
-        if include_static_context:
-            request["tools"] = tools
+        if include_instructions:
             request["instructions"] = instructions
         if isinstance(resume_response_id, str) and resume_response_id.strip():
             request["previous_response_id"] = resume_response_id
         response = _invoke_response_create(client, request)
-        include_static_context = False
+        include_instructions = False
+        usage_snapshot = _extract_usage_snapshot(response)
+        usage_input_tokens += usage_snapshot["input_tokens"]
+        usage_output_tokens += usage_snapshot["output_tokens"]
+        usage_cached_input_tokens += usage_snapshot["cached_input_tokens"]
         response_id = _extract_response_id(response)
         if response_id:
             last_response_id = response_id
@@ -511,11 +565,29 @@ def run_openai_patrol(
             response_text = _extract_output_text(response).strip()
             if tool_call_count <= 0:
                 detail = "openai responses returned no backend tool calls for this patrol run"
-                return OpenAIPatrolResult(status="failed", detail=detail, response_id=last_response_id)
+                return OpenAIPatrolResult(
+                    status="failed",
+                    detail=detail,
+                    response_id=last_response_id,
+                    turns=turn_count,
+                    tool_calls=tool_call_count,
+                    usage_input_tokens=usage_input_tokens,
+                    usage_output_tokens=usage_output_tokens,
+                    usage_cached_input_tokens=usage_cached_input_tokens,
+                )
             detail = (
                 f"openai responses completed (tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'})"
             )
-            return OpenAIPatrolResult(status="success", detail=detail, response_id=last_response_id)
+            return OpenAIPatrolResult(
+                status="success",
+                detail=detail,
+                response_id=last_response_id,
+                turns=turn_count,
+                tool_calls=tool_call_count,
+                usage_input_tokens=usage_input_tokens,
+                usage_output_tokens=usage_output_tokens,
+                usage_cached_input_tokens=usage_cached_input_tokens,
+            )
 
         function_outputs: list[dict[str, str]] = []
         for call in tool_calls:
@@ -552,4 +624,13 @@ def run_openai_patrol(
         f"openai responses exceeded max_turns={max_turns} "
         f"(tool_calls={tool_call_count}, last_text={response_text or '[EMPTY]'})"
     )
-    return OpenAIPatrolResult(status="failed", detail=detail, response_id=last_response_id)
+    return OpenAIPatrolResult(
+        status="failed",
+        detail=detail,
+        response_id=last_response_id,
+        turns=turn_count,
+        tool_calls=tool_call_count,
+        usage_input_tokens=usage_input_tokens,
+        usage_output_tokens=usage_output_tokens,
+        usage_cached_input_tokens=usage_cached_input_tokens,
+    )

@@ -443,6 +443,160 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
     assert event_row["trigger_state"] == "failed"
 
 
+def test_trigger_patrol_openai_mode_rolls_session_when_limits_reached(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_roll_001")], source="siem")
+
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into patrol_state (state_key, state_value_json, updated_at)
+        values (?, ?, ?)
+        """,
+        (
+            "openai_patrol_session",
+            json.dumps(
+                {
+                    "response_id": "resp_old_session_001",
+                    "run_count": 9,
+                    "cumulative_input_tokens": 1999,
+                },
+                ensure_ascii=False,
+            ),
+            "2026-04-14T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.DEFAULT_OPENAI_PATROL_SESSION_MAX_RUNS", 8)
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.DEFAULT_OPENAI_PATROL_SESSION_MAX_INPUT_TOKENS", 2000)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_roll_001",
+                "usage": {
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "input_tokens_details": {"cached_tokens": 20},
+                },
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_roll_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_roll_002",
+                "usage": {
+                    "input_tokens": 80,
+                    "output_tokens": 10,
+                    "input_tokens_details": {"cached_tokens": 15},
+                },
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "success"
+    assert "previous_response_id" not in fake_client.responses.calls[0]
+
+    conn = connect_db(db_path)
+    state_value = json.loads(
+        conn.execute(
+            "select state_value_json from patrol_state where state_key = 'openai_patrol_session'"
+        ).fetchone()["state_value_json"]
+    )
+    conn.close()
+    assert state_value["response_id"] == "resp_openai_roll_002"
+    assert state_value["run_count"] == 1
+    assert state_value["cumulative_input_tokens"] == 200
+    assert state_value["cumulative_output_tokens"] == 40
+    assert state_value["cumulative_cached_input_tokens"] == 35
+
+
+def test_trigger_patrol_openai_mode_retries_fresh_when_resume_returns_no_tool_calls(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_retry_001")], source="siem")
+
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into patrol_state (state_key, state_value_json, updated_at)
+        values (?, ?, ?)
+        """,
+        (
+            "openai_patrol_session",
+            json.dumps({"response_id": "resp_existing_retry_001", "run_count": 3}, ensure_ascii=False),
+            "2026-04-14T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL", True)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_retry_resume_001",
+                "usage": {"input_tokens": 50, "output_tokens": 5},
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+            {
+                "id": "resp_retry_fresh_001",
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_retry_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_retry_fresh_002",
+                "usage": {"input_tokens": 70, "output_tokens": 8},
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+
+    assert result["status"] == "success"
+    assert len(fake_client.responses.calls) == 3
+    assert fake_client.responses.calls[0]["previous_response_id"] == "resp_existing_retry_001"
+    assert "previous_response_id" not in fake_client.responses.calls[1]
+
+    conn = connect_db(db_path)
+    run_row = conn.execute(
+        "select summary from patrol_runs where run_id = ?",
+        (result["run_id"],),
+    ).fetchone()
+    conn.close()
+    assert "retried_fresh_after_no_tool=1" in str(run_row["summary"])
+
+
 def test_trigger_patrol_openai_mode_normalizes_malformed_actor_batch_payload(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
