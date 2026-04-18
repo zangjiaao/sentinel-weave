@@ -20,6 +20,8 @@ from security_analyst_agent.config import (
     DEFAULT_HERMES_PATROL_PROMPT_PATH,
     DEFAULT_HERMES_PATROL_TRIGGER_MODE,
     DEFAULT_OPENAI_PATROL_MODEL,
+    DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS,
+    DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
     PROJECT_ROOT,
 )
 from security_analyst_agent.db import connect_db, create_schema
@@ -168,6 +170,16 @@ def _build_openai_patrol_instructions(prompt_path: Path) -> str:
         sections.append(skill_text)
 
     return "\n\n".join(section for section in sections if section.strip())
+
+
+def _build_openai_patrol_resume_instructions() -> str:
+    return (
+        "Continue existing security patrol session in neutral evidence-driven mode.\n"
+        "Process current pending alerts only.\n"
+        "Avoid premature conclusions; keep uncertain findings as unknown/watch.\n"
+        "Do not link low-severity recon-only alerts into cases by default.\n"
+        "Use concise batched tool calls and return [SILENT] when no material update."
+    )
 
 
 def _build_patrol_chat_command(
@@ -490,7 +502,11 @@ def trigger_patrol_from_ingest(
                 existing_response_id = openai_session_state.get("response_id")
                 has_existing_response = isinstance(existing_response_id, str) and existing_response_id.strip() != ""
                 bootstrap_query = _load_patrol_chat_query(patrol_prompt_path)
-                instructions = _build_openai_patrol_instructions(patrol_prompt_path)
+                use_compact_resume_instructions = has_existing_response and DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS
+                if use_compact_resume_instructions:
+                    instructions = _build_openai_patrol_resume_instructions()
+                else:
+                    instructions = _build_openai_patrol_instructions(patrol_prompt_path)
                 if has_existing_response:
                     primary_query = _build_lightweight_patrol_query(event_ids)
                 else:
@@ -504,6 +520,7 @@ def trigger_patrol_from_ingest(
                     previous_response_id=str(existing_response_id) if has_existing_response else None,
                     max_turns=patrol_max_turns,
                     client_factory=openai_client_factory,
+                    tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
                 )
                 status = openai_result.status
                 detail = openai_result.detail

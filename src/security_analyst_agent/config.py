@@ -12,6 +12,18 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _path_env(name: str, default: Path) -> Path:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -74,3 +86,9 @@ DEFAULT_HERMES_PATROL_PROMPT_PATH = _path_env(
 )
 DEFAULT_OPENAI_PATROL_MODEL = os.getenv("OPENAI_PATROL_MODEL", "gpt-5-mini")
 DEFAULT_OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
+DEFAULT_OPENAI_PATROL_TOOL_PROFILE = (os.getenv("OPENAI_PATROL_TOOL_PROFILE") or "compact").strip().lower()
+DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS = _bool_env(
+    "OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS",
+    True,
+)
+DEFAULT_NEUTRAL_CASE_LINK_GUARD = _bool_env("NEUTRAL_CASE_LINK_GUARD", True)

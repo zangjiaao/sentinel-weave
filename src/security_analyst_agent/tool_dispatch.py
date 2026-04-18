@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from security_analyst_agent.config import DEFAULT_NEUTRAL_CASE_LINK_GUARD
 from security_analyst_agent.repositories.audit import (
     bind_run_context,
     finalize_mcp_auto_run_after_tool,
@@ -97,6 +98,98 @@ _SOFT_NOOP_BATCH_TOOLS = {
     "actor.case-link-batch",
     "actor.case-add-observation-batch",
 }
+
+
+def _fetch_alert_signal_map(conn: sqlite3.Connection, alert_ids: list[str]) -> dict[str, dict[str, str]]:
+    deduped = list(dict.fromkeys(str(item) for item in alert_ids if item))
+    if not deduped:
+        return {}
+    rows = conn.execute(
+        f"""
+        select alert_id, severity, attack_stage
+        from alerts
+        where alert_id in ({', '.join('?' for _ in deduped)})
+        """,
+        deduped,
+    ).fetchall()
+    signal_map: dict[str, dict[str, str]] = {}
+    for row in rows:
+        signal_map[str(row["alert_id"])] = {
+            "severity": str(row["severity"] or "").lower(),
+            "attack_stage": str(row["attack_stage"] or "").lower(),
+        }
+    return signal_map
+
+
+def _is_low_recon_noise(signal_item: dict[str, str] | None) -> bool:
+    if not signal_item:
+        return False
+    return signal_item.get("severity") == "low" and signal_item.get("attack_stage") == "recon"
+
+
+def _guard_case_link_alert_batch_payload(
+    conn: sqlite3.Connection,
+    *,
+    payload: dict,
+    source: str,
+) -> tuple[dict, list[str]]:
+    if source != "mcp" or not DEFAULT_NEUTRAL_CASE_LINK_GUARD:
+        return payload, []
+    if not isinstance(payload, dict):
+        return payload, []
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload, []
+
+    alert_ids = [
+        str(item.get("alert_id") or "")
+        for item in items
+        if isinstance(item, dict) and str(item.get("alert_id") or "").strip()
+    ]
+    signal_map = _fetch_alert_signal_map(conn, alert_ids)
+    kept_items: list[dict] = []
+    skipped_alert_ids: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        alert_id = str(item.get("alert_id") or "").strip()
+        if not alert_id:
+            kept_items.append(item)
+            continue
+        if _is_low_recon_noise(signal_map.get(alert_id)):
+            skipped_alert_ids.append(alert_id)
+            continue
+        kept_items.append(item)
+    if not skipped_alert_ids:
+        return payload, []
+    next_payload = dict(payload)
+    next_payload["items"] = kept_items
+    return next_payload, list(dict.fromkeys(skipped_alert_ids))
+
+
+def _guard_timeline_upsert_payload(
+    conn: sqlite3.Connection,
+    *,
+    payload: dict,
+    source: str,
+) -> tuple[bool, list[str]]:
+    if source != "mcp" or not DEFAULT_NEUTRAL_CASE_LINK_GUARD:
+        return False, []
+    if not isinstance(payload, dict):
+        return False, []
+    stage = str(payload.get("stage") or "").lower()
+    if stage != "recon":
+        return False, []
+    related_alert_ids = payload.get("related_alert_ids")
+    if not isinstance(related_alert_ids, list) or not related_alert_ids:
+        return False, []
+    deduped_alert_ids = list(dict.fromkeys(str(item) for item in related_alert_ids if item))
+    signal_map = _fetch_alert_signal_map(conn, deduped_alert_ids)
+    if not signal_map:
+        return False, []
+    if all(_is_low_recon_noise(signal_map.get(alert_id)) for alert_id in deduped_alert_ids):
+        return True, deduped_alert_ids
+    return False, []
 
 
 def _extract_alert_ids_from_fetch_result(result: dict[str, Any]) -> list[str]:
@@ -256,6 +349,7 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
     run_id, analysis_cutoff_at = resolve_run_context_for_dispatch(conn, source=source, tool_name=tool_name)
     token = bind_run_context(run_id, analysis_cutoff_at)
     try:
+        skipped_noise_alert_ids: list[str] = []
         if tool_name == "alert.detail-batch":
             prevalidated = _validate_alert_detail_batch_ids(
                 conn,
@@ -281,6 +375,78 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                 )
                 conn.commit()
                 return prevalidated
+        if tool_name == "case.link-alert-batch":
+            payload, skipped_noise_alert_ids = _guard_case_link_alert_batch_payload(
+                conn,
+                payload=payload,
+                source=source,
+            )
+            if skipped_noise_alert_ids and not payload.get("items"):
+                noop_result = {
+                    "ok": True,
+                    "summary": (
+                        "neutral_guard skipped case linking for low-signal recon alerts "
+                        f"({len(skipped_noise_alert_ids)} items)"
+                    ),
+                    "data": {"tool": tool_name, "skipped_alert_ids": skipped_noise_alert_ids},
+                    "warnings": ["neutral_case_link_guard_skipped_noise_recon_alerts"],
+                    "refs": {"alert_ids": skipped_noise_alert_ids},
+                    "page": {"next_cursor": None, "has_more": False},
+                    "meta": {},
+                }
+                finalize_mcp_auto_run_after_tool(
+                    conn,
+                    source=source,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    result=noop_result,
+                )
+                insert_tool_call_log(
+                    conn,
+                    source=source,
+                    tool_name=tool_name,
+                    payload=payload,
+                    result=noop_result,
+                    latency_ms=0,
+                )
+                conn.commit()
+                return noop_result
+        if tool_name == "timeline.upsert":
+            should_skip_timeline, skipped_alert_ids = _guard_timeline_upsert_payload(
+                conn,
+                payload=payload,
+                source=source,
+            )
+            if should_skip_timeline:
+                noop_result = {
+                    "ok": True,
+                    "summary": (
+                        "neutral_guard skipped timeline node for recon-noise-only alerts "
+                        f"({len(skipped_alert_ids)} alerts)"
+                    ),
+                    "data": {"tool": tool_name, "skipped_alert_ids": skipped_alert_ids},
+                    "warnings": ["neutral_timeline_guard_skipped_recon_noise_node"],
+                    "refs": {"alert_ids": skipped_alert_ids},
+                    "page": {"next_cursor": None, "has_more": False},
+                    "meta": {},
+                }
+                finalize_mcp_auto_run_after_tool(
+                    conn,
+                    source=source,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    result=noop_result,
+                )
+                insert_tool_call_log(
+                    conn,
+                    source=source,
+                    tool_name=tool_name,
+                    payload=payload,
+                    result=noop_result,
+                    latency_ms=0,
+                )
+                conn.commit()
+                return noop_result
 
         start = time.perf_counter()
         result: dict
@@ -364,6 +530,25 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
             raise
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+        if skipped_noise_alert_ids:
+            result = dict(result)
+            warnings = result.get("warnings")
+            warnings_list = list(warnings) if isinstance(warnings, list) else []
+            warnings_list.append("neutral_case_link_guard_skipped_noise_recon_alerts")
+            result["warnings"] = list(dict.fromkeys(warnings_list))
+
+            refs = result.get("refs")
+            refs_map = dict(refs) if isinstance(refs, dict) else {}
+            existing_alert_ids = refs_map.get("alert_ids")
+            refs_alert_ids = list(existing_alert_ids) if isinstance(existing_alert_ids, list) else []
+            refs_alert_ids.extend(skipped_noise_alert_ids)
+            refs_map["alert_ids"] = list(dict.fromkeys(refs_alert_ids))
+            result["refs"] = refs_map
+
+            data = result.get("data")
+            data_map = dict(data) if isinstance(data, dict) else {}
+            data_map["skipped_alert_ids"] = skipped_noise_alert_ids
+            result["data"] = data_map
         finalize_mcp_auto_run_after_tool(
             conn,
             source=source,

@@ -42,10 +42,43 @@ def _openai_tool_name(tool_name: str) -> str:
     return tool_name.replace(".", "_").replace("-", "_")
 
 
-def _build_openai_tools() -> tuple[list[dict[str, Any]], dict[str, str]]:
+COMPACT_TOOL_NAMES = (
+    "alert.fetch",
+    "alert.detail-batch",
+    "alert.ack",
+    "case.list",
+    "case.search",
+    "case.get",
+    "case.timeline",
+    "case.explain-link",
+    "case.upsert-batch",
+    "case.link-alert-batch",
+    "case.update-risk",
+    "assessment.upsert-batch",
+    "timeline.upsert",
+    "evidence.upsert",
+    "actor.case-find-candidates",
+    "actor.case-list",
+    "actor.case-upsert",
+    "actor.case-add-observation-batch",
+    "actor.case-link-batch",
+    "notify.send",
+)
+
+
+def _resolve_tool_names(tool_profile: str) -> tuple[str, ...]:
+    normalized = (tool_profile or "").strip().lower()
+    if normalized in {"", "compact", "core"}:
+        return COMPACT_TOOL_NAMES
+    if normalized in {"full", "all"}:
+        return tuple(CORE_TOOL_NAMES)
+    return COMPACT_TOOL_NAMES
+
+
+def _build_openai_tools(tool_profile: str = "compact") -> tuple[list[dict[str, Any]], dict[str, str]]:
     specs: list[dict[str, Any]] = []
     name_map: dict[str, str] = {}
-    for tool_name in CORE_TOOL_NAMES:
+    for tool_name in _resolve_tool_names(tool_profile):
         openai_name = _openai_tool_name(tool_name)
         name_map[openai_name] = tool_name
         specs.append(
@@ -441,11 +474,12 @@ def run_openai_patrol(
     previous_response_id: str | None,
     max_turns: int,
     client_factory: OpenAIClientFactory | None = None,
+    tool_profile: str = "compact",
 ) -> OpenAIPatrolResult:
     if max_turns <= 0:
         return OpenAIPatrolResult(status="failed", detail="openai_patrol_max_turns_must_be_positive", response_id=None)
 
-    tools, openai_name_map = _build_openai_tools()
+    tools, openai_name_map = _build_openai_tools(tool_profile)
     client = (client_factory or _default_openai_client_factory)()
 
     next_input: Any = query
@@ -453,17 +487,20 @@ def run_openai_patrol(
     tool_call_count = 0
     last_response_id: str | None = previous_response_id
     response_text = ""
+    include_static_context = True
 
     for _ in range(max_turns):
         request: dict[str, Any] = {
             "model": model,
             "input": next_input,
-            "tools": tools,
-            "instructions": instructions,
         }
+        if include_static_context:
+            request["tools"] = tools
+            request["instructions"] = instructions
         if isinstance(resume_response_id, str) and resume_response_id.strip():
             request["previous_response_id"] = resume_response_id
         response = _invoke_response_create(client, request)
+        include_static_context = False
         response_id = _extract_response_id(response)
         if response_id:
             last_response_id = response_id

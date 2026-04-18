@@ -29,7 +29,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 11. Never fabricate `case_id` for `case.get`; only use IDs returned by tools (`alert.fetch` / `alert.detail-batch` / `case.*`).
 12. If representative alerts already contain `case_id`, maintain that case first and avoid splitting into a new case unless evidence clearly diverges.
 13. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
-14. If a case record is missing or stale, create or refresh it with `case.upsert-batch` (single case also uses one-item batch), then maintain it with `case.link-alert-batch` and `case.update-risk`.
+14. If a case record is missing or stale, create or refresh it with `case.upsert-batch` (single case also uses one-item batch), then maintain it with `case.link-alert-batch` and `case.update-risk` only for alerts with material chain value.
 15. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
 16. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
 17. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert-batch` (single entity also uses one-item batch).
@@ -64,6 +64,8 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 - 在 MCP 巡检中，`alert.detail` / `case.upsert` / `case.link-alert` / `assessment.upsert` / `actor.case-add-observation` / `actor.case-link` 不作为常规入口；即使单条也用对应 `*-batch`。
 - Use `case.link-alert-batch` when alerts should be linked to an existing case.
 - 需要一次关联多条告警时，优先 `case.link-alert-batch`。
+- 保持中立：证据不足时不要为了“收敛”强行关联告警到案件。
+- 默认不要把 `low + recon` 告警写入 `case.link-alert-batch`；这类告警应优先 `alert.ack` + 噪音摘要，待后续高信号证据再升级关联。
 - 需要一次创建/刷新多个案件时，优先 `case.upsert-batch`。
 - Use `case.update-risk` when severity/stage/status should change.
 - Use `evidence.upsert` to write derived evidence.
@@ -86,8 +88,8 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 ## Analysis Rules
 
 - Prefer cautious, evidence-based language such as `high-confidence`, `likely`, or `supported by current evidence`.
-- 在信息不充分时，不要急于做最终攻击者归因；先把告警归入案件并持续补证。
-- “案件追踪”优先于“画像定性”：先保证 case 链路完整，再做 attacker 结论。
+- 在信息不充分时，不要急于做最终攻击者归因；先保持 `unknown/watch`，再补证。
+- “证据充分”优先于“结论完整”：允许暂不建案、暂不关联、暂不定性。
 - If evidence is insufficient, explicitly say what is still unknown and what should be collected next.
 - Keep the uncertainty explicit when source infrastructure changes.
 - Keep `Memory Summary` limited to durable facts that help future patrols.
