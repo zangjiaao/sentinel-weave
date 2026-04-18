@@ -19,9 +19,11 @@ from security_analyst_agent.config import (
     DEFAULT_HERMES_PATROL_HOME,
     DEFAULT_HERMES_PATROL_PROMPT_PATH,
     DEFAULT_HERMES_PATROL_TRIGGER_MODE,
+    DEFAULT_OPENAI_PATROL_MODEL,
     PROJECT_ROOT,
 )
 from security_analyst_agent.db import connect_db, create_schema
+from security_analyst_agent.openai_patrol_runner import OpenAIClientFactory, run_openai_patrol
 
 CommandRunner = Callable[[list[str], dict[str, str] | None], subprocess.CompletedProcess[str]]
 LegacyCommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -51,6 +53,7 @@ DEFAULT_PATROL_LIGHTWEIGHT_SIGNAL_QUERY_TEMPLATE = (
 DEFAULT_MEMORY_FLUSH_MIN_INTERVAL_SECONDS = 3600
 PATROL_SESSION_STATE_KEY = "hermes_patrol_session"
 PATROL_MEMORY_FLUSH_STATE_KEY = "hermes_patrol_memory_flush"
+PATROL_OPENAI_SESSION_STATE_KEY = "openai_patrol_session"
 _SESSION_ID_PATTERN = re.compile(r"session_id:\s*([^\s]+)")
 
 
@@ -135,7 +138,13 @@ def _load_patrol_chat_query(prompt_path: Path) -> str:
     return DEFAULT_PATROL_CHAT_QUERY
 
 
-def _build_patrol_chat_command(*, query: str, max_turns: int, continue_latest: bool) -> list[str]:
+def _build_patrol_chat_command(
+    *,
+    query: str,
+    max_turns: int,
+    continue_latest: bool,
+    resume_session_id: str | None = None,
+) -> list[str]:
     command = [
         "hermes",
         "chat",
@@ -149,7 +158,9 @@ def _build_patrol_chat_command(*, query: str, max_turns: int, continue_latest: b
         "-s",
         DEFAULT_PATROL_SKILL,
     ]
-    if continue_latest:
+    if resume_session_id:
+        command.extend(["--resume", resume_session_id])
+    elif continue_latest:
         command.append("--continue")
     return command
 
@@ -267,6 +278,8 @@ def trigger_patrol_from_ingest(
     patrol_max_turns: int = DEFAULT_HERMES_PATROL_MAX_TURNS,
     patrol_prompt_path: Path = DEFAULT_HERMES_PATROL_PROMPT_PATH,
     write_memory_on_finish: bool | None = None,
+    openai_model: str = DEFAULT_OPENAI_PATROL_MODEL,
+    openai_client_factory: OpenAIClientFactory | None = None,
 ) -> dict[str, object]:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -298,11 +311,13 @@ def trigger_patrol_from_ingest(
             status = "dry_run_success"
             detail = "dry run completed without hermes commands"
         else:
-            patrol_runtime_home = hermes_home or DEFAULT_HERMES_PATROL_HOME
-            source_runtime_home = source_hermes_home or DEFAULT_HERMES_HOME
-            _ensure_patrol_hermes_home(patrol_runtime_home, source_runtime_home)
-            env = _build_hermes_env(patrol_runtime_home)
             normalized_mode = trigger_mode.strip().lower()
+            env: dict[str, str] | None = None
+            if normalized_mode in {"chat", "cron"}:
+                patrol_runtime_home = hermes_home or DEFAULT_HERMES_PATROL_HOME
+                source_runtime_home = source_hermes_home or DEFAULT_HERMES_HOME
+                _ensure_patrol_hermes_home(patrol_runtime_home, source_runtime_home)
+                env = _build_hermes_env(patrol_runtime_home)
             memory_enabled = (
                 write_memory_on_finish if write_memory_on_finish is not None else _load_write_memory_on_finish()
             )
@@ -321,40 +336,61 @@ def trigger_patrol_from_ingest(
                     _build_patrol_chat_command(
                         query=primary_query,
                         max_turns=patrol_max_turns,
-                        continue_latest=has_existing_session,
+                        continue_latest=False,
+                        resume_session_id=str(existing_session_id) if has_existing_session else None,
                     ),
                     env,
                 )
                 if primary_result.returncode == 0:
                     status = "success"
                     if has_existing_session:
-                        detail = "hermes chat session resumed with lightweight trigger query"
+                        detail = "hermes chat session resumed by session_id with lightweight trigger query"
                     else:
                         detail = "hermes chat started new patrol session"
                 else:
                     if has_existing_session:
-                        recovered_result = _run_with_compat_runner(
+                        continue_result = _run_with_compat_runner(
                             runner,
                             _build_patrol_chat_command(
-                                query=bootstrap_query,
+                                query=primary_query,
                                 max_turns=patrol_max_turns,
-                                continue_latest=False,
+                                continue_latest=True,
                             ),
                             env,
                         )
-                        if recovered_result.returncode == 0:
+                        if continue_result.returncode == 0:
                             status = "success"
                             detail = (
-                                "hermes chat recovered by starting a new session "
-                                f"(continue_rc={primary_result.returncode})"
+                                "hermes chat session resumed by latest-session fallback "
+                                f"(resume_rc={primary_result.returncode})"
                             )
-                            primary_result = recovered_result
+                            primary_result = continue_result
                         else:
-                            detail = (
-                                f"continue_rc={primary_result.returncode}, fresh_rc={recovered_result.returncode}, "
-                                f"continue_err={_trim_command_error(primary_result)}, "
-                                f"fresh_err={_trim_command_error(recovered_result)}"
+                            recovered_result = _run_with_compat_runner(
+                                runner,
+                                _build_patrol_chat_command(
+                                    query=bootstrap_query,
+                                    max_turns=patrol_max_turns,
+                                    continue_latest=False,
+                                ),
+                                env,
                             )
+                            if recovered_result.returncode == 0:
+                                status = "success"
+                                detail = (
+                                    "hermes chat recovered by starting a new session "
+                                    f"(resume_rc={primary_result.returncode}, continue_rc={continue_result.returncode})"
+                                )
+                                primary_result = recovered_result
+                            else:
+                                detail = (
+                                    "resume_rc="
+                                    f"{primary_result.returncode}, continue_rc={continue_result.returncode}, "
+                                    f"fresh_rc={recovered_result.returncode}, "
+                                    f"resume_err={_trim_command_error(primary_result)}, "
+                                    f"continue_err={_trim_command_error(continue_result)}, "
+                                    f"fresh_err={_trim_command_error(recovered_result)}"
+                                )
                     else:
                         detail = (
                             f"fresh_rc={primary_result.returncode}, "
@@ -376,12 +412,16 @@ def trigger_patrol_from_ingest(
                     memory_interval_seconds = _load_memory_flush_min_interval_seconds()
                     now_dt = datetime.now(timezone.utc)
                     if _should_flush_memory(conn, now=now_dt, min_interval_seconds=memory_interval_seconds):
+                        memory_session_state = _load_patrol_state_value(conn, PATROL_SESSION_STATE_KEY) or {}
+                        memory_session_id = memory_session_state.get("session_id")
+                        use_resume_for_memory = isinstance(memory_session_id, str) and memory_session_id.strip() != ""
                         memory_result = _run_with_compat_runner(
                             runner,
                             _build_patrol_chat_command(
                                 query=DEFAULT_PATROL_MEMORY_FLUSH_QUERY,
                                 max_turns=2,
-                                continue_latest=True,
+                                continue_latest=not use_resume_for_memory,
+                                resume_session_id=str(memory_session_id) if use_resume_for_memory else None,
                             ),
                             env,
                         )
@@ -413,6 +453,38 @@ def trigger_patrol_from_ingest(
                             )
                     else:
                         detail = f"{detail}; memory_flush=skipped_not_due"
+            elif normalized_mode == "openai":
+                openai_session_state = _load_patrol_state_value(conn, PATROL_OPENAI_SESSION_STATE_KEY) or {}
+                existing_response_id = openai_session_state.get("response_id")
+                has_existing_response = isinstance(existing_response_id, str) and existing_response_id.strip() != ""
+                bootstrap_query = _load_patrol_chat_query(patrol_prompt_path)
+                if has_existing_response:
+                    primary_query = _build_lightweight_patrol_query(event_ids)
+                else:
+                    primary_query = bootstrap_query
+
+                openai_result = run_openai_patrol(
+                    conn,
+                    model=openai_model,
+                    instructions=bootstrap_query,
+                    query=primary_query,
+                    previous_response_id=str(existing_response_id) if has_existing_response else None,
+                    max_turns=patrol_max_turns,
+                    client_factory=openai_client_factory,
+                )
+                status = openai_result.status
+                detail = openai_result.detail
+                if status == "success":
+                    _upsert_patrol_state_value(
+                        conn,
+                        PATROL_OPENAI_SESSION_STATE_KEY,
+                        {
+                            "response_id": openai_result.response_id,
+                            "last_run_id": run_id,
+                            "last_success_at": finished_at,
+                            "model": openai_model,
+                        },
+                    )
             elif normalized_mode == "cron":
                 run_result = _run_with_compat_runner(runner, ["hermes", "cron", "run", job_id], env)
                 tick_result = _run_with_compat_runner(runner, ["hermes", "cron", "tick"], env)

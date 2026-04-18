@@ -22,6 +22,22 @@ def _build_alert(alert_id: str) -> dict:
     }
 
 
+class _FakeOpenAIResponses:
+    def __init__(self, rounds: list[dict]) -> None:
+        self._rounds = rounds
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        index = len(self.calls) - 1
+        return self._rounds[index]
+
+
+class _FakeOpenAIClient:
+    def __init__(self, rounds: list[dict]) -> None:
+        self.responses = _FakeOpenAIResponses(rounds)
+
+
 def test_ingest_alert_bundle_writes_pending_events(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
@@ -137,7 +153,7 @@ def test_trigger_patrol_marks_failed_and_retries(tmp_path) -> None:
     assert retried["processed_events"] == 1
 
 
-def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_path) -> None:
+def test_trigger_patrol_chat_falls_back_to_new_session_when_resume_and_continue_fail(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
     ingest_alert_bundle(db_path, [_build_alert("alt_ingest_005")], source="siem")
@@ -165,8 +181,10 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_p
     def flaky_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         del env
         commands.append(command)
-        if len(commands) == 1 and "--continue" in command:
-            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="no session")
+        if len(commands) == 1 and "--resume" in command:
+            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="missing session")
+        if len(commands) == 2 and "--continue" in command:
+            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="no latest session")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
 
     result = trigger_patrol_from_ingest(
@@ -176,10 +194,12 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_p
         source_hermes_home=source_home,
     )
     assert result["status"] == "success"
-    assert len(commands) == 3
-    assert "--continue" in commands[0]
-    assert "--continue" not in commands[1]
-    assert "--continue" in commands[2]
+    assert len(commands) == 4
+    assert "--resume" in commands[0]
+    assert "sess_existing_001" in commands[0]
+    assert "--continue" in commands[1]
+    assert "--continue" not in commands[2]
+    assert "--resume" in commands[3]
 
 
 def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_path) -> None:
@@ -194,7 +214,7 @@ def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_pat
     def fake_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         del env
         commands.append(command)
-        if "--continue" in command:
+        if "--resume" in command:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
@@ -219,6 +239,13 @@ def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_pat
     first_round_command_count = len(commands)
     assert first_round_command_count >= 1
     assert "--continue" not in commands[0]
+    conn = connect_db(db_path)
+    session_state_after_first = json.loads(
+        conn.execute(
+            "select state_value_json from patrol_state where state_key = 'hermes_patrol_session'"
+        ).fetchone()["state_value_json"]
+    )
+    conn.close()
 
     ingest_alert_bundle(db_path, [_build_alert("alt_ingest_007")], source="siem")
     second_result = trigger_patrol_from_ingest(
@@ -229,5 +256,110 @@ def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_pat
     )
     assert second_result["status"] == "success"
     second_round_first_command = commands[first_round_command_count]
-    assert "--continue" in second_round_first_command
+    assert "--resume" in second_round_first_command
+    assert session_state_after_first["session_id"] in second_round_first_command
     assert any("New ingest events detected" in item for item in second_round_first_command)
+
+
+def test_trigger_patrol_openai_mode_executes_tools_and_persists_response_state(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_001")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_001",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_ack",
+                        "call_id": "call_openai_002",
+                        "arguments": '{"alert_ids":["alt_ingest_openai_001"],"status":"triaged"}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "success"
+
+    conn = connect_db(db_path)
+    state_rows = conn.execute("select state_key, state_value_json from patrol_state").fetchall()
+    state_values = {row["state_key"]: json.loads(row["state_value_json"]) for row in state_rows}
+    assert "openai_patrol_session" in state_values
+    assert state_values["openai_patrol_session"]["response_id"] == "resp_openai_003"
+
+    alert_status = conn.execute(
+        "select status from alerts where alert_id = ?",
+        ("alt_ingest_openai_001",),
+    ).fetchone()["status"]
+    assert alert_status == "triaged"
+
+    tool_calls = conn.execute(
+        "select run_id, tool_name from agent_tool_calls order by occurred_at asc, rowid asc"
+    ).fetchall()
+    conn.close()
+    assert [row["tool_name"] for row in tool_calls] == ["alert.fetch", "alert.ack"]
+    assert all(row["run_id"] == result["run_id"] for row in tool_calls)
+
+
+def test_trigger_patrol_openai_mode_reuses_previous_response_id(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_002")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_bootstrap",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+            {
+                "id": "resp_openai_resume",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    first = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert first["status"] == "success"
+
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_003")], source="siem")
+    second = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert second["status"] == "success"
+    assert len(fake_client.responses.calls) == 2
+    assert "previous_response_id" not in fake_client.responses.calls[0]
+    assert fake_client.responses.calls[1]["previous_response_id"] == "resp_openai_bootstrap"
+    assert "New ingest events detected" in fake_client.responses.calls[1]["input"]
