@@ -441,3 +441,66 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
     assert run_row["status"] == "failed"
     assert "no backend tool calls" in str(run_row["summary"])
     assert event_row["trigger_state"] == "failed"
+
+
+def test_trigger_patrol_openai_mode_normalizes_malformed_actor_batch_payload(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_005")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_norm_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_norm_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_norm_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "actor_case_link_batch",
+                        "call_id": "call_openai_norm_actor_link",
+                        "arguments": (
+                            '{"items":[{"actor_id":"act_missing_schema","target_type":"timeline",'
+                            '"alert_id":"alt_ingest_openai_005","reason":"same chain"}]}'
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_norm_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "success"
+
+    conn = connect_db(db_path)
+    rows = conn.execute(
+        """
+        select tool_name, result_ok, result_summary
+        from agent_tool_calls
+        where run_id = ?
+        order by occurred_at asc, rowid asc
+        """,
+        (result["run_id"],),
+    ).fetchall()
+    conn.close()
+
+    assert [row["tool_name"] for row in rows] == ["alert.fetch", "actor.case-link-batch"]
+    assert rows[1]["result_ok"] == 1

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from hashlib import sha1
+import re
 from typing import Any, Callable
 
 from security_analyst_agent.config import DEFAULT_OPENAI_BASE_URL
@@ -113,6 +115,323 @@ def _invoke_response_create(client: Any, request: dict[str, Any]) -> Any:
     return create(**request)
 
 
+def _as_float(value: Any, default: float) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = _safe_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _normalize_status(value: str, default: str = "active") -> str:
+    lowered = value.lower()
+    if lowered in {"active", "open", "tracking", "triaged", "closed", "merged"}:
+        if lowered == "open":
+            return "active"
+        return lowered
+    return default
+
+
+def _normalize_stage(value: str, default: str = "recon") -> str:
+    lowered = value.lower()
+    allowed = {
+        "recon",
+        "exploit",
+        "persistence",
+        "command_execution",
+        "lateral_prep",
+        "reactivation",
+    }
+    if lowered in allowed:
+        return lowered
+    return default
+
+
+def _normalize_risk_level(value: str, default: str = "medium") -> str:
+    lowered = value.lower()
+    if lowered in {"low", "medium", "high", "critical"}:
+        return lowered
+    if lowered in {"info", "informational"}:
+        return "low"
+    if lowered in {"severe", "urgent"}:
+        return "high"
+    return default
+
+
+def _normalize_verdict(value: str, default: str = "unknown") -> str:
+    lowered = value.lower()
+    mapping = {
+        "attacker": "attacker",
+        "threat_actor": "attacker",
+        "compromised_host": "compromised_host",
+        "compromised": "compromised_host",
+        "host_compromised": "compromised_host",
+        "noise": "noise",
+        "benign": "noise",
+        "unknown": "unknown",
+    }
+    return mapping.get(lowered, default)
+
+
+def _looks_like_ip(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value))
+
+
+def _normalize_entity_type(raw_type: str, *, entity_key: str) -> str:
+    lowered = raw_type.lower()
+    if lowered in {"ip", "asset", "actor"}:
+        return lowered
+    alias = {
+        "attacker": "ip",
+        "source_ip": "ip",
+        "src_ip": "ip",
+        "destination_ip": "ip",
+        "dst_ip": "ip",
+        "host": "asset",
+        "asset_id": "asset",
+        "server": "asset",
+        "case_actor": "actor",
+        "actor_profile": "actor",
+    }
+    if lowered in alias:
+        return alias[lowered]
+    if entity_key.startswith("asset_"):
+        return "asset"
+    if entity_key.startswith("act_") or entity_key.startswith("case_actor_"):
+        return "actor"
+    if _looks_like_ip(entity_key):
+        return "ip"
+    return "ip"
+
+
+def _auto_case_actor_id(case_id: str, label: str) -> str:
+    seed = f"{case_id}:{label}".encode("utf-8")
+    return f"act_{sha1(seed).hexdigest()[:16]}"
+
+
+def _ensure_dict_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+    return normalized
+
+
+def _normalize_case_upsert_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for item in _ensure_dict_items(payload):
+        case_id = _first_non_empty(item.get("case_id"), item.get("id"), item.get("canonical_case_id"))
+        title = _first_non_empty(item.get("title"), item.get("name"), item.get("summary"))
+        if not case_id or not title:
+            continue
+        normalized_item = {
+            "case_id": case_id,
+            "title": title,
+            "status": _normalize_status(_first_non_empty(item.get("status"), "active"), default="active"),
+            "overall_severity": _normalize_risk_level(
+                _first_non_empty(item.get("overall_severity"), item.get("severity"), item.get("risk_level"), "medium"),
+                default="medium",
+            ),
+            "current_stage": _normalize_stage(
+                _first_non_empty(item.get("current_stage"), item.get("stage"), item.get("attack_stage"), "recon"),
+                default="recon",
+            ),
+        }
+        primary_actor_id = _first_non_empty(item.get("primary_actor_id"), item.get("case_actor_id"))
+        if primary_actor_id:
+            normalized_item["primary_actor_id"] = primary_actor_id
+        items.append(normalized_item)
+    return {"items": items}
+
+
+def _normalize_case_link_alert_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for item in _ensure_dict_items(payload):
+        case_id = _first_non_empty(item.get("case_id"), item.get("id"))
+        alert_id = _first_non_empty(item.get("alert_id"), item.get("target_id"))
+        if not case_id or not alert_id:
+            continue
+        confidence = _as_float(item.get("confidence", item.get("link_confidence", 0.8)), default=0.8)
+        reason = _first_non_empty(item.get("reason"), item.get("link_reason"), item.get("summary"), "tool:auto_normalized")
+        items.append(
+            {
+                "case_id": case_id,
+                "alert_id": alert_id,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "reason": reason,
+            }
+        )
+    return {"items": items}
+
+
+def _normalize_assessment_upsert_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for item in _ensure_dict_items(payload):
+        entity_key = _first_non_empty(
+            item.get("entity_key"),
+            item.get("entity_id"),
+            item.get("indicator"),
+            item.get("src_ip"),
+            item.get("asset_id"),
+            item.get("case_actor_id"),
+        )
+        if not entity_key:
+            continue
+        entity_type = _normalize_entity_type(_first_non_empty(item.get("entity_type"), item.get("type")), entity_key=entity_key)
+        verdict = _normalize_verdict(_first_non_empty(item.get("verdict"), item.get("assessment"), "unknown"), default="unknown")
+        normalized_item = {
+            "entity_type": entity_type,
+            "entity_key": entity_key,
+            "entity_label": _first_non_empty(item.get("entity_label"), item.get("label"), entity_key),
+            "related_case_id": _first_non_empty(item.get("related_case_id"), item.get("case_id")) or None,
+            "risk_level": _normalize_risk_level(
+                _first_non_empty(item.get("risk_level"), item.get("severity"), "medium"),
+                default="medium",
+            ),
+            "assessment_confidence": max(
+                0.0,
+                min(1.0, _as_float(item.get("assessment_confidence", item.get("confidence", 0.75)), default=0.75)),
+            ),
+            "verdict": verdict,
+            "reason_summary": _first_non_empty(item.get("reason_summary"), item.get("reason"), item.get("summary"), "tool:auto_normalized"),
+            "supporting_alert_ids": item.get("supporting_alert_ids", item.get("alert_ids", [])) or [],
+            "supporting_evidence_ids": item.get("supporting_evidence_ids", item.get("evidence_ids", [])) or [],
+            "first_seen_at": _first_non_empty(item.get("first_seen_at")) or None,
+            "last_seen_at": _first_non_empty(item.get("last_seen_at")) or None,
+        }
+        items.append(normalized_item)
+    return {"items": items}
+
+
+def _normalize_actor_case_upsert_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    case_id = _first_non_empty(payload.get("case_id"), payload.get("related_case_id"))
+    label = _first_non_empty(payload.get("label"), payload.get("name"), "case actor")
+    case_actor_id = _first_non_empty(payload.get("case_actor_id"), payload.get("actor_id"))
+    if not case_actor_id and case_id:
+        case_actor_id = _auto_case_actor_id(case_id, label)
+    return {
+        "case_actor_id": case_actor_id,
+        "case_id": case_id,
+        "label": label,
+        "status": _normalize_status(_first_non_empty(payload.get("status"), "active"), default="active"),
+        "profile_confidence": max(
+            0.0,
+            min(1.0, _as_float(payload.get("profile_confidence", payload.get("confidence", 0.7)), default=0.7)),
+        ),
+        "risk_level": _normalize_risk_level(_first_non_empty(payload.get("risk_level"), payload.get("severity"), "medium"), default="medium"),
+        "is_primary": bool(payload.get("is_primary", False)),
+        "current_stage": _normalize_stage(
+            _first_non_empty(payload.get("current_stage"), payload.get("stage"), payload.get("attack_stage"), "recon"),
+            default="recon",
+        ),
+        "first_seen_at": _first_non_empty(payload.get("first_seen_at")) or None,
+        "last_seen_at": _first_non_empty(payload.get("last_seen_at")) or None,
+        "summary": _first_non_empty(payload.get("summary"), payload.get("reason"), label),
+    }
+
+
+def _normalize_actor_case_add_observation_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for item in _ensure_dict_items(payload):
+        case_actor_id = _first_non_empty(item.get("case_actor_id"), item.get("actor_id"))
+        observation_key = _first_non_empty(
+            item.get("observation_key"),
+            item.get("key"),
+            item.get("observation_value"),
+            item.get("value"),
+            item.get("indicator"),
+            item.get("src_ip"),
+            item.get("asset_id"),
+        )
+        if not case_actor_id or not observation_key:
+            continue
+        observation_value = _first_non_empty(item.get("observation_value"), item.get("value"), observation_key)
+        items.append(
+            {
+                "case_actor_id": case_actor_id,
+                "observation_type": _first_non_empty(item.get("observation_type"), item.get("type"), "artifact"),
+                "observation_key": observation_key,
+                "observation_value": observation_value,
+                "confidence": max(0.0, min(1.0, _as_float(item.get("confidence", 0.8), default=0.8))),
+                "first_seen_at": _first_non_empty(item.get("first_seen_at")) or None,
+                "last_seen_at": _first_non_empty(item.get("last_seen_at")) or None,
+                "source_count": int(item.get("source_count", 1) or 1),
+            }
+        )
+    return {"items": items}
+
+
+def _normalize_actor_case_link_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    target_type_alias = {"timeline": "timeline_event", "timelineevent": "timeline_event"}
+    for item in _ensure_dict_items(payload):
+        case_actor_id = _first_non_empty(item.get("case_actor_id"), item.get("actor_id"))
+        target_id = _first_non_empty(
+            item.get("target_id"),
+            item.get("id"),
+            item.get("alert_id"),
+            item.get("evidence_id"),
+            item.get("timeline_event_id"),
+        )
+        raw_target_type = _first_non_empty(item.get("target_type"), "alert").lower()
+        target_type = target_type_alias.get(raw_target_type, raw_target_type)
+        if not case_actor_id or not target_id:
+            continue
+        items.append(
+            {
+                "case_actor_id": case_actor_id,
+                "target_type": target_type,
+                "target_id": target_id,
+                "link_confidence": max(
+                    0.0,
+                    min(1.0, _as_float(item.get("link_confidence", item.get("confidence", 0.8)), default=0.8)),
+                ),
+                "link_reason": _first_non_empty(item.get("link_reason"), item.get("reason"), item.get("summary"), "tool:auto_normalized"),
+            }
+        )
+    return {"items": items}
+
+
+def _normalize_payload_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    if tool_name == "case.upsert-batch":
+        return _normalize_case_upsert_batch_payload(payload)
+    if tool_name == "case.link-alert-batch":
+        return _normalize_case_link_alert_batch_payload(payload)
+    if tool_name == "assessment.upsert-batch":
+        return _normalize_assessment_upsert_batch_payload(payload)
+    if tool_name == "actor.case-upsert":
+        return _normalize_actor_case_upsert_payload(payload)
+    if tool_name == "actor.case-add-observation-batch":
+        return _normalize_actor_case_add_observation_batch_payload(payload)
+    if tool_name == "actor.case-link-batch":
+        return _normalize_actor_case_link_batch_payload(payload)
+    return payload
+
+
 def run_openai_patrol(
     conn: sqlite3.Connection,
     *,
@@ -179,6 +498,7 @@ def run_openai_patrol(
                     payload = json.loads(call["arguments"]) if call["arguments"].strip() else {}
                 except json.JSONDecodeError:
                     payload = {}
+                payload = _normalize_payload_for_tool(backend_tool_name, payload)
                 tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
                 tool_call_count += 1
 
