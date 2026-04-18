@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 from security_analyst_agent.bootstrap import bootstrap_spike_database
@@ -55,6 +56,13 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
     def fake_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         envs.append(env or {})
+        if "--continue" in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="ok\n\nsession_id: sess_ingest_demo_001",
+                stderr="",
+            )
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
 
     result = trigger_patrol_from_ingest(
@@ -69,7 +77,7 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
     assert result["status"] == "success"
     assert len(commands) == 2
     assert commands[0][:3] == ["hermes", "chat", "-q"]
-    assert "--continue" in commands[0]
+    assert "--continue" not in commands[0]
     assert "--max-turns" in commands[0]
     assert "18" in commands[0]
     assert "-s" in commands[0]
@@ -95,7 +103,10 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
     assert pending_count == 0
     assert run_status["status"] == "success"
     assert run_times["analysis_cutoff_at"] == run_times["started_at"]
-    assert conn.execute("select count(*) from patrol_state").fetchone()[0] == 0
+    state_rows = conn.execute("select state_key, state_value_json from patrol_state").fetchall()
+    state_values = {row["state_key"]: json.loads(row["state_value_json"]) for row in state_rows}
+    assert "hermes_patrol_session" in state_values
+    assert state_values["hermes_patrol_session"]["session_id"] == "sess_ingest_demo_001"
     conn.close()
 
 
@@ -134,6 +145,21 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_p
     patrol_home = tmp_path / "patrol-hermes-home"
     source_home.mkdir(parents=True, exist_ok=True)
 
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into patrol_state (state_key, state_value_json, updated_at)
+        values (?, ?, ?)
+        """,
+        (
+            "hermes_patrol_session",
+            json.dumps({"session_id": "sess_existing_001"}, ensure_ascii=False),
+            "2026-04-14T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
     commands: list[list[str]] = []
 
     def flaky_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -154,3 +180,54 @@ def test_trigger_patrol_chat_falls_back_to_new_session_when_continue_fails(tmp_p
     assert "--continue" in commands[0]
     assert "--continue" not in commands[1]
     assert "--continue" in commands[2]
+
+
+def test_trigger_patrol_reuses_session_and_switches_to_lightweight_query(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    source_home = tmp_path / "source-hermes-home"
+    patrol_home = tmp_path / "patrol-hermes-home"
+    source_home.mkdir(parents=True, exist_ok=True)
+
+    commands: list[list[str]] = []
+
+    def fake_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        del env
+        commands.append(command)
+        if "--continue" in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="ok\n\nsession_id: sess_reuse_002",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="ok\n\nsession_id: sess_reuse_001",
+            stderr="",
+        )
+
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_006")], source="siem")
+    first_result = trigger_patrol_from_ingest(
+        db_path,
+        command_runner=fake_runner,
+        hermes_home=patrol_home,
+        source_hermes_home=source_home,
+    )
+    assert first_result["status"] == "success"
+    first_round_command_count = len(commands)
+    assert first_round_command_count >= 1
+    assert "--continue" not in commands[0]
+
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_007")], source="siem")
+    second_result = trigger_patrol_from_ingest(
+        db_path,
+        command_runner=fake_runner,
+        hermes_home=patrol_home,
+        source_hermes_home=source_home,
+    )
+    assert second_result["status"] == "success"
+    second_round_first_command = commands[first_round_command_count]
+    assert "--continue" in second_round_first_command
+    assert any("New ingest events detected" in item for item in second_round_first_command)

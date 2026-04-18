@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -40,6 +41,17 @@ DEFAULT_PATROL_MEMORY_FLUSH_QUERY = (
     "save at most one compact memory entry using memory tool. "
     "If nothing is worth persisting, reply exactly [NO_MEMORY]."
 )
+DEFAULT_PATROL_LIGHTWEIGHT_SIGNAL_QUERY_TEMPLATE = (
+    "New ingest events detected (count={event_count}, sample_event_ids={sample_event_ids}). "
+    "Continue current patrol session and run exactly one patrol pass against the current alert queue. "
+    "Start with alert.fetch. Prefer representative sampling and avoid repetitive fan-out. "
+    "Ack triaged alerts in batch when appropriate. "
+    "If there is no material update, return exactly [SILENT]."
+)
+DEFAULT_MEMORY_FLUSH_MIN_INTERVAL_SECONDS = 3600
+PATROL_SESSION_STATE_KEY = "hermes_patrol_session"
+PATROL_MEMORY_FLUSH_STATE_KEY = "hermes_patrol_memory_flush"
+_SESSION_ID_PATTERN = re.compile(r"session_id:\s*([^\s]+)")
 
 
 def _default_runner(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -159,6 +171,91 @@ def _load_write_memory_on_finish(loop_path: Path = DEFAULT_PATROL_LOOP_PATH) -> 
     return bool(data.get("write_memory_on_finish", False))
 
 
+def _load_memory_flush_min_interval_seconds(loop_path: Path = DEFAULT_PATROL_LOOP_PATH) -> int:
+    if not loop_path.exists():
+        return DEFAULT_MEMORY_FLUSH_MIN_INTERVAL_SECONDS
+    try:
+        data = json.loads(loop_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return DEFAULT_MEMORY_FLUSH_MIN_INTERVAL_SECONDS
+    value = data.get("memory_flush_min_interval_seconds", DEFAULT_MEMORY_FLUSH_MIN_INTERVAL_SECONDS)
+    if not isinstance(value, int):
+        return DEFAULT_MEMORY_FLUSH_MIN_INTERVAL_SECONDS
+    return max(value, 0)
+
+
+def _load_patrol_state_value(conn: sqlite3.Connection, state_key: str) -> dict | None:
+    row = conn.execute(
+        """
+        select state_value_json
+        from patrol_state
+        where state_key = ?
+        """,
+        (state_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        state = json.loads(row["state_value_json"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if isinstance(state, dict):
+        return state
+    if isinstance(state, str) and state.strip():
+        return {"session_id": state.strip()}
+    return None
+
+
+def _upsert_patrol_state_value(conn: sqlite3.Connection, state_key: str, state_value: dict) -> None:
+    conn.execute(
+        """
+        insert into patrol_state (state_key, state_value_json, updated_at)
+        values (?, ?, ?)
+        on conflict(state_key) do update set
+          state_value_json = excluded.state_value_json,
+          updated_at = excluded.updated_at
+        """,
+        (state_key, json.dumps(state_value, ensure_ascii=False), _now_iso()),
+    )
+
+
+def _extract_session_id(result: subprocess.CompletedProcess[str]) -> str | None:
+    text = f"{result.stdout or ''}\n{result.stderr or ''}"
+    matched = _SESSION_ID_PATTERN.search(text)
+    if not matched:
+        return None
+    session_id = matched.group(1).strip()
+    if not session_id:
+        return None
+    return session_id
+
+
+def _build_lightweight_patrol_query(event_ids: list[str]) -> str:
+    sample_ids = event_ids[:5]
+    sample_repr = "[" + ", ".join(sample_ids) + "]" if sample_ids else "[]"
+    return DEFAULT_PATROL_LIGHTWEIGHT_SIGNAL_QUERY_TEMPLATE.format(
+        event_count=len(event_ids),
+        sample_event_ids=sample_repr,
+    )
+
+
+def _should_flush_memory(conn: sqlite3.Connection, *, now: datetime, min_interval_seconds: int) -> bool:
+    if min_interval_seconds <= 0:
+        return True
+    state = _load_patrol_state_value(conn, PATROL_MEMORY_FLUSH_STATE_KEY)
+    if not state:
+        return True
+    last_flush_at = state.get("last_flush_at")
+    if not isinstance(last_flush_at, str) or not last_flush_at.strip():
+        return True
+    try:
+        last_flush = datetime.fromisoformat(last_flush_at)
+    except ValueError:
+        return True
+    elapsed = (now - last_flush).total_seconds()
+    return elapsed >= float(min_interval_seconds)
+
+
 def trigger_patrol_from_ingest(
     db_path: Path,
     job_id: str = DEFAULT_HERMES_CRON_JOB_ID,
@@ -210,50 +307,112 @@ def trigger_patrol_from_ingest(
                 write_memory_on_finish if write_memory_on_finish is not None else _load_write_memory_on_finish()
             )
             if normalized_mode == "chat":
-                query = _load_patrol_chat_query(patrol_prompt_path)
-                continue_result = _run_with_compat_runner(
+                existing_session_state = _load_patrol_state_value(conn, PATROL_SESSION_STATE_KEY) or {}
+                existing_session_id = existing_session_state.get("session_id")
+                has_existing_session = isinstance(existing_session_id, str) and existing_session_id.strip() != ""
+                bootstrap_query = _load_patrol_chat_query(patrol_prompt_path)
+                if has_existing_session:
+                    primary_query = _build_lightweight_patrol_query(event_ids)
+                else:
+                    primary_query = bootstrap_query
+
+                primary_result = _run_with_compat_runner(
                     runner,
-                    _build_patrol_chat_command(query=query, max_turns=patrol_max_turns, continue_latest=True),
+                    _build_patrol_chat_command(
+                        query=primary_query,
+                        max_turns=patrol_max_turns,
+                        continue_latest=has_existing_session,
+                    ),
                     env,
                 )
-                if continue_result.returncode == 0:
+                if primary_result.returncode == 0:
                     status = "success"
-                    detail = "hermes chat --continue completed"
+                    if has_existing_session:
+                        detail = "hermes chat session resumed with lightweight trigger query"
+                    else:
+                        detail = "hermes chat started new patrol session"
                 else:
-                    fresh_result = _run_with_compat_runner(
-                        runner,
-                        _build_patrol_chat_command(query=query, max_turns=patrol_max_turns, continue_latest=False),
-                        env,
-                    )
-                    if fresh_result.returncode == 0:
-                        status = "success"
-                        detail = (
-                            "hermes chat new session completed after continue fallback "
-                            f"(continue_rc={continue_result.returncode})"
+                    if has_existing_session:
+                        recovered_result = _run_with_compat_runner(
+                            runner,
+                            _build_patrol_chat_command(
+                                query=bootstrap_query,
+                                max_turns=patrol_max_turns,
+                                continue_latest=False,
+                            ),
+                            env,
                         )
+                        if recovered_result.returncode == 0:
+                            status = "success"
+                            detail = (
+                                "hermes chat recovered by starting a new session "
+                                f"(continue_rc={primary_result.returncode})"
+                            )
+                            primary_result = recovered_result
+                        else:
+                            detail = (
+                                f"continue_rc={primary_result.returncode}, fresh_rc={recovered_result.returncode}, "
+                                f"continue_err={_trim_command_error(primary_result)}, "
+                                f"fresh_err={_trim_command_error(recovered_result)}"
+                            )
                     else:
                         detail = (
-                            f"continue_rc={continue_result.returncode}, fresh_rc={fresh_result.returncode}, "
-                            f"continue_err={_trim_command_error(continue_result)}, "
-                            f"fresh_err={_trim_command_error(fresh_result)}"
+                            f"fresh_rc={primary_result.returncode}, "
+                            f"fresh_err={_trim_command_error(primary_result)}"
+                        )
+                if status == "success":
+                    session_id = _extract_session_id(primary_result)
+                    if session_id:
+                        _upsert_patrol_state_value(
+                            conn,
+                            PATROL_SESSION_STATE_KEY,
+                            {
+                                "session_id": session_id,
+                                "last_run_id": run_id,
+                                "last_success_at": finished_at,
+                            },
                         )
                 if status == "success" and memory_enabled:
-                    memory_result = _run_with_compat_runner(
-                        runner,
-                        _build_patrol_chat_command(
-                            query=DEFAULT_PATROL_MEMORY_FLUSH_QUERY,
-                            max_turns=2,
-                            continue_latest=True,
-                        ),
-                        env,
-                    )
-                    if memory_result.returncode == 0:
-                        detail = f"{detail}; memory_flush=ok"
-                    else:
-                        detail = (
-                            f"{detail}; memory_flush_failed rc={memory_result.returncode}, "
-                            f"err={_trim_command_error(memory_result)}"
+                    memory_interval_seconds = _load_memory_flush_min_interval_seconds()
+                    now_dt = datetime.now(timezone.utc)
+                    if _should_flush_memory(conn, now=now_dt, min_interval_seconds=memory_interval_seconds):
+                        memory_result = _run_with_compat_runner(
+                            runner,
+                            _build_patrol_chat_command(
+                                query=DEFAULT_PATROL_MEMORY_FLUSH_QUERY,
+                                max_turns=2,
+                                continue_latest=True,
+                            ),
+                            env,
                         )
+                        if memory_result.returncode == 0:
+                            detail = f"{detail}; memory_flush=ok"
+                            memory_session_id = _extract_session_id(memory_result)
+                            if memory_session_id:
+                                _upsert_patrol_state_value(
+                                    conn,
+                                    PATROL_SESSION_STATE_KEY,
+                                    {
+                                        "session_id": memory_session_id,
+                                        "last_run_id": run_id,
+                                        "last_success_at": finished_at,
+                                    },
+                                )
+                            _upsert_patrol_state_value(
+                                conn,
+                                PATROL_MEMORY_FLUSH_STATE_KEY,
+                                {
+                                    "last_flush_at": now_dt.isoformat(),
+                                    "last_run_id": run_id,
+                                },
+                            )
+                        else:
+                            detail = (
+                                f"{detail}; memory_flush_failed rc={memory_result.returncode}, "
+                                f"err={_trim_command_error(memory_result)}"
+                            )
+                    else:
+                        detail = f"{detail}; memory_flush=skipped_not_due"
             elif normalized_mode == "cron":
                 run_result = _run_with_compat_runner(runner, ["hermes", "cron", "run", job_id], env)
                 tick_result = _run_with_compat_runner(runner, ["hermes", "cron", "tick"], env)
