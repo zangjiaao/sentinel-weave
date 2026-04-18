@@ -339,9 +339,24 @@ def test_trigger_patrol_openai_mode_executes_tools_and_persists_response_state(t
     tool_calls = conn.execute(
         "select run_id, tool_name from agent_tool_calls order by occurred_at asc, rowid asc"
     ).fetchall()
+    run_cost = conn.execute(
+        """
+        select trigger_mode, status, tool_calls, usage_input_tokens, usage_output_tokens, usage_total_tokens
+        from patrol_run_costs
+        where run_id = ?
+        """,
+        (result["run_id"],),
+    ).fetchone()
     conn.close()
     assert [row["tool_name"] for row in tool_calls] == ["alert.fetch", "alert.ack"]
     assert all(row["run_id"] == result["run_id"] for row in tool_calls)
+    assert run_cost is not None
+    assert run_cost["trigger_mode"] == "openai"
+    assert run_cost["status"] == "success"
+    assert run_cost["tool_calls"] == 2
+    assert run_cost["usage_input_tokens"] == 0
+    assert run_cost["usage_output_tokens"] == 0
+    assert run_cost["usage_total_tokens"] == 0
 
 
 def test_trigger_patrol_openai_mode_runs_case_convergence_after_success(tmp_path, monkeypatch) -> None:
@@ -529,6 +544,14 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
         "select status, summary from patrol_runs where run_id = ?",
         (result["run_id"],),
     ).fetchone()
+    run_cost = conn.execute(
+        """
+        select trigger_mode, status, tool_calls, usage_input_tokens, usage_output_tokens, usage_total_tokens
+        from patrol_run_costs
+        where run_id = ?
+        """,
+        (result["run_id"],),
+    ).fetchone()
     event_row = conn.execute(
         "select trigger_state from alert_ingest_events order by rowid desc limit 1"
     ).fetchone()
@@ -537,6 +560,9 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
     assert run_row["status"] == "failed"
     assert "no backend tool calls" in str(run_row["summary"])
     assert event_row["trigger_state"] == "failed"
+    assert run_cost is not None
+    assert run_cost["trigger_mode"] == "openai"
+    assert run_cost["status"] == "failed"
 
 
 def test_trigger_patrol_openai_mode_rolls_session_when_limits_reached(tmp_path, monkeypatch) -> None:

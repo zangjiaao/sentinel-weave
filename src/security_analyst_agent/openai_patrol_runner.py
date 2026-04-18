@@ -318,12 +318,17 @@ def _ensure_dict_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _normalize_case_upsert_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_items = _ensure_dict_items(payload)
+    if not raw_items and any(
+        key in payload for key in ("case_id", "id", "canonical_case_id", "title", "name", "summary")
+    ):
+        raw_items = [dict(payload)]
     items: list[dict[str, Any]] = []
-    for item in _ensure_dict_items(payload):
+    for item in raw_items:
         case_id = _first_non_empty(item.get("case_id"), item.get("id"), item.get("canonical_case_id"))
-        title = _first_non_empty(item.get("title"), item.get("name"), item.get("summary"))
-        if not case_id or not title:
+        if not case_id:
             continue
+        title = _first_non_empty(item.get("title"), item.get("name"), item.get("summary"), f"Case {case_id}")
         normalized_item = {
             "case_id": case_id,
             "title": title,

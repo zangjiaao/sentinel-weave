@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from security_analyst_agent.tools.assessment_tools import assessment_upsert, assessment_upsert_batch
 
 
@@ -80,13 +83,9 @@ def test_assessment_upsert_batch_matches_single_tool_behavior(db_conn) -> None:
     assert len(batch["data"]["assessments"]) == 1
 
 
-def test_assessment_upsert_batch_empty_payload_is_noop_success(db_conn) -> None:
-    result = assessment_upsert_batch(db_conn, {})
-
-    assert result["ok"] is True
-    assert result["data"]["assessments"] == []
-    assert result["data"]["failures"] == []
-    assert "assessment_batch_empty_noop" in result["warnings"]
+def test_assessment_upsert_batch_empty_payload_raises_validation_error(db_conn) -> None:
+    with pytest.raises(ValidationError):
+        assessment_upsert_batch(db_conn, {})
 
 
 def test_assessment_upsert_infers_related_case_id_from_alert_links(db_conn) -> None:

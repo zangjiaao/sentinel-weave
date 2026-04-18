@@ -54,6 +54,26 @@ def test_normalize_actor_case_link_batch_fills_required_fields() -> None:
     assert item["link_reason"] == "same activity"
 
 
+def test_normalize_case_upsert_batch_accepts_single_object_payload() -> None:
+    payload = {
+        "case_id": "case_single_001",
+        "summary": "single payload without items array",
+        "severity": "high",
+        "attack_stage": "persistence",
+        "status": "active",
+    }
+
+    normalized = _normalize_payload_for_tool("case.upsert-batch", payload)
+    assert isinstance(normalized.get("items"), list)
+    assert len(normalized["items"]) == 1
+    item = normalized["items"][0]
+    assert item["case_id"] == "case_single_001"
+    assert item["title"] == "single payload without items array"
+    assert item["overall_severity"] == "high"
+    assert item["current_stage"] == "persistence"
+    assert item["status"] == "active"
+
+
 @dataclass
 class _UsageDetailsObject:
     cached_tokens: int

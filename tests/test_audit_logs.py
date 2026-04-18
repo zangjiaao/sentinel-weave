@@ -200,16 +200,26 @@ def test_dispatch_tool_returns_payload_validation_error_and_audits_it(tmp_path) 
     conn.close()
 
 
-def test_dispatch_tool_skips_empty_batch_payload_for_mcp_without_failure(tmp_path) -> None:
+def test_dispatch_tool_rejects_empty_case_upsert_batch_payload_and_returns_guidance(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
     materialize_spike_runtime_demo(db_path)
     conn = connect_db(db_path)
 
     result = dispatch_tool(conn, "case.upsert-batch", {}, source="mcp")
-    assert result["ok"] is True
-    assert "empty batch payload skipped" in result["summary"]
-    assert "empty_batch_payload_skipped" in result["warnings"]
+    assert result["ok"] is False
+    assert "payload" in result["summary"]
+    assert "payload_validation_error" in result["warnings"]
+    assert "tool_schema_guidance" in result["warnings"]
+    guidance = result.get("data", {}).get("schema_guidance")
+    assert isinstance(guidance, dict)
+    assert guidance.get("required_fields") == [
+        "case_id",
+        "title",
+        "status",
+        "overall_severity",
+        "current_stage",
+    ]
 
     row = conn.execute(
         """
@@ -221,9 +231,62 @@ def test_dispatch_tool_skips_empty_batch_payload_for_mcp_without_failure(tmp_pat
         """
     ).fetchone()
     assert row is not None
-    assert row["result_ok"] == 1
-    assert row["result_summary"] == "empty batch payload skipped"
-    assert "empty_batch_payload_skipped" in row["result_json"]
+    assert row["result_ok"] == 0
+    assert "payload" in row["result_summary"]
+    assert "tool_schema_guidance" in row["result_json"]
+    conn.close()
+
+
+def test_dispatch_tool_rejects_other_empty_batch_payloads_with_guidance(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    expected_required_fields = {
+        "case.link-alert-batch": ["case_id", "alert_id", "confidence", "reason"],
+        "assessment.upsert-batch": [
+            "entity_type",
+            "entity_key",
+            "risk_level",
+            "assessment_confidence",
+            "verdict",
+            "reason_summary",
+        ],
+        "actor.case-link-batch": ["case_actor_id", "target_type", "target_id", "link_confidence", "link_reason"],
+        "actor.case-add-observation-batch": [
+            "case_actor_id",
+            "observation_type",
+            "observation_key",
+            "observation_value",
+            "confidence",
+        ],
+    }
+
+    for tool_name, required_fields in expected_required_fields.items():
+        result = dispatch_tool(conn, tool_name, {}, source="mcp")
+        assert result["ok"] is False
+        assert "payload_validation_error" in result["warnings"]
+        assert "batch_items_required" in result["warnings"]
+        assert "tool_schema_guidance" in result["warnings"]
+        guidance = result.get("data", {}).get("schema_guidance")
+        assert isinstance(guidance, dict)
+        assert guidance.get("required_fields") == required_fields
+
+        row = conn.execute(
+            """
+            select result_ok, result_summary, result_json
+            from agent_tool_calls
+            where tool_name = ?
+            order by occurred_at desc, rowid desc
+            limit 1
+            """,
+            (tool_name,),
+        ).fetchone()
+        assert row is not None
+        assert row["result_ok"] == 0
+        assert "payload" in row["result_summary"]
+        assert "tool_schema_guidance" in row["result_json"]
     conn.close()
 
 

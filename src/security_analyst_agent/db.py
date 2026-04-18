@@ -319,6 +319,23 @@ def create_schema(conn: sqlite3.Connection) -> None:
           finished_at text,
           analysis_cutoff_at text not null
         );
+        create table if not exists patrol_run_costs (
+          run_id text primary key,
+          trigger_source text not null,
+          trigger_mode text not null,
+          model text,
+          status text not null,
+          started_at text not null,
+          finished_at text not null,
+          duration_ms integer,
+          turns integer,
+          tool_calls integer,
+          usage_input_tokens integer,
+          usage_output_tokens integer,
+          usage_cached_input_tokens integer,
+          usage_total_tokens integer,
+          recorded_at text not null
+        );
         create table if not exists case_alert_links (
           case_id text not null,
           alert_id text not null,
@@ -600,6 +617,12 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """
         create index if not exists idx_case_actor_links_target
         on case_actor_links(target_type, target_id)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_patrol_run_costs_started_at
+        on patrol_run_costs(started_at desc)
         """
     )
     _ensure_case_alert_links_shape(conn)

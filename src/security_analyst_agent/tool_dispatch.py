@@ -94,15 +94,6 @@ def _validation_error_summary(exc: ValidationError) -> str:
     return f"payload 校验失败：{message}"
 
 
-_SOFT_NOOP_BATCH_TOOLS = {
-    "case.upsert-batch",
-    "case.link-alert-batch",
-    "assessment.upsert-batch",
-    "actor.case-link-batch",
-    "actor.case-add-observation-batch",
-}
-
-
 def _fetch_alert_signal_map(conn: sqlite3.Connection, alert_ids: list[str]) -> dict[str, dict[str, str]]:
     deduped = list(dict.fromkeys(str(item) for item in alert_ids if item))
     if not deduped:
@@ -341,30 +332,134 @@ def _validate_alert_detail_batch_ids(
     }
 
 
-def _is_soft_noop_batch_validation(tool_name: str, payload: dict, exc: ValidationError, *, source: str) -> bool:
-    if source != "mcp":
-        return False
-    if tool_name not in _SOFT_NOOP_BATCH_TOOLS:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    items = payload.get("items")
-    if isinstance(items, list) and len(items) > 0:
-        return False
-    errors = exc.errors()
-    if not errors:
-        return False
-    for error in errors:
-        location = tuple(error.get("loc", ()))
-        if not location:
-            continue
-        first_location = str(location[0])
-        if first_location != "items":
-            continue
-        error_type = str(error.get("type", "")).lower()
-        if error_type in {"missing", "list_too_short", "too_short", "value_error.missing"}:
-            return True
-    return False
+def _batch_payload_guidance(tool_name: str) -> dict[str, Any] | None:
+    if tool_name == "case.upsert-batch":
+        return {
+            "required_fields": ["case_id", "title", "status", "overall_severity", "current_stage"],
+            "example_payload": {
+                "items": [
+                    {
+                        "case_id": "case_demo_001",
+                        "title": "示例案件",
+                        "status": "open",
+                        "overall_severity": "high",
+                        "current_stage": "persistence",
+                    }
+                ]
+            },
+            "recommended_next_actions": [
+                {
+                    "tool": "case.search",
+                    "reason": "先确认是否已有可复用案件，再决定新建/更新",
+                },
+                {
+                    "tool": "case.list",
+                    "reason": "缺少检索键时先列出现有案件，避免盲目创建",
+                },
+            ],
+        }
+    if tool_name == "case.link-alert-batch":
+        return {
+            "required_fields": ["case_id", "alert_id", "confidence", "reason"],
+            "example_payload": {
+                "items": [
+                    {
+                        "case_id": "case_demo_001",
+                        "alert_id": "alt_demo_001",
+                        "confidence": 0.85,
+                        "reason": "same asset + stage continuity",
+                    }
+                ]
+            },
+            "recommended_next_actions": [
+                {
+                    "tool": "case.search",
+                    "reason": "先定位最匹配案件，避免误关联",
+                },
+                {
+                    "tool": "case.explain-link",
+                    "reason": "先生成关联解释，再执行批量关联",
+                },
+            ],
+        }
+    if tool_name == "assessment.upsert-batch":
+        return {
+            "required_fields": [
+                "entity_type",
+                "entity_key",
+                "risk_level",
+                "assessment_confidence",
+                "verdict",
+                "reason_summary",
+            ],
+            "example_payload": {
+                "items": [
+                    {
+                        "entity_type": "ip",
+                        "entity_key": "198.51.100.23",
+                        "risk_level": "high",
+                        "assessment_confidence": 0.8,
+                        "verdict": "attacker",
+                        "reason_summary": "webshell exploitation chain continuity",
+                    }
+                ]
+            },
+            "recommended_next_actions": [
+                {
+                    "tool": "alert.detail-batch",
+                    "reason": "补齐支持证据后再写评估",
+                }
+            ],
+        }
+    if tool_name == "actor.case-link-batch":
+        return {
+            "required_fields": ["case_actor_id", "target_type", "target_id", "link_confidence", "link_reason"],
+            "example_payload": {
+                "items": [
+                    {
+                        "case_actor_id": "act_demo_001",
+                        "target_type": "alert",
+                        "target_id": "alt_demo_001",
+                        "link_confidence": 0.8,
+                        "link_reason": "same actor behavior continuation",
+                    }
+                ]
+            },
+            "recommended_next_actions": [
+                {
+                    "tool": "actor.case-find-candidates",
+                    "reason": "先找候选 actor，再执行链接",
+                }
+            ],
+        }
+    if tool_name == "actor.case-add-observation-batch":
+        return {
+            "required_fields": [
+                "case_actor_id",
+                "observation_type",
+                "observation_key",
+                "observation_value",
+                "confidence",
+            ],
+            "example_payload": {
+                "items": [
+                    {
+                        "case_actor_id": "act_demo_001",
+                        "observation_type": "src_ip",
+                        "observation_key": "198.51.100.23",
+                        "observation_value": "198.51.100.23",
+                        "confidence": 0.8,
+                    }
+                ]
+            },
+            "recommended_next_actions": [
+                {
+                    "tool": "actor.case-get",
+                    "reason": "确认 actor 已存在后再补充观测",
+                }
+            ],
+        }
+    return None
 
 
 def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, source: str = "unknown") -> dict:
@@ -481,38 +576,19 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
             result = TOOL_HANDLERS[tool_name](conn, payload)
         except ValidationError as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
-            if _is_soft_noop_batch_validation(tool_name, payload, exc, source=source):
-                noop_result = {
-                    "ok": True,
-                    "summary": "empty batch payload skipped",
-                    "data": {"tool": tool_name, "skipped": True, "reason": "empty_batch_payload"},
-                    "warnings": ["empty_batch_payload_skipped"],
-                    "refs": {},
-                    "page": {"next_cursor": None, "has_more": False},
-                    "meta": {},
-                }
-                finalize_mcp_auto_run_after_tool(
-                    conn,
-                    source=source,
-                    run_id=run_id,
-                    tool_name=tool_name,
-                    result=noop_result,
-                )
-                insert_tool_call_log(
-                    conn,
-                    source=source,
-                    tool_name=tool_name,
-                    payload=payload,
-                    result=noop_result,
-                    latency_ms=latency_ms,
-                )
-                conn.commit()
-                return noop_result
+            guidance = _batch_payload_guidance(tool_name)
+            warnings = ["payload_validation_error"]
+            if guidance is not None:
+                warnings.extend(["batch_items_required", "tool_schema_guidance"])
             validation_result = {
                 "ok": False,
                 "summary": _validation_error_summary(exc),
-                "data": {"tool": tool_name, "validation_errors": exc.errors()},
-                "warnings": ["payload_validation_error"],
+                "data": {
+                    "tool": tool_name,
+                    "validation_errors": exc.errors(),
+                    "schema_guidance": guidance,
+                },
+                "warnings": warnings,
                 "refs": {},
                 "page": {"next_cursor": None, "has_more": False},
                 "meta": {},

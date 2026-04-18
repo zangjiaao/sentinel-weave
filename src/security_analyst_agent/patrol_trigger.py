@@ -74,6 +74,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _load_pending_event_ids(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         """
@@ -389,15 +401,21 @@ def trigger_patrol_from_ingest(
     )
     conn.commit()
 
+    normalized_mode = trigger_mode.strip().lower()
     status = "failed"
     detail = "unknown_failure"
+    usage_model: str | None = None
+    usage_turns: int | None = None
+    usage_tool_calls: int | None = None
+    usage_input_tokens: int | None = None
+    usage_output_tokens: int | None = None
+    usage_cached_input_tokens: int | None = None
     finished_at = _now_iso()
     try:
         if dry_run:
             status = "dry_run_success"
             detail = "dry run completed without hermes commands"
         else:
-            normalized_mode = trigger_mode.strip().lower()
             env: dict[str, str] | None = None
             if normalized_mode in {"chat", "cron"}:
                 patrol_runtime_home = hermes_home or DEFAULT_HERMES_PATROL_HOME
@@ -605,6 +623,12 @@ def trigger_patrol_from_ingest(
                         tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
                     )
                 status = openai_result.status
+                usage_model = openai_model
+                usage_turns = int(openai_result.turns)
+                usage_tool_calls = int(openai_result.tool_calls)
+                usage_input_tokens = int(openai_result.usage_input_tokens)
+                usage_output_tokens = int(openai_result.usage_output_tokens)
+                usage_cached_input_tokens = int(openai_result.usage_cached_input_tokens)
                 detail_parts = [
                     openai_result.detail,
                     _format_openai_usage_suffix(
@@ -703,6 +727,7 @@ def trigger_patrol_from_ingest(
         except Exception as exc:
             detail = f"{detail}; case_convergence_failed={type(exc).__name__}:{exc}"
 
+    finished_at = _now_iso()
     final_event_state = "processed" if status in {"success", "dry_run_success"} else "failed"
     conn.execute(
         f"""
@@ -719,6 +744,89 @@ def trigger_patrol_from_ingest(
         where run_id = ?
         """,
         (status, detail, finished_at, run_id),
+    )
+
+    run_row = conn.execute(
+        """
+        select trigger_source, started_at
+        from patrol_runs
+        where run_id = ?
+        limit 1
+        """,
+        (run_id,),
+    ).fetchone()
+    started_at = str(run_row["started_at"]) if run_row is not None and run_row["started_at"] else finished_at
+    trigger_source = str(run_row["trigger_source"]) if run_row is not None and run_row["trigger_source"] else "unknown"
+    started_dt = _parse_iso_datetime(started_at)
+    finished_dt = _parse_iso_datetime(finished_at)
+    duration_ms = (
+        max(int((finished_dt - started_dt).total_seconds() * 1000), 0)
+        if started_dt is not None and finished_dt is not None
+        else None
+    )
+    if usage_tool_calls is None:
+        usage_tool_calls = int(
+            conn.execute("select count(*) from agent_tool_calls where run_id = ?", (run_id,)).fetchone()[0]
+        )
+    usage_total_tokens = (
+        int(usage_input_tokens or 0)
+        + int(usage_output_tokens or 0)
+        + int(usage_cached_input_tokens or 0)
+    )
+    if usage_input_tokens is None and usage_output_tokens is None and usage_cached_input_tokens is None:
+        usage_total_tokens = None
+    conn.execute(
+        """
+        insert into patrol_run_costs (
+          run_id,
+          trigger_source,
+          trigger_mode,
+          model,
+          status,
+          started_at,
+          finished_at,
+          duration_ms,
+          turns,
+          tool_calls,
+          usage_input_tokens,
+          usage_output_tokens,
+          usage_cached_input_tokens,
+          usage_total_tokens,
+          recorded_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(run_id) do update set
+          trigger_source = excluded.trigger_source,
+          trigger_mode = excluded.trigger_mode,
+          model = excluded.model,
+          status = excluded.status,
+          started_at = excluded.started_at,
+          finished_at = excluded.finished_at,
+          duration_ms = excluded.duration_ms,
+          turns = excluded.turns,
+          tool_calls = excluded.tool_calls,
+          usage_input_tokens = excluded.usage_input_tokens,
+          usage_output_tokens = excluded.usage_output_tokens,
+          usage_cached_input_tokens = excluded.usage_cached_input_tokens,
+          usage_total_tokens = excluded.usage_total_tokens,
+          recorded_at = excluded.recorded_at
+        """,
+        (
+            run_id,
+            trigger_source,
+            normalized_mode if normalized_mode else "unknown",
+            usage_model,
+            status,
+            started_at,
+            finished_at,
+            duration_ms,
+            usage_turns,
+            usage_tool_calls,
+            usage_input_tokens,
+            usage_output_tokens,
+            usage_cached_input_tokens,
+            usage_total_tokens,
+            _now_iso(),
+        ),
     )
     conn.commit()
     conn.close()

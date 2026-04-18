@@ -35,6 +35,7 @@ def _reset_tables(conn: sqlite3.Connection) -> None:
         delete from case_relations;
         delete from case_alert_links;
         delete from patrol_runs;
+        delete from patrol_run_costs;
         delete from alert_ingest_events;
         delete from verify_spike_round_runs;
         delete from spike_round_runs;
