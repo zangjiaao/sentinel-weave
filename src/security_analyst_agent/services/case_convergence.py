@@ -799,6 +799,7 @@ def _load_relation_candidates(conn: sqlite3.Connection) -> dict[tuple[str, str],
           score,
           streak_count,
           status,
+          last_reason,
           supporting_alert_ids_json,
           supporting_evidence_ids_json
         from case_relations
@@ -879,7 +880,18 @@ def _promote_cluster_bridge_relations(
                     relation = relation_map.get(pair_key)
                     if relation is None or relation["status"] == "confirmed":
                         continue
+                    if str(relation.get("last_reason") or "").strip() == "cluster_bridge_promotion":
+                        continue
                     if float(relation["score"]) < _CLUSTER_BRIDGE_PROMOTION_SCORE:
+                        continue
+                    member_context = case_context_by_id.get(member_case_id, {})
+                    shared_assets = set(member_context.get("asset_ids") or set()) & set(
+                        outside_context.get("asset_ids") or set()
+                    )
+                    shared_src_ips = set(member_context.get("src_ips") or set()) & set(
+                        outside_context.get("src_ips") or set()
+                    )
+                    if not shared_assets or not shared_src_ips:
                         continue
                     if best_relation is None or float(relation["score"]) > float(best_relation["score"]):
                         best_relation = relation

@@ -379,6 +379,119 @@ def test_case_convergence_promotes_bridge_candidate_from_confirmed_cluster(tmp_p
     conn.close()
 
 
+def test_case_convergence_does_not_promote_bridge_without_shared_src_ip(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_bridge_guard_a",
+            "title": "bridge guard A",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_bridge_guard_a",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_bridge_guard_b",
+            "title": "bridge guard B",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": "actor_bridge_guard_b",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_bridge_guard_c",
+            "title": "bridge guard C",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "lateral_prep",
+            "primary_actor_id": "actor_bridge_guard_c",
+        },
+        source="cli",
+    )
+
+    for round_idx in range(1, 4):
+        base_ts = f"2026-04-1{round_idx}T13:0{round_idx}:00+08:00"
+        _insert_open_alert_for_case(
+            conn,
+            alert_id=f"alt_bridge_guard_a_r{round_idx}",
+            case_id="case_bridge_guard_a",
+            occurred_at=base_ts,
+            stage="persistence",
+            src_ip="198.51.100.23",
+            asset_id="asset_api_prod",
+        )
+        _insert_open_alert_for_case(
+            conn,
+            alert_id=f"alt_bridge_guard_b_r{round_idx}",
+            case_id="case_bridge_guard_b",
+            occurred_at=base_ts,
+            stage="command_execution",
+            src_ip="198.51.100.77",
+            asset_id="asset_api_prod",
+        )
+        if round_idx >= 2:
+            _insert_open_alert_for_case(
+                conn,
+                alert_id=f"alt_bridge_guard_c_r{round_idx}",
+                case_id="case_bridge_guard_c",
+                occurred_at=base_ts,
+                stage="lateral_prep",
+                src_ip="203.0.113.89",
+                severity="medium",
+                asset_id="asset_api_prod",
+            )
+        conn.commit()
+
+        dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 100}, source="mcp")
+        open_alert_ids = [
+            row["alert_id"] for row in conn.execute("select alert_id from alerts where status in ('new', 'open')")
+        ]
+        dispatch_tool(conn, "alert.ack", {"alert_ids": open_alert_ids, "status": "triaged"}, source="mcp")
+
+    relation = conn.execute(
+        """
+        select score, streak_count, status, last_reason
+        from case_relations
+        where left_case_id = ? and right_case_id = ?
+        """,
+        ("case_bridge_guard_b", "case_bridge_guard_c"),
+    ).fetchone()
+    assert relation is not None
+    assert relation["score"] >= 0.82
+    assert relation["status"] != "confirmed"
+    assert relation["last_reason"] != "cluster_bridge_promotion"
+
+    case_c = conn.execute(
+        """
+        select status, merge_state, canonical_case_id, merged_into_case_id
+        from cases
+        where case_id = ?
+        """,
+        ("case_bridge_guard_c",),
+    ).fetchone()
+    assert case_c is not None
+    assert case_c["merge_state"] != "merged"
+    assert case_c["status"] == "open"
+    conn.close()
+
+
 def test_case_convergence_fast_tracks_obvious_reactivation_chain(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
