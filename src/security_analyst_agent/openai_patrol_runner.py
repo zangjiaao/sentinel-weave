@@ -193,6 +193,63 @@ def _extract_usage_snapshot(response: Any) -> dict[str, int]:
     }
 
 
+_REPEATED_INVALID_BLOCK_WARNINGS = {
+    "payload_validation_error",
+    "detail_batch_requires_fetch_context",
+    "detail_batch_alert_id_out_of_fetch_scope",
+    "batch_items_required",
+}
+
+
+def _tool_payload_signature(tool_name: str, payload: dict[str, Any]) -> str:
+    try:
+        canonical_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        canonical_payload = str(payload)
+    return f"{tool_name}::{canonical_payload}"
+
+
+def _should_block_repeated_invalid_call(tool_result: dict[str, Any]) -> bool:
+    if tool_result.get("ok") is True:
+        return False
+    warnings = tool_result.get("warnings")
+    if not isinstance(warnings, list):
+        return False
+    warning_set = {str(item) for item in warnings}
+    return len(warning_set & _REPEATED_INVALID_BLOCK_WARNINGS) > 0
+
+
+def _duplicate_invalid_block_result(tool_name: str) -> dict[str, Any]:
+    recommended_next_actions: list[dict[str, str]] = []
+    if tool_name == "alert.detail-batch":
+        recommended_next_actions = [
+            {
+                "tool": "alert.fetch",
+                "reason": "先获取本轮可用 alert_id，再调用 alert.detail-batch",
+            }
+        ]
+    elif tool_name in {"case.upsert-batch", "assessment.upsert-batch", "case.link-alert-batch"}:
+        recommended_next_actions = [
+            {
+                "tool": tool_name,
+                "reason": "修正 payload，确保 items 至少包含 1 条合法记录后再调用",
+            }
+        ]
+    return {
+        "ok": False,
+        "summary": "重复无效调用已拦截：请先按上一次错误提示修正参数后再重试",
+        "data": {
+            "tool": tool_name,
+            "blocked_reason": "duplicate_invalid_tool_call",
+            "recommended_next_actions": recommended_next_actions,
+        },
+        "warnings": ["duplicate_invalid_tool_call_blocked", "follow_previous_validation_guidance"],
+        "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {},
+    }
+
+
 def _as_float(value: Any, default: float) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -542,6 +599,7 @@ def run_openai_patrol(
     usage_input_tokens = 0
     usage_output_tokens = 0
     usage_cached_input_tokens = 0
+    invalid_tool_signatures: set[str] = set()
 
     for _ in range(max_turns):
         turn_count += 1
@@ -613,8 +671,14 @@ def run_openai_patrol(
                 except json.JSONDecodeError:
                     payload = {}
                 payload = _normalize_payload_for_tool(backend_tool_name, payload)
-                tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
-                tool_call_count += 1
+                payload_signature = _tool_payload_signature(backend_tool_name, payload)
+                if payload_signature in invalid_tool_signatures:
+                    tool_result = _duplicate_invalid_block_result(backend_tool_name)
+                else:
+                    tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
+                    tool_call_count += 1
+                    if _should_block_repeated_invalid_call(tool_result):
+                        invalid_tool_signatures.add(payload_signature)
 
             function_outputs.append(
                 {

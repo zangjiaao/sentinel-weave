@@ -70,7 +70,7 @@ CORE_TOOL_NAMES = (
 
 TOOL_DESCRIPTIONS = {
     "alert.fetch": "拉取待研判告警摘要队列。",
-    "alert.detail-batch": "批量读取多条告警详情与关键证据摘要。",
+    "alert.detail-batch": "批量读取多条告警详情与关键证据摘要（alert_ids 必须来自本轮 alert.fetch 返回）。",
     "alert.ack": "将已处理告警标记为 triaged/closed，避免重复出队。",
     "asset.search": "按指标搜索资产并返回资产上下文。",
     "actor.case-list": "列出某个案件下的案内攻击者画像。",
@@ -84,12 +84,12 @@ TOOL_DESCRIPTIONS = {
     "case.search": "按 src_ip/asset/stage/关键词检索候选案件（至少提供一个检索键），辅助复用既有案件。",
     "case.timeline": "读取案件时间线与攻击阶段演进。",
     "case.explain-link": "解释事件与案件之间的关联依据。",
-    "case.upsert-batch": "批量创建或更新案件主记录。",
+    "case.upsert-batch": "批量创建或更新案件主记录（items 不能为空；单案也传一条 item）。",
     "case.link-alert-batch": "批量将告警关联到指定案件并记录关联理由。",
     "case.update-risk": "更新案件风险等级、阶段与状态。",
     "evidence.upsert": "写入或更新案件证据记录。",
     "timeline.upsert": "写入或更新时间线节点，沉淀攻击过程。",
-    "assessment.upsert-batch": "批量写入实体级风险评估（如攻击IP、失陷主机）。",
+    "assessment.upsert-batch": "批量写入实体级风险评估（items 不能为空；单条也传一条 item）。",
     "intel.lookup": "查询缓存化威胁情报用于补证。",
     "notify.send": "触发模拟通知发送并写入通知出站记录。",
     "notify.preview": "生成通知预览草稿，不进行实际发送。",
@@ -149,11 +149,21 @@ TOOL_REQUEST_MODELS: dict[str, type[BaseModel]] = {
 }
 
 PROMPT_EXTRA_GUIDANCE: dict[str, list[str]] = {
-    "alert.detail-batch": ["`alert_ids` 必须来自本次巡检内 `alert.fetch` 已返回的真实 ID，不要猜测或拼接。"],
+    "alert.detail-batch": [
+        "`alert_ids` 必须来自本次巡检内 `alert.fetch` 已返回的真实 ID，不要猜测或拼接。",
+        "同一轮中若收到 `detail_batch_requires_fetch_context`，先执行 `alert.fetch`，不要原样重复调用。",
+    ],
     "alert.ack": ["`status` 仅支持 `triaged` 或 `closed`。"],
     "case.explain-link": ["当前仅支持 `target_type=alert`。"],
     "case.update-risk": ["默认阻止阶段回退；仅在确有需要时传入 `force_downgrade=true`。"],
     "assessment.upsert-batch": ["`items` 不能为空；单条写入也要传一条 item。"],
+    "case.upsert-batch": [
+        "`items` 不能为空；单案创建/刷新也要传一条 item。",
+        "若上次返回 payload 校验错误，先按 schema 修正参数，不要原样重试。",
+    ],
+    "case.link-alert-batch": [
+        "`items` 不能为空；请先确认 case_id 与 alert_id 后再批量关联。",
+    ],
 }
 
 

@@ -163,3 +163,62 @@ def test_run_openai_patrol_keeps_tools_on_every_turn_and_collects_usage(tmp_path
     assert fake_client.responses.calls[1]["previous_response_id"] == "resp_runner_001"
     assert "instructions" in fake_client.responses.calls[0]
     assert "instructions" not in fake_client.responses.calls[1]
+
+
+def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_invalid_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_detail_batch",
+                        "call_id": "call_invalid_001",
+                        "arguments": '{"alert_ids":["alt_day1_scan_01"]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_invalid_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_detail_batch",
+                        "call_id": "call_invalid_002",
+                        "arguments": '{"alert_ids":["alt_day1_scan_01"]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_invalid_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    recorded_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.detail-batch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.turns == 3
+    assert result.tool_calls == 1
+    assert recorded_calls == 1
