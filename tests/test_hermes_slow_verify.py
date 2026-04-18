@@ -12,6 +12,7 @@ from security_analyst_agent.hermes_slow_verify import (
     _is_missing_header_error,
     _is_retryable_round_db_error,
     _run_chat_with_continue_fallback,
+    _verify_round_db_state,
     _verify_final_db_state,
     _verify_chat_output,
     build_chat_command,
@@ -164,6 +165,61 @@ def test_verify_chat_output_accepts_silent_marker_with_wrapper_text(tmp_path: Pa
     _verify_chat_output(chat_stdout=wrapped_output, round_spec=round_spec, artifact_dir=tmp_path)
 
 
+def test_verify_round_db_state_accepts_reused_patrol_run_referenced_by_tool_calls(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_round_reuse.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_reuse_001",
+            "mcp_auto",
+            "running",
+            "reuse run",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_reuse_round_001",
+            "2026-04-14T10:05:00+08:00",
+            "run_reuse_001",
+            "mcp",
+            "alert.fetch",
+            "{\"status\":[\"new\",\"open\"],\"limit\":5}",
+            1,
+            "ok",
+            "{\"ok\":true,\"summary\":\"ok\",\"data\":{\"mode\":\"alerts\",\"alerts\":[]}}",
+            11,
+        ),
+    )
+    conn.commit()
+
+    summary = _verify_round_db_state(
+        conn,
+        round_spec={
+            "round_id": "round_reuse",
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+        },
+        started_at="2026-04-14T10:04:00+08:00",
+    )
+    assert summary["tool_calls_count"] == 1
+    assert summary["patrol_runs"][0]["run_id"] == "run_reuse_001"
+    conn.close()
+
+
 def test_load_integration_manifest_requires_zero_failed_tools_and_compromised_host() -> None:
     manifest = load_integration_manifest("hermes-slow-integration")
 
@@ -266,6 +322,115 @@ def test_verify_final_db_state_fails_when_failed_tool_calls_exist(tmp_path: Path
     }
     with pytest.raises(HermesSlowVerificationError, match="failed tool calls"):
         _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    conn.close()
+
+
+def test_verify_final_db_state_allows_reused_single_patrol_run_when_rounds_satisfied(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_reused_run_ok.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_reused_001",
+            "mcp_auto",
+            "running",
+            "auto_started_by_mcp_alert_fetch",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_reused_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_reused_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 3,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "max_failed_tool_calls": 0,
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=3)
+    assert len(summary["patrol_runs"]) == 1
+    conn.close()
+
+
+def test_verify_final_db_state_can_disable_reused_single_patrol_run_fallback(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_reused_run_fail.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_reused_fail_001",
+            "mcp_auto",
+            "running",
+            "auto_started_by_mcp_alert_fetch",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_reused_fail_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_reused_fail_001",
+            "mcp",
+            "alert.fetch",
+            "{}",
+            1,
+            "ok",
+            "{}",
+            10,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 3,
+            "allow_reused_patrol_run": False,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+        }
+    }
+    with pytest.raises(HermesSlowVerificationError, match="expected at least 3 mcp_auto patrol runs"):
+        _verify_final_db_state(conn, manifest=manifest, round_count=3)
     conn.close()
 
 

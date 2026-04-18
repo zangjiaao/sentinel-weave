@@ -23,4 +23,6 @@ def test_cli_exposes_actor_case_commands() -> None:
     assert "actor.case-link-batch" in result.output
     assert "case.upsert-batch" in result.output
     assert "case.link-alert-batch" in result.output
+    assert "case.list" in result.output
+    assert "case.search" in result.output
     assert "assessment.upsert-batch" in result.output

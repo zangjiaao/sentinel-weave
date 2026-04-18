@@ -200,6 +200,22 @@ def case_get_command(
     _run_tool("case.get", db_path, payload)
 
 
+@app.command("case.list")
+def case_list_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("case.list", db_path, payload)
+
+
+@app.command("case.search")
+def case_search_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("case.search", db_path, payload)
+
+
 @app.command("case.timeline")
 def case_timeline_command(
     db_path: Path = typer.Option(..., "--db-path"),

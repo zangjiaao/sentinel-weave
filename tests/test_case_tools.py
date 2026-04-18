@@ -1,8 +1,10 @@
 from security_analyst_agent.tools.case_tools import (
     case_explain_link,
     case_get,
+    case_list,
     case_link_alert,
     case_link_alert_batch,
+    case_search,
     case_timeline,
     case_update_risk,
     case_upsert_batch,
@@ -36,6 +38,31 @@ def test_case_get_returns_actor_and_target_summary(db_conn) -> None:
         ("case_demo_001",),
     ).fetchone()
     assert digest_row is not None
+
+
+def test_case_list_returns_open_case_summaries(db_conn) -> None:
+    result = case_list(db_conn, {"status": ["open"], "limit": 10})
+    assert result["ok"] is True
+    assert len(result["data"]["cases"]) >= 1
+    first_case = result["data"]["cases"][0]
+    assert "case_id" in first_case
+    assert "active_alert_count" in first_case
+    assert "distinct_attack_stage_count" in first_case
+
+
+def test_case_search_finds_case_by_src_and_stage(db_conn) -> None:
+    result = case_search(
+        db_conn,
+        {
+            "src_ip": "198.51.100.23",
+            "asset_id": "asset_api_prod",
+            "attack_stage": "persistence",
+            "limit": 10,
+        },
+    )
+    assert result["ok"] is True
+    assert len(result["data"]["cases"]) >= 1
+    assert any(item["case_id"] == "case_demo_001" for item in result["data"]["cases"])
 
 
 def test_case_timeline_returns_ordered_attack_steps(db_conn) -> None:

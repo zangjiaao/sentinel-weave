@@ -7,6 +7,8 @@ from security_analyst_agent.repositories.cases import (
     load_alert,
     load_case_alert_ids,
     load_case,
+    list_cases,
+    search_cases,
     resolve_canonical_case_id,
     load_supporting_evidence_ids_for_alert,
     load_case_timeline,
@@ -24,8 +26,10 @@ from security_analyst_agent.repositories.context_memory import build_case_digest
 from security_analyst_agent.schemas.case_tools import (
     CaseExplainLinkRequest,
     CaseGetRequest,
+    CaseListRequest,
     CaseLinkAlertBatchRequest,
     CaseLinkAlertRequest,
+    CaseSearchRequest,
     CaseTimelineRequest,
     CaseUpsertBatchRequest,
     CaseUpdateRiskRequest,
@@ -107,6 +111,52 @@ def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
         data={"case": case_with_memory},
         refs={"case_ids": [effective_case_id]},
         warnings=warnings,
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def case_list(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = CaseListRequest.model_validate(payload)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    cases = list_cases(
+        conn,
+        statuses=request.status,
+        min_severity=request.min_severity,
+        current_stage=request.current_stage,
+        include_merged=request.include_merged,
+        keyword=request.keyword,
+        limit=request.limit,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    response = ToolResponse(
+        ok=True,
+        summary=f"返回案件摘要 {len(cases)} 条",
+        data={"cases": cases},
+        refs={"case_ids": [item["case_id"] for item in cases]},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def case_search(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = CaseSearchRequest.model_validate(payload)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    cases = search_cases(
+        conn,
+        statuses=request.status,
+        min_severity=request.min_severity,
+        src_ip=request.src_ip,
+        asset_id=request.asset_id,
+        attack_stage=request.attack_stage,
+        include_merged=request.include_merged,
+        keyword=request.keyword,
+        limit=request.limit,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    response = ToolResponse(
+        ok=True,
+        summary=f"搜索候选案件 {len(cases)} 条",
+        data={"cases": cases},
+        refs={"case_ids": [item["case_id"] for item in cases]},
     )
     return response.model_dump(mode="json", by_alias=True)
 

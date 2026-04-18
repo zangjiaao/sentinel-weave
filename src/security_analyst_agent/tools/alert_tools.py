@@ -267,10 +267,35 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             warnings.append("ack_recommendations_available")
         if detail_fanout_guardrail_applied:
             warnings.append("detail_fanout_guardrail_applied")
-        summary = (
-            f"返回 {len(clusters)} 个告警聚合簇（当前偏移 {cluster_offset}，"
-            f"总簇 {total_cluster_candidates or 0}，覆盖 {covered_alert_count} 条告警）"
-        )
+
+        should_fallback_to_alerts = cluster_offset == 0 and len(clusters) == 0 and (total_candidates or 0) > 0
+        if should_fallback_to_alerts:
+            fallback_alerts = fetch_alerts(
+                conn,
+                request.limit,
+                request.status,
+                request.min_severity,
+                analysis_cutoff_at=analysis_cutoff_at,
+            )
+            if fallback_alerts:
+                alerts = fallback_alerts
+                refs_alert_ids = [item["alert_id"] for item in fallback_alerts]
+                effective_mode = "alerts"
+                warnings.append("clusters_empty_fallback_to_alerts")
+                summary = (
+                    f"聚类结果为空，回退返回 {len(fallback_alerts)} 条告警摘要"
+                    f"（候选告警 {total_candidates or 0}）"
+                )
+            else:
+                summary = (
+                    f"返回 {len(clusters)} 个告警聚合簇（当前偏移 {cluster_offset}，"
+                    f"总簇 {total_cluster_candidates or 0}，覆盖 {covered_alert_count} 条告警）"
+                )
+        else:
+            summary = (
+                f"返回 {len(clusters)} 个告警聚合簇（当前偏移 {cluster_offset}，"
+                f"总簇 {total_cluster_candidates or 0}，覆盖 {covered_alert_count} 条告警）"
+            )
     else:
         alerts = fetch_alerts(
             conn,

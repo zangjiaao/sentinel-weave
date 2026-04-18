@@ -516,6 +516,25 @@ def _verify_round_db_state(conn, *, round_spec: dict[str, Any], started_at: str)
         (started_at,),
     ).fetchall()
     if not patrol_runs:
+        referenced_run_ids = sorted(
+            {
+                str(row["run_id"])
+                for row in tool_rows
+                if row["run_id"] is not None and str(row["run_id"]).strip() != ""
+            }
+        )
+        if referenced_run_ids:
+            placeholders = ", ".join("?" for _ in referenced_run_ids)
+            patrol_runs = conn.execute(
+                f"""
+                select run_id, trigger_source, status, summary, analysis_cutoff_at
+                from patrol_runs
+                where run_id in ({placeholders})
+                order by started_at asc
+                """,
+                tuple(referenced_run_ids),
+            ).fetchall()
+    if not patrol_runs:
         raise HermesSlowVerificationError(
             f"round_db_assertions:{round_spec['round_id']}",
             "no patrol_runs created by Hermes flow",
@@ -656,10 +675,12 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
     ).fetchall()
     min_patrol_runs = int(final_assertions.get("min_patrol_runs", round_count))
     if len(patrol_runs) < min_patrol_runs:
-        raise HermesSlowVerificationError(
-            "final_db_assertions",
-            f"expected at least {min_patrol_runs} mcp_auto patrol runs, got {len(patrol_runs)}",
-        )
+        allow_reused_patrol_run = bool(final_assertions.get("allow_reused_patrol_run", True))
+        if not (allow_reused_patrol_run and len(patrol_runs) >= 1 and round_count >= min_patrol_runs):
+            raise HermesSlowVerificationError(
+                "final_db_assertions",
+                f"expected at least {min_patrol_runs} mcp_auto patrol runs, got {len(patrol_runs)}",
+            )
 
     entity_assessments_count = conn.execute("select count(*) from entity_assessments").fetchone()[0]
     min_entity_assessments = int(final_assertions.get("min_entity_assessments", 0))

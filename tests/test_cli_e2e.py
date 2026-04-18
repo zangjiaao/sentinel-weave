@@ -30,6 +30,8 @@ def test_cli_all_core_tools_return_unified_shape(tmp_path) -> None:
         ("alert.ack", {"alert_ids": ["alt_day1_scan_01"], "status": "triaged"}),
         ("asset.search", {"indicators": ["203.0.113.10"]}),
         ("case.get", {"case_id": "case_demo_001"}),
+        ("case.list", {"status": ["open"], "limit": 5}),
+        ("case.search", {"src_ip": "198.51.100.23", "limit": 5}),
         ("case.timeline", {"case_id": "case_demo_001", "include_evidence": True}),
         ("case.explain-link", {"case_id": "case_demo_001", "target_type": "alert", "target_id": "alt_day3_shell_01"}),
         (

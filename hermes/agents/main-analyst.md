@@ -16,6 +16,7 @@
 - 告警详情统一使用 `alert.detail-batch`（单条详情也传单元素数组）
 - `alert.detail-batch` 的 `alert_ids` 必须来自本次巡检中 `alert.fetch` 返回结果，不要猜测或拼接不存在的告警 ID
 - `case.get` 只使用工具返回的真实 `case_id`，不要猜测或拼接不存在的 `case_id`
+- 不确定 `case_id` 时优先用 `case.list` 或 `case.search` 找候选案件，再用 `case.get` 深读
 - 对已处理告警调用 `alert.ack` 出队，避免重复巡检
 - 确认资产与归属时调用 `asset.search`
 - 理解案件过程时优先调用 `case.get` 与 `case.timeline`

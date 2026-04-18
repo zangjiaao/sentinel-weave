@@ -3,6 +3,15 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+_CASE_SEVERITY_RANK_SQL = (
+    "case cases.overall_severity "
+    "when 'low' then 1 "
+    "when 'medium' then 2 "
+    "when 'high' then 3 "
+    "when 'critical' then 4 "
+    "else 0 end"
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -50,6 +59,175 @@ def resolve_canonical_case_id(conn: sqlite3.Connection, case_id: str) -> str:
             return current_case_id
         current_case_id = canonical_case_id
     return case_id
+
+
+def list_cases(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None,
+    current_stage: str | None,
+    include_merged: bool,
+    keyword: str | None,
+    limit: int,
+    analysis_cutoff_at: str | None = None,
+) -> list[dict]:
+    conditions: list[str] = []
+    params: list[object] = []
+
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        conditions.append(f"cases.status in ({placeholders})")
+        params.extend(statuses)
+
+    if min_severity:
+        rank_by_severity = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+        min_rank = rank_by_severity.get(min_severity.lower(), 1)
+        conditions.append(f"{_CASE_SEVERITY_RANK_SQL} >= ?")
+        params.append(min_rank)
+
+    if current_stage:
+        conditions.append("lower(cases.current_stage) = lower(?)")
+        params.append(current_stage)
+
+    if not include_merged:
+        conditions.append("coalesce(cases.merge_state, 'standalone') <> 'merged'")
+
+    if keyword:
+        conditions.append(
+            "(cases.case_id like ? or cases.title like ? or coalesce(cases.primary_actor_id, '') like ?)"
+        )
+        keyword_like = f"%{keyword}%"
+        params.extend([keyword_like, keyword_like, keyword_like])
+
+    where_clause = f"where {' and '.join(conditions)}" if conditions else ""
+    rows = conn.execute(
+        f"""
+        select
+          cases.case_id,
+          cases.title,
+          cases.status,
+          cases.overall_severity,
+          cases.current_stage,
+          cases.primary_actor_id,
+          cases.canonical_case_id,
+          cases.merged_into_case_id,
+          cases.merge_state,
+          cases.merge_updated_at,
+          coalesce(case_stats.active_alert_count, 0) as active_alert_count,
+          case_stats.last_alert_at,
+          coalesce(case_stats.distinct_attack_stage_count, 0) as distinct_attack_stage_count
+        from cases
+        left join (
+          select
+            case_alert_links.case_id,
+            count(*) as active_alert_count,
+            max(alerts.occurred_at) as last_alert_at,
+            count(distinct lower(alerts.attack_stage)) as distinct_attack_stage_count
+          from case_alert_links
+          join alerts on alerts.alert_id = case_alert_links.alert_id
+          where case_alert_links.is_active = 1
+            and (? is null or alerts.occurred_at <= ?)
+          group by case_alert_links.case_id
+        ) as case_stats on case_stats.case_id = cases.case_id
+        {where_clause}
+        order by
+          {_CASE_SEVERITY_RANK_SQL} desc,
+          coalesce(case_stats.active_alert_count, 0) desc,
+          coalesce(case_stats.last_alert_at, '') desc,
+          cases.case_id asc
+        limit ?
+        """,
+        (analysis_cutoff_at, analysis_cutoff_at, *params, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def search_cases(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None,
+    src_ip: str | None,
+    asset_id: str | None,
+    attack_stage: str | None,
+    include_merged: bool,
+    keyword: str | None,
+    limit: int,
+    analysis_cutoff_at: str | None = None,
+) -> list[dict]:
+    conditions: list[str] = ["case_alert_links.is_active = 1"]
+    params: list[object] = []
+
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        conditions.append(f"cases.status in ({placeholders})")
+        params.extend(statuses)
+
+    if min_severity:
+        rank_by_severity = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+        min_rank = rank_by_severity.get(min_severity.lower(), 1)
+        conditions.append(f"{_CASE_SEVERITY_RANK_SQL} >= ?")
+        params.append(min_rank)
+
+    if not include_merged:
+        conditions.append("coalesce(cases.merge_state, 'standalone') <> 'merged'")
+
+    if src_ip:
+        conditions.append("alerts.src_ip = ?")
+        params.append(src_ip)
+
+    if asset_id:
+        conditions.append("alerts.asset_id = ?")
+        params.append(asset_id)
+
+    if attack_stage:
+        conditions.append("lower(alerts.attack_stage) = lower(?)")
+        params.append(attack_stage)
+
+    if keyword:
+        keyword_like = f"%{keyword}%"
+        conditions.append(
+            "("
+            "cases.case_id like ? or cases.title like ? or coalesce(cases.primary_actor_id, '') like ? "
+            "or coalesce(alerts.src_ip, '') like ? or coalesce(alerts.asset_id, '') like ?"
+            ")"
+        )
+        params.extend([keyword_like, keyword_like, keyword_like, keyword_like, keyword_like])
+
+    where_clause = f"where {' and '.join(conditions)}"
+    rows = conn.execute(
+        f"""
+        select
+          cases.case_id,
+          cases.title,
+          cases.status,
+          cases.overall_severity,
+          cases.current_stage,
+          cases.primary_actor_id,
+          cases.canonical_case_id,
+          cases.merged_into_case_id,
+          cases.merge_state,
+          cases.merge_updated_at,
+          count(*) as matched_alert_count,
+          max(alerts.occurred_at) as last_matched_alert_at,
+          count(distinct lower(alerts.attack_stage)) as matched_stage_count
+        from cases
+        join case_alert_links on case_alert_links.case_id = cases.case_id
+        join alerts on alerts.alert_id = case_alert_links.alert_id
+        {where_clause}
+          and (? is null or alerts.occurred_at <= ?)
+        group by cases.case_id
+        order by
+          matched_alert_count desc,
+          last_matched_alert_at desc,
+          {_CASE_SEVERITY_RANK_SQL} desc,
+          cases.case_id asc
+        limit ?
+        """,
+        (*params, analysis_cutoff_at, analysis_cutoff_at, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def reselect_cluster_canonical_case(conn: sqlite3.Connection, case_ids: list[str], run_id: str) -> str:

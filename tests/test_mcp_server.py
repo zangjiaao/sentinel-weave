@@ -18,6 +18,8 @@ def test_mcp_tool_names_match_core_contract() -> None:
         "actor.case-add-observation-batch",
         "actor.case-link-batch",
         "case.get",
+        "case.list",
+        "case.search",
         "case.timeline",
         "case.explain-link",
         "case.upsert-batch",

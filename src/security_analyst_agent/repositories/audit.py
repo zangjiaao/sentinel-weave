@@ -619,8 +619,24 @@ def finalize_mcp_auto_run_after_tool(
         return
 
     if tool_name == "alert.fetch":
-        alerts = result.get("data", {}).get("alerts")
-        if isinstance(alerts, list) and len(alerts) == 0:
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return
+        total_candidates = data.get("total_candidates")
+        alerts = data.get("alerts")
+        clusters = data.get("clusters")
+        omitted_alert_count = data.get("omitted_alert_count")
+
+        is_queue_empty = False
+        if isinstance(total_candidates, int):
+            is_queue_empty = total_candidates == 0
+        else:
+            alert_count = len(alerts) if isinstance(alerts, list) else 0
+            cluster_count = len(clusters) if isinstance(clusters, list) else 0
+            omitted_count = int(omitted_alert_count) if isinstance(omitted_alert_count, int | float) else 0
+            is_queue_empty = alert_count == 0 and cluster_count == 0 and omitted_count == 0
+
+        if is_queue_empty:
             _finish_auto_patrol_run(conn, run_id=run_id, summary="auto_closed_empty_fetch")
         return
 

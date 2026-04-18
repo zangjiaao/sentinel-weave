@@ -226,6 +226,49 @@ def test_alert_fetch_auto_switches_to_clusters_when_volume_exceeds_threshold(db_
     assert len(result["data"]["clusters"]) >= 1
 
 
+def test_alert_fetch_clusters_fallbacks_to_alerts_when_no_cluster_candidates(db_conn) -> None:
+    rows = []
+    for index in range(12):
+        rows.append(
+            (
+                f"alt_cluster_fallback_noise_{index}",
+                f"2026-04-13T11:{index:02d}:00+08:00",
+                "低危单点扫描",
+                "new",
+                "low",
+                "recon",
+                f"198.51.100.{100 + index}",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    result = alert_fetch(
+        db_conn,
+        {
+            "mode": "auto",
+            "status": ["new"],
+            "limit": 5,
+            "auto_cluster_threshold": 8,
+            "cluster_min_count": 2,
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["mode"] == "alerts"
+    assert len(result["data"]["alerts"]) == 5
+    assert result["data"]["clusters"] == []
+    assert "clusters_empty_fallback_to_alerts" in result["warnings"]
+
+
 def test_alert_fetch_clusters_supports_backlog_cursor_and_priority_buckets(db_conn) -> None:
     rows = []
     for index in range(3):

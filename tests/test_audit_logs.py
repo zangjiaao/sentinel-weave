@@ -545,6 +545,61 @@ def test_mcp_auto_run_closes_immediately_on_empty_fetch(tmp_path) -> None:
     conn.close()
 
 
+def test_mcp_auto_run_keeps_running_when_cluster_fetch_falls_back_to_alerts(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("delete from alerts")
+    rows = []
+    for index in range(12):
+        rows.append(
+            (
+                f"alt_run_cluster_fallback_{index}",
+                f"2026-04-13T11:{index:02d}:00+08:00",
+                "低危单点扫描",
+                "new",
+                "low",
+                "recon",
+                f"198.51.100.{120 + index}",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+
+    fetch_result = dispatch_tool(
+        conn,
+        "alert.fetch",
+        {"mode": "auto", "status": ["new", "open"], "limit": 5, "auto_cluster_threshold": 8},
+        source="mcp",
+    )
+    assert fetch_result["ok"] is True
+    assert fetch_result["data"]["mode"] == "alerts"
+    assert "clusters_empty_fallback_to_alerts" in fetch_result["warnings"]
+
+    run_row = conn.execute(
+        """
+        select trigger_source, status, finished_at
+        from patrol_runs
+        where trigger_source = 'mcp_auto'
+        order by started_at desc
+        limit 1
+        """
+    ).fetchone()
+    assert run_row is not None
+    assert run_row["status"] == "running"
+    assert run_row["finished_at"] is None
+    conn.close()
+
+
 def test_mcp_alert_fetch_reuses_active_auto_run_without_creating_new_run(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
