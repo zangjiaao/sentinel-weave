@@ -86,6 +86,8 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 ## Analysis Rules
 
 - Prefer cautious, evidence-based language such as `high-confidence`, `likely`, or `supported by current evidence`.
+- 在信息不充分时，不要急于做最终攻击者归因；先把告警归入案件并持续补证。
+- “案件追踪”优先于“画像定性”：先保证 case 链路完整，再做 attacker 结论。
 - If evidence is insufficient, explicitly say what is still unknown and what should be collected next.
 - Keep the uncertainty explicit when source infrastructure changes.
 - Keep `Memory Summary` limited to durable facts that help future patrols.

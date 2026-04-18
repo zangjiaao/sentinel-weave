@@ -353,11 +353,33 @@ def test_trigger_patrol_openai_mode_reuses_previous_response_id(tmp_path) -> Non
         rounds=[
             {
                 "id": "resp_openai_bootstrap",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_bootstrap_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_bootstrap_done",
                 "output_text": "[SILENT]",
                 "output": [{"type": "message", "role": "assistant"}],
             },
             {
                 "id": "resp_openai_resume",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_resume_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_resume_done",
                 "output_text": "[SILENT]",
                 "output": [{"type": "message", "role": "assistant"}],
             },
@@ -378,7 +400,44 @@ def test_trigger_patrol_openai_mode_reuses_previous_response_id(tmp_path) -> Non
         openai_client_factory=lambda: fake_client,
     )
     assert second["status"] == "success"
-    assert len(fake_client.responses.calls) == 2
+    assert len(fake_client.responses.calls) == 4
     assert "previous_response_id" not in fake_client.responses.calls[0]
-    assert fake_client.responses.calls[1]["previous_response_id"] == "resp_openai_bootstrap"
-    assert "New ingest events detected" in fake_client.responses.calls[1]["input"]
+    assert fake_client.responses.calls[2]["previous_response_id"] == "resp_openai_bootstrap_done"
+    assert "New ingest events detected" in fake_client.responses.calls[2]["input"]
+
+
+def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_004")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_no_tools",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "failed"
+
+    conn = connect_db(db_path)
+    run_row = conn.execute(
+        "select status, summary from patrol_runs where run_id = ?",
+        (result["run_id"],),
+    ).fetchone()
+    event_row = conn.execute(
+        "select trigger_state from alert_ingest_events order by rowid desc limit 1"
+    ).fetchone()
+    conn.close()
+
+    assert run_row["status"] == "failed"
+    assert "no backend tool calls" in str(run_row["summary"])
+    assert event_row["trigger_state"] == "failed"

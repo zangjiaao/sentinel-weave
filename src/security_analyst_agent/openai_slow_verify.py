@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from security_analyst_agent.config import DEFAULT_OPENAI_PATROL_MODEL, PROJECT_ROOT
 from security_analyst_agent.db import connect_db
@@ -18,12 +19,58 @@ from security_analyst_agent.hermes_slow_verify import (
     resolve_fixture_dir,
     resolve_round_specs,
 )
-from security_analyst_agent.memory_spike import apply_memory_spike_round
+from security_analyst_agent.memory_spike import apply_memory_spike_round, load_memory_spike_rounds
 from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
 
 DEFAULT_DB_PATH = PROJECT_ROOT / "openai-slow-verify.db"
 ProgressReporter = Callable[[int, int, str], None]
 TriggerRunner = Callable[..., dict[str, Any]]
+
+
+def _round_payload_map(fixture_dir: Path) -> dict[str, dict[str, Any]]:
+    payload_map: dict[str, dict[str, Any]] = {}
+    for item in load_memory_spike_rounds(fixture_dir):
+        payload_map[str(item["round_id"])] = item
+    return payload_map
+
+
+def _enqueue_round_ingest_events(
+    conn,
+    *,
+    round_id: str,
+    round_payload: dict[str, Any],
+) -> int:
+    alerts = round_payload.get("alerts", [])
+    if not isinstance(alerts, list) or not alerts:
+        return 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows: list[tuple[str, str, str, str, str]] = []
+    for index, alert in enumerate(alerts):
+        alert_id = str(alert.get("alert_id") or "").strip()
+        if not alert_id:
+            continue
+        rows.append(
+            (
+                f"evt_openai_slow_{round_id}_{index}_{uuid4().hex[:6]}",
+                alert_id,
+                f"openai_slow:{round_id}",
+                now_iso,
+                "pending",
+            )
+        )
+    if not rows:
+        return 0
+
+    conn.executemany(
+        """
+        insert into alert_ingest_events (event_id, alert_id, source, ingested_at, trigger_state)
+        values (?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+    return len(rows)
 
 
 def _verify_with_mcp_auto_alias(conn, verify_fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -56,6 +103,7 @@ def run_openai_slow_integration(
     manifest = load_integration_manifest(scenario)
     fixture_dir = resolve_fixture_dir(manifest)
     round_specs = resolve_round_specs(manifest)
+    round_payloads = _round_payload_map(fixture_dir)
     total_steps = 2 + len(round_specs) * 2 + 1
 
     reporter(1, total_steps, "读取慢速集成 manifest")
@@ -75,6 +123,14 @@ def run_openai_slow_integration(
         round_id = round_spec["round_id"]
         reporter(step, total_steps, f"应用 {round_id}")
         apply_memory_spike_round(target_db_path, round_id, fixture_dir=fixture_dir)
+        round_payload = round_payloads.get(round_id)
+        if round_payload is None:
+            raise HermesSlowVerificationError("manifest", f"round payload not found in fixture: {round_id}")
+        conn = connect_db(target_db_path)
+        try:
+            _enqueue_round_ingest_events(conn, round_id=round_id, round_payload=round_payload)
+        finally:
+            conn.close()
         step += 1
 
         reporter(step, total_steps, f"运行并校验 OpenAI patrol {round_id}")

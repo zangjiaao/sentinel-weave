@@ -69,6 +69,28 @@ def test_run_openai_slow_integration_invokes_trigger_with_openai_mode(monkeypatc
         lambda _m: [{"round_id": "round_01", "max_turns": 7, "min_tool_calls": 0}],
     )
     monkeypatch.setattr(
+        "security_analyst_agent.openai_slow_verify.load_memory_spike_rounds",
+        lambda _fixture_dir: [
+            {
+                "round_id": "round_01",
+                "alerts": [
+                    {
+                        "alert_id": "alt_day1_scan_01",
+                        "case_id": None,
+                        "occurred_at": "2026-04-10T09:10:00+08:00",
+                        "title": "seed alert for test",
+                        "status": "new",
+                        "severity": "medium",
+                        "attack_stage": "recon",
+                        "src_ip": "198.51.100.23",
+                        "dst_ip": "203.0.113.10",
+                        "asset_id": "asset_api_prod",
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
         "security_analyst_agent.openai_slow_verify._bootstrap_db",
         lambda target_db_path, fixture_dir: bootstrap_spike_database(target_db_path),
     )
