@@ -198,6 +198,7 @@ _REPEATED_INVALID_BLOCK_WARNINGS = {
     "detail_batch_requires_fetch_context",
     "detail_batch_alert_id_out_of_fetch_scope",
     "batch_items_required",
+    "patrol_requires_initial_alert_fetch",
 }
 
 _LOCAL_BATCH_ITEMS_REQUIRED_FIELDS: dict[str, list[str]] = {
@@ -284,6 +285,27 @@ def _prevalidate_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[s
         "refs": {},
         "page": {"next_cursor": None, "has_more": False},
         "meta": {"source": "openai_runner_local_precheck"},
+    }
+
+
+def _initial_fetch_required_result(tool_name: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "summary": "巡检流程约束：必须先调用 alert.fetch 拉取当前待研判告警，再执行其它工具",
+        "data": {
+            "tool": tool_name,
+            "required_first_tool": "alert.fetch",
+            "recommended_next_actions": [
+                {
+                    "tool": "alert.fetch",
+                    "reason": "先获取本轮待处理告警与聚类摘要，再进行 case/assessment/notify 操作",
+                }
+            ],
+        },
+        "warnings": ["patrol_requires_initial_alert_fetch"],
+        "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {"source": "openai_runner_patrol_guardrail"},
     }
 
 
@@ -591,9 +613,26 @@ def _normalize_actor_case_link_batch_payload(payload: dict[str, Any]) -> dict[st
     return {"items": items}
 
 
+def _normalize_alert_fetch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    if "status" not in normalized:
+        normalized["status"] = ["new", "open"]
+    if "limit" not in normalized:
+        normalized["limit"] = 20
+    mode = _first_non_empty(normalized.get("mode"), "auto").lower()
+    if mode not in {"auto", "alerts", "clusters"}:
+        mode = "auto"
+    normalized["mode"] = mode
+    if mode == "auto" and "auto_cluster_threshold" not in normalized:
+        normalized["auto_cluster_threshold"] = 8
+    return normalized
+
+
 def _normalize_payload_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
+    if tool_name == "alert.fetch":
+        return _normalize_alert_fetch_payload(payload)
     if tool_name == "case.upsert-batch":
         return _normalize_case_upsert_batch_payload(payload)
     if tool_name == "case.link-alert-batch":
@@ -637,6 +676,7 @@ def run_openai_patrol(
     usage_output_tokens = 0
     usage_cached_input_tokens = 0
     invalid_tool_signatures: set[str] = set()
+    has_seen_initial_alert_fetch = False
 
     for _ in range(max_turns):
         turn_count += 1
@@ -711,6 +751,10 @@ def run_openai_patrol(
                 payload_signature = _tool_payload_signature(backend_tool_name, payload)
                 if payload_signature in invalid_tool_signatures:
                     tool_result = _duplicate_invalid_block_result(backend_tool_name)
+                elif not has_seen_initial_alert_fetch and backend_tool_name != "alert.fetch":
+                    tool_result = _initial_fetch_required_result(backend_tool_name)
+                    if _should_block_repeated_invalid_call(tool_result):
+                        invalid_tool_signatures.add(payload_signature)
                 else:
                     precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
                     if precheck_result is not None:
@@ -720,6 +764,8 @@ def run_openai_patrol(
                     else:
                         tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
                         tool_call_count += 1
+                        if backend_tool_name == "alert.fetch":
+                            has_seen_initial_alert_fetch = True
                         if _should_block_repeated_invalid_call(tool_result):
                             invalid_tool_signatures.add(payload_signature)
 

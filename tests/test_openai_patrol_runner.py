@@ -74,6 +74,25 @@ def test_normalize_case_upsert_batch_accepts_single_object_payload() -> None:
     assert item["status"] == "active"
 
 
+def test_normalize_alert_fetch_payload_sets_cluster_defaults() -> None:
+    normalized = _normalize_payload_for_tool("alert.fetch", {"status": ["new"]})
+    assert normalized["status"] == ["new"]
+    assert normalized["limit"] == 20
+    assert normalized["mode"] == "auto"
+    assert normalized["auto_cluster_threshold"] == 8
+
+
+def test_normalize_alert_fetch_payload_keeps_explicit_mode() -> None:
+    normalized = _normalize_payload_for_tool(
+        "alert.fetch",
+        {"status": ["open"], "limit": 10, "mode": "clusters"},
+    )
+    assert normalized["status"] == ["open"]
+    assert normalized["limit"] == 10
+    assert normalized["mode"] == "clusters"
+    assert "auto_cluster_threshold" not in normalized
+
+
 @dataclass
 class _UsageDetailsObject:
     cached_tokens: int
@@ -177,6 +196,17 @@ def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_
                 "output": [
                     {
                         "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_invalid_fetch_001",
+                        "arguments": '{"status":["new","open"],"limit":1}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_invalid_002",
+                "output": [
+                    {
+                        "type": "function_call",
                         "name": "alert_detail_batch",
                         "call_id": "call_invalid_001",
                         "arguments": '{"alert_ids":["alt_day1_scan_01"]}',
@@ -184,7 +214,7 @@ def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_
                 ],
             },
             {
-                "id": "resp_invalid_002",
+                "id": "resp_invalid_003",
                 "output": [
                     {
                         "type": "function_call",
@@ -195,7 +225,7 @@ def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_
                 ],
             },
             {
-                "id": "resp_invalid_003",
+                "id": "resp_invalid_004",
                 "output_text": "[SILENT]",
                 "output": [{"type": "message", "role": "assistant"}],
             },
@@ -219,8 +249,8 @@ def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_
     conn.close()
 
     assert result.status == "success"
-    assert result.turns == 3
-    assert result.tool_calls == 1
+    assert result.turns == 4
+    assert result.tool_calls == 2
     assert recorded_calls == 1
 
 
@@ -255,6 +285,69 @@ def test_run_openai_patrol_local_precheck_blocks_empty_batch_without_backend_dis
             },
             {
                 "id": "resp_local_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    case_upsert_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'case.upsert-batch'"
+    ).fetchone()[0]
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.turns == 3
+    assert result.tool_calls == 1
+    assert case_upsert_calls == 0
+    assert alert_fetch_calls == 1
+
+
+def test_run_openai_patrol_requires_alert_fetch_before_other_tools(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_guard_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_upsert_batch",
+                        "call_id": "call_guard_001",
+                        "arguments": '{"items":[{"case_id":"case_guard_001","title":"guard","status":"open","overall_severity":"high","current_stage":"persistence"}]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_guard_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_guard_002",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_guard_003",
                 "output_text": "[SILENT]",
                 "output": [{"type": "message", "role": "assistant"}],
             },

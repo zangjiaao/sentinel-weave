@@ -1145,11 +1145,15 @@ def test_case_convergence_backfills_high_signal_alert_actor_coverage_with_single
     assert summary["backfilled_case_actor_count"] == 1
     assert summary["backfilled_actor_link_count"] == 2
     assert summary["backfilled_actor_observation_count"] == 2
+    assert summary["created_attacker_profiles_count"] == 1
+    assert summary["created_case_actor_profile_links_count"] == 1
 
     summary_repeat = run_case_convergence_for_run(conn, run_id="run_actor_backfill_2")
     assert summary_repeat["backfilled_case_actor_count"] == 0
     assert summary_repeat["backfilled_actor_link_count"] == 0
     assert summary_repeat["backfilled_actor_observation_count"] == 0
+    assert summary_repeat["created_attacker_profiles_count"] == 0
+    assert summary_repeat["updated_attacker_profiles_count"] >= 1
 
     case_row = conn.execute(
         """
@@ -1198,6 +1202,31 @@ def test_case_convergence_backfills_high_signal_alert_actor_coverage_with_single
         (case_row["primary_actor_id"],),
     ).fetchall()
     assert [row["observation_key"] for row in observation_ips] == ["198.51.100.77", "198.51.100.91"]
+
+    attacker_profile_row = conn.execute(
+        """
+        select attacker_profile_id, label, status, risk_level
+        from attacker_profiles
+        order by attacker_profile_id asc
+        """
+    ).fetchone()
+    assert attacker_profile_row is not None
+    assert "组织级攻击者" in attacker_profile_row["label"]
+    assert attacker_profile_row["status"] == "active"
+    assert attacker_profile_row["risk_level"] == "high"
+
+    actor_profile_link_row = conn.execute(
+        """
+        select case_actor_id, attacker_profile_id, relation_status, relation_score
+        from case_actor_profile_links
+        where case_actor_id = ?
+        """,
+        (case_row["primary_actor_id"],),
+    ).fetchone()
+    assert actor_profile_link_row is not None
+    assert actor_profile_link_row["attacker_profile_id"] == attacker_profile_row["attacker_profile_id"]
+    assert actor_profile_link_row["relation_status"] == "confirmed"
+    assert actor_profile_link_row["relation_score"] >= 0.6
     conn.close()
 
 
@@ -1259,6 +1288,85 @@ def test_case_convergence_defers_primary_actor_rollup_for_recon_stage_case(tmp_p
         """
     ).fetchone()[0]
     assert actor_primary_count == 0
+    conn.close()
+
+
+def test_case_convergence_keeps_stable_attacker_profile_when_actor_observations_expand(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_actor_profile_stable",
+            "title": "actor profile stable",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+            "primary_actor_id": None,
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_profile_stable_1",
+        case_id="case_actor_profile_stable",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.77",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    first_summary = run_case_convergence_for_run(conn, run_id="run_actor_profile_stable_1")
+    assert first_summary["created_attacker_profiles_count"] == 1
+
+    profile_count_round_1 = conn.execute("select count(*) from attacker_profiles").fetchone()[0]
+    assert profile_count_round_1 == 1
+
+    profile_id_round_1 = conn.execute(
+        """
+        select attacker_profile_id
+        from case_actor_profile_links
+        order by created_at desc
+        limit 1
+        """
+    ).fetchone()["attacker_profile_id"]
+
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_actor_profile_stable_2",
+        case_id="case_actor_profile_stable",
+        occurred_at="2026-04-12T11:00:00+08:00",
+        stage="lateral_prep",
+        src_ip="198.51.100.91",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    second_summary = run_case_convergence_for_run(conn, run_id="run_actor_profile_stable_2")
+    assert second_summary["created_attacker_profiles_count"] == 0
+
+    profile_count_round_2 = conn.execute("select count(*) from attacker_profiles").fetchone()[0]
+    assert profile_count_round_2 == 1
+
+    profile_id_round_2 = conn.execute(
+        """
+        select attacker_profile_id
+        from case_actor_profile_links
+        order by created_at desc
+        limit 1
+        """
+    ).fetchone()["attacker_profile_id"]
+    assert profile_id_round_2 == profile_id_round_1
     conn.close()
 
 

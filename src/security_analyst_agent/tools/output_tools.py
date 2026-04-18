@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from security_analyst_agent.repositories.cases import load_case, load_case_timeline
-from security_analyst_agent.repositories.audit import insert_escalation_log
+from security_analyst_agent.repositories.audit import insert_escalation_log, resolve_notify_send_context
 from security_analyst_agent.schemas.common import ToolResponse
 from security_analyst_agent.schemas.output_tools import NotifyPreviewRequest, NotifySendRequest, ReportDraftRequest
 from security_analyst_agent.services.output import build_notify_preview, build_report
@@ -33,56 +33,83 @@ def notify_preview(conn: sqlite3.Connection, payload: dict) -> dict:
 
 def notify_send(conn: sqlite3.Connection, payload: dict) -> dict:
     request = NotifySendRequest.model_validate(payload)
-    case = load_case(conn, request.case_id)
+    notify_context = resolve_notify_send_context(
+        conn,
+        case_id=request.case_id,
+        channel=request.channel,
+        template=request.template,
+    )
+    target_case_id = str(notify_context["target_case_id"])
+    dedupe_key = str(notify_context["dedupe_key"])
+    dedupe_alias_keys = [str(item) for item in notify_context.get("dedupe_alias_keys", []) if str(item)]
+
+    case = load_case(conn, target_case_id)
     if case is None:
         response = ToolResponse(
             ok=False,
-            summary=f"未找到案件 {request.case_id}",
+            summary=f"未找到案件 {target_case_id}",
             data={"notification": None},
-            warnings=[f"case_not_found:{request.case_id}"],
+            warnings=[f"case_not_found:{target_case_id}"],
         )
         return response.model_dump(mode="json", by_alias=True)
 
     preview = build_notify_preview(case, request.channel)
-    dedupe_key = f"{request.case_id}:{request.channel}:{request.template}"
-    existing = conn.execute(
-        """
-        select notification_id
-        from notification_outbox
-        where dedupe_key = ? and status in ('queued', 'sent_simulated')
-        order by created_at desc
-        limit 1
-        """,
-        (dedupe_key,),
-    ).fetchone()
+    if dedupe_alias_keys:
+        placeholders = ", ".join("?" for _ in dedupe_alias_keys)
+        existing = conn.execute(
+            f"""
+            select notification_id
+            from notification_outbox
+            where dedupe_key in ({placeholders}) and status in ('queued', 'sent_simulated')
+            order by created_at desc
+            limit 1
+            """,
+            tuple(dedupe_alias_keys),
+        ).fetchone()
+    else:
+        existing = conn.execute(
+            """
+            select notification_id
+            from notification_outbox
+            where dedupe_key = ? and status in ('queued', 'sent_simulated')
+            order by created_at desc
+            limit 1
+            """,
+            (dedupe_key,),
+        ).fetchone()
 
     if existing:
         insert_escalation_log(
             conn,
-            case_id=request.case_id,
+            case_id=target_case_id,
             triggered=False,
             channel=request.channel,
             template=request.template,
             notification_id=existing["notification_id"],
             dedupe_key=dedupe_key,
             reason="dedupe_hit",
-            detail={"status": "deduped"},
+            detail={
+                "status": "deduped",
+                "source_case_id": request.case_id,
+                "target_case_id": target_case_id,
+                "dedupe_alias_keys": dedupe_alias_keys,
+            },
         )
         conn.commit()
         response = ToolResponse(
             ok=True,
-            summary=f"模拟通知去重命中: {request.case_id}",
+            summary=f"模拟通知去重命中: {target_case_id}",
             data={
                 "notification": {
                     "notification_id": existing["notification_id"],
-                    "case_id": request.case_id,
+                    "case_id": target_case_id,
                     "channel": request.channel,
                     "template": request.template,
                     "status": "deduped",
                     "dedupe_key": dedupe_key,
                 }
             },
-            refs={"case_ids": [request.case_id]},
+            refs={"case_ids": [target_case_id]},
             warnings=["dedupe_hit"],
         )
         return response.model_dump(mode="json", by_alias=True)
@@ -97,7 +124,7 @@ def notify_send(conn: sqlite3.Connection, payload: dict) -> dict:
         """,
         (
             notification_id,
-            request.case_id,
+            target_case_id,
             request.channel,
             request.template,
             preview["title"],
@@ -110,14 +137,19 @@ def notify_send(conn: sqlite3.Connection, payload: dict) -> dict:
     )
     insert_escalation_log(
         conn,
-        case_id=request.case_id,
+        case_id=target_case_id,
         triggered=True,
         channel=request.channel,
         template=request.template,
         notification_id=notification_id,
         dedupe_key=dedupe_key,
         reason="threshold_met",
-        detail={"status": "sent_simulated"},
+        detail={
+            "status": "sent_simulated",
+            "source_case_id": request.case_id,
+            "target_case_id": target_case_id,
+            "dedupe_alias_keys": dedupe_alias_keys,
+        },
     )
     conn.commit()
 
@@ -127,7 +159,7 @@ def notify_send(conn: sqlite3.Connection, payload: dict) -> dict:
         data={
             "notification": {
                 "notification_id": notification_id,
-                "case_id": request.case_id,
+                "case_id": target_case_id,
                 "channel": request.channel,
                 "template": request.template,
                 "status": "sent_simulated",
@@ -136,7 +168,7 @@ def notify_send(conn: sqlite3.Connection, payload: dict) -> dict:
                 "recommended_recipients": preview["recommended_recipients"],
             }
         },
-        refs={"case_ids": [request.case_id]},
+        refs={"case_ids": [target_case_id]},
     )
     return response.model_dump(mode="json", by_alias=True)
 

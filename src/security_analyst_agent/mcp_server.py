@@ -164,6 +164,10 @@ PROMPT_EXTRA_GUIDANCE: dict[str, list[str]] = {
     "case.link-alert-batch": [
         "`items` 不能为空；请先确认 case_id 与 alert_id 后再批量关联。",
     ],
+    "notify.send": [
+        "优先依赖系统自动升级通知；仅在确有必要的人为升级时调用。",
+        "同一链路同一阶段不要重复发送（若已发送会被去重）。",
+    ],
 }
 
 

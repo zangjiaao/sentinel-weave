@@ -615,6 +615,11 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         if not isinstance(data, dict):
             continue
         mode = str(data.get("mode", "")).lower()
+        warnings = result_body.get("warnings")
+        has_cluster_fallback = isinstance(warnings, list) and any(
+            str(item) == "clusters_empty_fallback_to_alerts" for item in warnings
+        )
+        cluster_semantic_mode = mode == "clusters" or has_cluster_fallback
         priority_buckets = data.get("priority_buckets")
         backlog_schedule = data.get("backlog_schedule")
         hotspot_summary = data.get("hotspot_summary")
@@ -622,7 +627,7 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         recommended_next_actions = data.get("recommended_next_actions")
         ack_recommendations = data.get("ack_recommendations")
 
-        if mode == "clusters":
+        if cluster_semantic_mode:
             cluster_mode_fetch_calls += 1
         if isinstance(priority_buckets, dict):
             fetch_calls_with_priority_buckets += 1
@@ -640,7 +645,7 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
                 fetch_calls_with_ack_suggestions += 1
 
         if (
-            mode == "clusters"
+            cluster_semantic_mode
             and isinstance(priority_buckets, dict)
             and isinstance(backlog_schedule, dict)
             and isinstance(hotspot_summary, dict)

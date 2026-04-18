@@ -807,6 +807,82 @@ def test_verify_final_db_state_fails_when_five_layer_cluster_fetch_missing(tmp_p
     conn.close()
 
 
+def test_verify_final_db_state_counts_cluster_fallback_fetch_as_cluster_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_layer_fallback.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_layer_fallback_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_layer_fallback_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_layer_fallback_001",
+            "mcp",
+            "alert.fetch",
+            "{\"mode\":\"auto\",\"auto_cluster_threshold\":8}",
+            1,
+            "fallback",
+            (
+                "{"
+                "\"ok\":true,"
+                "\"summary\":\"fallback\","
+                "\"data\":{"
+                "\"mode\":\"alerts\","
+                "\"priority_buckets\":{\"p0\":{\"cluster_count\":1,\"alert_count\":2}},"
+                "\"backlog_schedule\":{\"current_offset\":0,\"returned_clusters\":0,\"remaining_cluster_count\":0,\"next_cursor\":null,\"next_priority_bucket\":null},"
+                "\"hotspot_summary\":{\"top_attack_stages\":[],\"top_assets\":[],\"top_src_ips\":[],\"high_severity_alert_count\":0,\"top_n\":3},"
+                "\"processing_guardrails\":{\"recommended_detail_batch_size\":2,\"max_detail_batch_size\":5,\"should_ack_homogeneous_noise\":false,\"detail_fanout_guardrail_applied\":true},"
+                "\"recommended_next_actions\":[],"
+                "\"ack_recommendations\":[]"
+                "},"
+                "\"warnings\":[\"clusters_empty_fallback_to_alerts\"]"
+                "}"
+            ),
+            12,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+            "min_cluster_mode_fetch_calls": 1,
+            "min_five_layer_cluster_fetch_calls": 1,
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["cluster_mode_fetch_calls"] == 1
+    assert summary["five_layer_cluster_fetch_calls"] == 1
+    conn.close()
+
+
 def test_verify_final_db_state_ignores_case_get_not_found_failures(tmp_path: Path) -> None:
     db_path = tmp_path / "slow.db"
     conn = connect_db(db_path)

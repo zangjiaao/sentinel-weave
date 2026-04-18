@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
+from hashlib import sha1
 from itertools import combinations
 from typing import Any
 from uuid import uuid4
@@ -38,6 +39,7 @@ _SEVERITY_ORDER = {
 }
 _HIGH_SIGNAL_ACTOR_STAGES = {"exploit", "persistence", "command_execution", "reactivation", "lateral_prep"}
 _HIGH_SIGNAL_ACTOR_SEVERITIES = {"high", "critical"}
+_ATTACKER_PROFILE_MIN_STAGE_RANK = stage_rank("persistence")
 
 
 def _now_iso() -> str:
@@ -118,6 +120,260 @@ def _risk_level_from_case_severity(case_severity: str) -> str:
     if severity == "medium":
         return "medium"
     return "low"
+
+
+def _default_attacker_profile_id(identity_signature: str) -> str:
+    digest = sha1(identity_signature.encode("utf-8")).hexdigest()[:16]
+    return f"atk_{digest}"
+
+
+def _resolve_case_actor_for_attacker_rollup(
+    conn: sqlite3.Connection,
+    *,
+    case_id: str,
+    primary_actor_id: str | None,
+) -> sqlite3.Row | None:
+    if primary_actor_id:
+        row = conn.execute(
+            """
+            select case_actor_id, case_id, label, status, profile_confidence, risk_level,
+                   is_primary, current_stage, first_seen_at, last_seen_at, summary
+            from case_actor_profiles
+            where case_actor_id = ? and case_id = ?
+            limit 1
+            """,
+            (primary_actor_id, case_id),
+        ).fetchone()
+        if row is not None:
+            return row
+
+    return conn.execute(
+        """
+        select case_actor_id, case_id, label, status, profile_confidence, risk_level,
+               is_primary, current_stage, first_seen_at, last_seen_at, summary
+        from case_actor_profiles
+        where case_id = ?
+        order by is_primary desc, profile_confidence desc, updated_at desc, case_actor_id asc
+        limit 1
+        """,
+        (case_id,),
+    ).fetchone()
+
+
+def _build_attacker_profile_label(*, actor_label: str, src_ips: list[str]) -> str:
+    if len(src_ips) == 1:
+        return f"{src_ips[0]} (组织级攻击者)"
+    if len(src_ips) >= 2:
+        return f"组织级攻击者（{len(src_ips)} 源IP）"
+    normalized_label = actor_label.strip()
+    return normalized_label or "组织级攻击者"
+
+
+def _sync_attacker_profiles_from_case_actors(conn: sqlite3.Connection, *, run_id: str) -> dict[str, int]:
+    case_rows = conn.execute(
+        """
+        select case_id, status, current_stage, overall_severity, primary_actor_id
+        from cases
+        where coalesce(merge_state, 'standalone') <> 'merged'
+        """
+    ).fetchall()
+    if not case_rows:
+        return {
+            "created_attacker_profiles_count": 0,
+            "updated_attacker_profiles_count": 0,
+            "created_case_actor_profile_links_count": 0,
+            "updated_case_actor_profile_links_count": 0,
+        }
+
+    now = _now_iso()
+    created_profiles_count = 0
+    updated_profiles_count = 0
+    created_links_count = 0
+    updated_links_count = 0
+
+    for case_row in case_rows:
+        case_id = str(case_row["case_id"])
+        case_stage = normalize_stage(case_row["current_stage"])
+        if stage_rank(case_stage) < _ATTACKER_PROFILE_MIN_STAGE_RANK:
+            continue
+
+        actor_row = _resolve_case_actor_for_attacker_rollup(
+            conn,
+            case_id=case_id,
+            primary_actor_id=case_row["primary_actor_id"],
+        )
+        if actor_row is None:
+            continue
+
+        case_actor_id = str(actor_row["case_actor_id"])
+        src_ip_rows = conn.execute(
+            """
+            select observation_key
+            from case_actor_observations
+            where case_actor_id = ?
+              and observation_type = 'src_ip'
+            order by observation_key asc
+            """,
+            (case_actor_id,),
+        ).fetchall()
+        src_ips = [str(row["observation_key"]) for row in src_ip_rows if row["observation_key"]]
+        if not src_ips:
+            fallback_src_ip_rows = conn.execute(
+                """
+                select distinct alerts.src_ip
+                from case_alert_links
+                join alerts on alerts.alert_id = case_alert_links.alert_id
+                where case_alert_links.case_id = ?
+                  and case_alert_links.is_active = 1
+                  and alerts.src_ip is not null
+                  and trim(alerts.src_ip) <> ''
+                order by alerts.src_ip asc
+                """,
+                (case_id,),
+            ).fetchall()
+            src_ips = [str(row["src_ip"]) for row in fallback_src_ip_rows if row["src_ip"]]
+
+        existing_profile_link_row = conn.execute(
+            """
+            select attacker_profile_id
+            from case_actor_profile_links
+            where case_actor_id = ?
+            order by relation_score desc, created_at desc
+            limit 1
+            """,
+            (case_actor_id,),
+        ).fetchone()
+        if existing_profile_link_row is not None and existing_profile_link_row["attacker_profile_id"]:
+            attacker_profile_id = str(existing_profile_link_row["attacker_profile_id"])
+        elif len(src_ips) == 1:
+            attacker_profile_id = _default_attacker_profile_id(f"src_ip:{src_ips[0]}")
+        else:
+            attacker_profile_id = _default_attacker_profile_id(f"case_actor:{case_actor_id}")
+        profile_label = _build_attacker_profile_label(
+            actor_label=str(actor_row["label"] or ""),
+            src_ips=src_ips,
+        )
+        profile_status = "active" if str(case_row["status"] or "").lower() in {"open", "active", "investigating", "observing"} else "watch"
+        profile_confidence = max(0.65, min(float(actor_row["profile_confidence"] or 0.0), 0.98))
+        profile_risk_level = _risk_level_from_case_severity(str(case_row["overall_severity"] or ""))
+        profile_summary = f"auto_rollup_case_actor_to_attacker_profile:{case_actor_id}"
+
+        existing_profile = conn.execute(
+            """
+            select attacker_profile_id
+            from attacker_profiles
+            where attacker_profile_id = ?
+            limit 1
+            """,
+            (attacker_profile_id,),
+        ).fetchone()
+
+        conn.execute(
+            """
+            insert into attacker_profiles (
+              attacker_profile_id, label, status, profile_confidence, risk_level, summary,
+              first_seen_at, last_seen_at, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict(attacker_profile_id) do update set
+              label = excluded.label,
+              status = case
+                when attacker_profiles.status = 'active' then attacker_profiles.status
+                else excluded.status
+              end,
+              profile_confidence = max(attacker_profiles.profile_confidence, excluded.profile_confidence),
+              risk_level = case
+                when attacker_profiles.risk_level = 'critical' then 'critical'
+                when excluded.risk_level = 'critical' then 'critical'
+                when attacker_profiles.risk_level = 'high' then 'high'
+                when excluded.risk_level = 'high' then 'high'
+                when attacker_profiles.risk_level = 'medium' then 'medium'
+                when excluded.risk_level = 'medium' then 'medium'
+                else 'low'
+              end,
+              summary = excluded.summary,
+              first_seen_at = coalesce(attacker_profiles.first_seen_at, excluded.first_seen_at),
+              last_seen_at = coalesce(excluded.last_seen_at, attacker_profiles.last_seen_at),
+              updated_at = excluded.updated_at
+            """,
+            (
+                attacker_profile_id,
+                profile_label,
+                profile_status,
+                profile_confidence,
+                profile_risk_level,
+                profile_summary,
+                actor_row["first_seen_at"],
+                actor_row["last_seen_at"],
+                now,
+                now,
+            ),
+        )
+        if existing_profile is None:
+            created_profiles_count += 1
+        else:
+            updated_profiles_count += 1
+
+        link_id = f"capl_{sha1(f'{case_actor_id}:{attacker_profile_id}'.encode('utf-8')).hexdigest()[:16]}"
+        relation_status = "confirmed" if stage_rank(case_stage) >= stage_rank("command_execution") else "candidate"
+        relation_score = max(0.6, min(profile_confidence, 0.98))
+        existing_link = conn.execute(
+            """
+            select link_id
+            from case_actor_profile_links
+            where link_id = ?
+            limit 1
+            """,
+            (link_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            insert into case_actor_profile_links (
+              link_id, case_actor_id, attacker_profile_id, relation_status, relation_score, decision_reason, created_at
+            ) values (?, ?, ?, ?, ?, ?, ?)
+            on conflict(link_id) do update set
+              relation_status = excluded.relation_status,
+              relation_score = max(case_actor_profile_links.relation_score, excluded.relation_score),
+              decision_reason = excluded.decision_reason
+            """,
+            (
+                link_id,
+                case_actor_id,
+                attacker_profile_id,
+                relation_status,
+                relation_score,
+                "auto_rollup_case_actor_to_attacker_profile",
+                now,
+            ),
+        )
+        if existing_link is None:
+            created_links_count += 1
+        else:
+            updated_links_count += 1
+
+        upsert_entity_assessment(
+            conn,
+            entity_type="actor",
+            entity_key=attacker_profile_id,
+            entity_label=profile_label,
+            related_case_id=case_id,
+            risk_level=profile_risk_level,
+            assessment_confidence=min(profile_confidence, 0.95),
+            verdict="attacker",
+            reason_summary="auto_rollup_case_actor_to_attacker_profile",
+            supporting_alert_ids=[],
+            supporting_evidence_ids=[],
+            first_seen_at=actor_row["first_seen_at"],
+            last_seen_at=actor_row["last_seen_at"],
+            run_id=run_id,
+            analysis_cutoff_at=None,
+        )
+
+    return {
+        "created_attacker_profiles_count": created_profiles_count,
+        "updated_attacker_profiles_count": updated_profiles_count,
+        "created_case_actor_profile_links_count": created_links_count,
+        "updated_case_actor_profile_links_count": updated_links_count,
+    }
 
 
 def _pick_case_actor_for_high_signal_coverage(
@@ -1785,6 +2041,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
     actor_backfill_stats = _backfill_high_signal_alert_actor_coverage(conn)
     backfilled_compromised_host_count = _backfill_high_signal_compromised_host_assessments(conn, run_id=run_id)
     rolled_up_case_actors_count = _rollup_canonical_primary_actor_state(conn)
+    attacker_profile_rollup_stats = _sync_attacker_profiles_from_case_actors(conn, run_id=run_id)
     confirmed_relations_after = list_confirmed_case_relations(conn)
 
     return {
@@ -1802,4 +2059,5 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "rolled_up_case_actors_count": rolled_up_case_actors_count,
         "backfilled_compromised_host_assessments_count": backfilled_compromised_host_count,
         **actor_backfill_stats,
+        **attacker_profile_rollup_stats,
     }

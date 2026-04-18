@@ -275,6 +275,7 @@ def _resolve_escalation_target_case_id(conn: sqlite3.Connection, *, case_id: str
 
 
 def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_id: str) -> str:
+    canonical_case_id = _resolve_escalation_target_case_id(conn, case_id=case_id)
     rows = conn.execute(
         """
         select left_case_id, right_case_id
@@ -283,7 +284,7 @@ def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_i
         """
     ).fetchall()
     if not rows:
-        return case_id
+        return canonical_case_id
 
     adjacency: dict[str, set[str]] = {}
     for row in rows:
@@ -291,10 +292,10 @@ def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_i
         right_case_id = row["right_case_id"]
         adjacency.setdefault(left_case_id, set()).add(right_case_id)
         adjacency.setdefault(right_case_id, set()).add(left_case_id)
-    if case_id not in adjacency:
-        return case_id
+    if canonical_case_id not in adjacency:
+        return canonical_case_id
 
-    stack = [case_id]
+    stack = [canonical_case_id]
     visited: set[str] = set()
     component: list[str] = []
     while stack:
@@ -306,7 +307,27 @@ def _resolve_escalation_chain_anchor_case_id(conn: sqlite3.Connection, *, case_i
         for neighbor in adjacency.get(current, set()):
             if neighbor not in visited:
                 stack.append(neighbor)
-    return min(component) if component else case_id
+    if not component:
+        return canonical_case_id
+
+    placeholders = ", ".join("?" for _ in component)
+    case_rows = conn.execute(
+        f"""
+        select case_id, canonical_case_id, merge_state
+        from cases
+        where case_id in ({placeholders})
+        """,
+        tuple(component),
+    ).fetchall()
+    preferred_anchor_case_ids = sorted(
+        row["case_id"]
+        for row in case_rows
+        if str(row["merge_state"] or "standalone").lower() != "merged"
+        and (not row["canonical_case_id"] or row["canonical_case_id"] == row["case_id"])
+    )
+    if preferred_anchor_case_ids:
+        return preferred_anchor_case_ids[0]
+    return canonical_case_id
 
 
 def _normalize_escalation_stage(stage: str | None) -> str:
@@ -318,6 +339,54 @@ def _normalize_escalation_stage(stage: str | None) -> str:
 
 def _build_stage_dedupe_key(*, anchor_case_id: str, stage: str) -> str:
     return f"{anchor_case_id}:{_AUTO_ESCALATION_CHANNEL}:{_AUTO_ESCALATION_TEMPLATE}:stage:{stage}"
+
+
+def resolve_notify_send_context(
+    conn: sqlite3.Connection,
+    *,
+    case_id: str,
+    channel: str,
+    template: str,
+    stage: str | None = None,
+) -> dict[str, Any]:
+    target_case_id = _resolve_escalation_target_case_id(conn, case_id=case_id)
+    dedupe_keys: list[str] = []
+    escalation_stage: str | None = None
+
+    if channel == _AUTO_ESCALATION_CHANNEL and template == _AUTO_ESCALATION_TEMPLATE:
+        stage_row = conn.execute(
+            "select current_stage from cases where case_id = ?",
+            (target_case_id,),
+        ).fetchone()
+        escalation_stage = _normalize_escalation_stage(
+            stage or (stage_row["current_stage"] if stage_row is not None else None)
+        )
+        dedupe_anchor_case_id = _resolve_escalation_chain_anchor_case_id(conn, case_id=target_case_id)
+        stage_dedupe_key = _build_stage_dedupe_key(
+            anchor_case_id=dedupe_anchor_case_id,
+            stage=escalation_stage,
+        )
+        dedupe_keys.append(stage_dedupe_key)
+        dedupe_keys.append(f"{target_case_id}:{channel}:{template}")
+        dedupe_keys.append(f"{case_id}:{channel}:{template}")
+        return {
+            "target_case_id": target_case_id,
+            "dedupe_key": stage_dedupe_key,
+            "dedupe_alias_keys": list(dict.fromkeys(item for item in dedupe_keys if item)),
+            "dedupe_anchor_case_id": dedupe_anchor_case_id,
+            "escalation_stage": escalation_stage,
+        }
+
+    base_dedupe_key = f"{target_case_id}:{channel}:{template}"
+    dedupe_keys.append(base_dedupe_key)
+    dedupe_keys.append(f"{case_id}:{channel}:{template}")
+    return {
+        "target_case_id": target_case_id,
+        "dedupe_key": base_dedupe_key,
+        "dedupe_alias_keys": list(dict.fromkeys(item for item in dedupe_keys if item)),
+        "dedupe_anchor_case_id": target_case_id,
+        "escalation_stage": escalation_stage,
+    }
 
 
 def _extract_stage_from_dedupe_key(dedupe_key: str | None) -> str | None:
