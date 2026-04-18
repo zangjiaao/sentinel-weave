@@ -227,6 +227,87 @@ def test_dispatch_tool_skips_empty_batch_payload_for_mcp_without_failure(tmp_pat
     conn.close()
 
 
+def test_mcp_alert_detail_batch_requires_fetch_context(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    result = dispatch_tool(
+        conn,
+        "alert.detail-batch",
+        {"alert_ids": ["alt_day1_scan_01"]},
+        source="mcp",
+    )
+    assert result["ok"] is False
+    assert "detail_batch_requires_fetch_context" in result["warnings"]
+
+    row = conn.execute(
+        """
+        select result_ok, result_summary, result_json
+        from agent_tool_calls
+        where tool_name = 'alert.detail-batch'
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["result_ok"] == 0
+    assert "detail_batch_requires_fetch_context" in row["result_json"]
+    conn.close()
+
+
+def test_mcp_alert_detail_batch_rejects_ids_outside_fetch_scope(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    fetch_result = dispatch_tool(
+        conn,
+        "alert.fetch",
+        {"status": ["new", "open"], "limit": 1},
+        source="mcp",
+    )
+    assert fetch_result["ok"] is True
+    allowed_alert_ids = list(fetch_result.get("refs", {}).get("alert_ids", []))
+    assert len(allowed_alert_ids) == 1
+    allowed_alert_id = allowed_alert_ids[0]
+
+    invalid_alert_id = next(
+        (
+            alert_id
+            for alert_id in [
+                "alt_day1_scan_01",
+                "alt_day2_webshell_01",
+                "alt_day3_shell_01",
+                "alt_day4_lateral_01",
+            ]
+            if alert_id != allowed_alert_id
+        ),
+        "alt_nonexistent_999",
+    )
+    invalid_result = dispatch_tool(
+        conn,
+        "alert.detail-batch",
+        {"alert_ids": [invalid_alert_id]},
+        source="mcp",
+    )
+    assert invalid_result["ok"] is False
+    assert "detail_batch_alert_id_out_of_fetch_scope" in invalid_result["warnings"]
+    assert invalid_alert_id in invalid_result["data"]["invalid_alert_ids"]
+
+    ok_result = dispatch_tool(
+        conn,
+        "alert.detail-batch",
+        {"alert_ids": [allowed_alert_id]},
+        source="mcp",
+    )
+    assert ok_result["ok"] is True
+    assert ok_result["data"]["alerts"][0]["alert_id"] == allowed_alert_id
+    conn.close()
+
+
 def test_audit_cli_commands_return_rows(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

@@ -14,6 +14,7 @@ Execution rules:
 - If representative alerts already carry a `case_id`, read and maintain that case first; only create a new case when no usable `case_id` exists.
 - If no case exists yet for the current attack chain, call `alert.detail-batch` with at least one representative alert before creating a new case.
 - Use `alert.detail-batch` for both single-alert and multi-alert detail lookup; for one alert, send a one-item `alert_ids` array.
+- `alert.detail-batch` 的 `alert_ids` 只能使用本次巡检中 `alert.fetch` 返回过的真实 ID，禁止猜测或拼接 ID。
 - For homogeneous alerts in the same stage/case, use representative sampling instead of one-call-per-alert fan-out.
 - Do not call `alert.detail-batch` repeatedly for the same `alert_id` in one run.
 - If the attack chain warrants a new case and `case.get` cannot find it, create it first with `case.upsert-batch` (single case also uses one-item batch).

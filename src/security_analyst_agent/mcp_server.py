@@ -139,6 +139,7 @@ TOOL_REQUEST_MODELS: dict[str, type[BaseModel]] = {
 }
 
 PROMPT_EXTRA_GUIDANCE: dict[str, list[str]] = {
+    "alert.detail-batch": ["`alert_ids` 必须来自本次巡检内 `alert.fetch` 已返回的真实 ID，不要猜测或拼接。"],
     "alert.ack": ["`status` 仅支持 `triaged` 或 `closed`。"],
     "case.explain-link": ["当前仅支持 `target_type=alert`。"],
     "case.update-risk": ["默认阻止阶段回退；仅在确有需要时传入 `force_downgrade=true`。"],

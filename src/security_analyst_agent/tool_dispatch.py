@@ -1,6 +1,7 @@
+import json
 import sqlite3
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -94,6 +95,130 @@ _SOFT_NOOP_BATCH_TOOLS = {
 }
 
 
+def _extract_alert_ids_from_fetch_result(result: dict[str, Any]) -> list[str]:
+    collected: list[str] = []
+    refs = result.get("refs")
+    if isinstance(refs, dict):
+        refs_alert_ids = refs.get("alert_ids")
+        if isinstance(refs_alert_ids, list):
+            collected.extend(str(item) for item in refs_alert_ids if item)
+
+    data = result.get("data")
+    if isinstance(data, dict):
+        alerts = data.get("alerts")
+        if isinstance(alerts, list):
+            for alert_item in alerts:
+                if not isinstance(alert_item, dict):
+                    continue
+                alert_id = alert_item.get("alert_id")
+                if alert_id:
+                    collected.append(str(alert_id))
+
+        clusters = data.get("clusters")
+        if isinstance(clusters, list):
+            for cluster_item in clusters:
+                if not isinstance(cluster_item, dict):
+                    continue
+                sample_alert_ids = cluster_item.get("sample_alert_ids")
+                if isinstance(sample_alert_ids, list):
+                    collected.extend(str(item) for item in sample_alert_ids if item)
+
+    return list(dict.fromkeys(collected))
+
+
+def _validate_alert_detail_batch_ids(
+    conn: sqlite3.Connection,
+    *,
+    payload: dict,
+    source: str,
+    run_id: str | None,
+) -> dict[str, Any] | None:
+    if source != "mcp":
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_alert_ids = payload.get("alert_ids")
+    if not isinstance(raw_alert_ids, list):
+        return None
+    requested_alert_ids = list(dict.fromkeys(str(item) for item in raw_alert_ids if item))
+    if not requested_alert_ids:
+        return None
+    if not run_id:
+        return {
+            "ok": False,
+            "summary": "alert.detail-batch 需要先调用 alert.fetch 获取有效 alert_id",
+            "data": {
+                "tool": "alert.detail-batch",
+                "invalid_alert_ids": requested_alert_ids,
+                "allowed_alert_ids_sample": [],
+            },
+            "warnings": ["detail_batch_requires_fetch_context"],
+            "refs": {},
+            "page": {"next_cursor": None, "has_more": False},
+            "meta": {},
+        }
+
+    fetch_rows = conn.execute(
+        """
+        select call_id, result_json
+        from agent_tool_calls
+        where run_id = ?
+          and source = 'mcp'
+          and tool_name = 'alert.fetch'
+          and result_ok = 1
+        order by occurred_at asc, rowid asc
+        """,
+        (run_id,),
+    ).fetchall()
+    allowed_alert_ids: list[str] = []
+    for row in fetch_rows:
+        try:
+            result_body = json.loads(row["result_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(result_body, dict):
+            continue
+        allowed_alert_ids.extend(_extract_alert_ids_from_fetch_result(result_body))
+    allowed_alert_ids = list(dict.fromkeys(allowed_alert_ids))
+    if not allowed_alert_ids:
+        return {
+            "ok": False,
+            "summary": "alert.detail-batch 需要先从 alert.fetch 返回中选择 alert_id，当前 run 尚无可用 ID",
+            "data": {
+                "tool": "alert.detail-batch",
+                "run_id": run_id,
+                "invalid_alert_ids": requested_alert_ids,
+                "allowed_alert_ids_sample": [],
+            },
+            "warnings": ["detail_batch_requires_fetch_context"],
+            "refs": {},
+            "page": {"next_cursor": None, "has_more": False},
+            "meta": {},
+        }
+
+    allowed_set = set(allowed_alert_ids)
+    invalid_alert_ids = [alert_id for alert_id in requested_alert_ids if alert_id not in allowed_set]
+    if not invalid_alert_ids:
+        return None
+    return {
+        "ok": False,
+        "summary": (
+            "alert.detail-batch 仅允许使用本次巡检里 alert.fetch 返回的 alert_id，"
+            f"发现 {len(invalid_alert_ids)} 条无效 ID"
+        ),
+        "data": {
+            "tool": "alert.detail-batch",
+            "run_id": run_id,
+            "invalid_alert_ids": invalid_alert_ids,
+            "allowed_alert_ids_sample": allowed_alert_ids[:20],
+        },
+        "warnings": ["detail_batch_alert_id_out_of_fetch_scope"],
+        "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {},
+    }
+
+
 def _is_soft_noop_batch_validation(tool_name: str, payload: dict, exc: ValidationError, *, source: str) -> bool:
     if source != "mcp":
         return False
@@ -127,6 +252,32 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
     run_id, analysis_cutoff_at = resolve_run_context_for_dispatch(conn, source=source, tool_name=tool_name)
     token = bind_run_context(run_id, analysis_cutoff_at)
     try:
+        if tool_name == "alert.detail-batch":
+            prevalidated = _validate_alert_detail_batch_ids(
+                conn,
+                payload=payload,
+                source=source,
+                run_id=run_id,
+            )
+            if prevalidated is not None:
+                finalize_mcp_auto_run_after_tool(
+                    conn,
+                    source=source,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    result=prevalidated,
+                )
+                insert_tool_call_log(
+                    conn,
+                    source=source,
+                    tool_name=tool_name,
+                    payload=payload,
+                    result=prevalidated,
+                    latency_ms=0,
+                )
+                conn.commit()
+                return prevalidated
+
         start = time.perf_counter()
         result: dict
         try:
