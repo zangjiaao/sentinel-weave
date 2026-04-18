@@ -45,6 +45,13 @@ def test_load_expanded_integration_manifest_uses_expanded_fixture_and_rounds() -
     assert len(manifest["rounds"]) == 10
     assert manifest["rounds"][0]["round_id"] == "round_01_dual_recon"
     assert manifest["rounds"][-1]["round_id"] == "round_10_chain_b_reactivation"
+    query = manifest["round_defaults"]["query"]
+    assert "auto_cluster_threshold=8" in query
+    final_assertions = manifest["final_assertions"]
+    assert final_assertions["min_cluster_mode_fetch_calls"] >= 1
+    assert final_assertions["min_five_layer_cluster_fetch_calls"] >= 1
+    assert final_assertions["require_actor_coverage_for_high_signal_alerts"] is False
+    assert final_assertions["require_primary_case_actor_for_high_signal_cases"] is False
 
 
 def test_resolve_fixture_dir_defaults_to_spike_memory() -> None:
@@ -337,6 +344,148 @@ def test_verify_final_db_state_fails_when_tool_calls_exceed_max(tmp_path: Path) 
         }
     }
     with pytest.raises(HermesSlowVerificationError, match="expected at most 1 tool calls"):
+        _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    conn.close()
+
+
+def test_verify_final_db_state_accepts_five_layer_cluster_fetch_assertions(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_layer_ok.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_layer_ok_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_layer_ok_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_layer_ok_001",
+            "mcp",
+            "alert.fetch",
+            "{\"mode\":\"auto\",\"auto_cluster_threshold\":8}",
+            1,
+            "ok",
+            (
+                "{"
+                "\"ok\":true,"
+                "\"summary\":\"clustered\","
+                "\"data\":{"
+                "\"mode\":\"clusters\","
+                "\"priority_buckets\":{\"p0\":{\"cluster_count\":1,\"alert_count\":2}},"
+                "\"backlog_schedule\":{\"current_offset\":0,\"returned_clusters\":1,\"remaining_cluster_count\":0,\"next_cursor\":null,\"next_priority_bucket\":null},"
+                "\"hotspot_summary\":{\"top_attack_stages\":[],\"top_assets\":[],\"top_src_ips\":[],\"high_severity_alert_count\":2,\"top_n\":3},"
+                "\"processing_guardrails\":{\"recommended_detail_batch_size\":2,\"max_detail_batch_size\":5,\"should_ack_homogeneous_noise\":false,\"detail_fanout_guardrail_applied\":true},"
+                "\"recommended_next_actions\":[{\"tool_name\":\"alert.detail-batch\",\"payload\":{\"alert_ids\":[\"alt_001\"]}}],"
+                "\"ack_recommendations\":[{\"cluster_id\":\"clu::recon::198.51.100.1::asset\",\"verdict\":\"suggest_ack_triaged\"}]"
+                "}"
+                "}"
+            ),
+            10,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+            "min_cluster_mode_fetch_calls": 1,
+            "min_fetch_calls_with_priority_buckets": 1,
+            "min_fetch_calls_with_backlog_schedule": 1,
+            "min_fetch_calls_with_hotspot_summary": 1,
+            "min_fetch_calls_with_processing_guardrails": 1,
+            "min_fetch_calls_with_recommended_next_actions": 1,
+            "min_fetch_calls_with_ack_recommendations": 1,
+            "min_fetch_calls_with_ack_suggestions": 1,
+            "min_five_layer_cluster_fetch_calls": 1,
+        }
+    }
+    summary = _verify_final_db_state(conn, manifest=manifest, round_count=1)
+    assert summary["cluster_mode_fetch_calls"] == 1
+    assert summary["five_layer_cluster_fetch_calls"] == 1
+    assert summary["fetch_calls_with_ack_suggestions"] == 1
+    conn.close()
+
+
+def test_verify_final_db_state_fails_when_five_layer_cluster_fetch_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_layer_fail.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_layer_fail_001",
+            "mcp_auto",
+            "success",
+            "done",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:01:00+08:00",
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_layer_fail_001",
+            "2026-04-14T10:00:10+08:00",
+            "run_layer_fail_001",
+            "mcp",
+            "alert.fetch",
+            "{\"mode\":\"auto\",\"auto_cluster_threshold\":8}",
+            1,
+            "ok",
+            "{\"ok\":true,\"summary\":\"alerts\",\"data\":{\"mode\":\"alerts\",\"alerts\":[]}}",
+            10,
+        ),
+    )
+    conn.commit()
+
+    manifest = {
+        "final_assertions": {
+            "min_patrol_runs": 1,
+            "min_tool_calls": 1,
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "min_entity_assessments": 0,
+            "min_alert_decisions": 0,
+            "max_failed_tool_calls": 0,
+            "required_current_entities": [],
+            "min_five_layer_cluster_fetch_calls": 1,
+        }
+    }
+    with pytest.raises(HermesSlowVerificationError, match="min_five_layer_cluster_fetch_calls"):
         _verify_final_db_state(conn, manifest=manifest, round_count=1)
     conn.close()
 

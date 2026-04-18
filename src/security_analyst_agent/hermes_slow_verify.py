@@ -537,7 +537,7 @@ def _verify_round_db_state(conn, *, round_spec: dict[str, Any], started_at: str)
 def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) -> dict[str, Any]:
     tool_rows = conn.execute(
         """
-        select tool_name, occurred_at, source, run_id, result_ok, result_summary
+        select tool_name, occurred_at, source, run_id, result_ok, result_summary, result_json
         from agent_tool_calls
         order by occurred_at asc
         """
@@ -569,6 +569,82 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
             "final_db_assertions",
             f"failed tool calls exceeded limit: {failed_summary}",
         )
+
+    alert_fetch_rows = [
+        row for row in tool_rows if row["tool_name"] == "alert.fetch" and int(row["result_ok"]) == 1
+    ]
+    cluster_mode_fetch_calls = 0
+    fetch_calls_with_priority_buckets = 0
+    fetch_calls_with_backlog_schedule = 0
+    fetch_calls_with_hotspot_summary = 0
+    fetch_calls_with_processing_guardrails = 0
+    fetch_calls_with_recommended_next_actions = 0
+    fetch_calls_with_ack_recommendations = 0
+    fetch_calls_with_ack_suggestions = 0
+    five_layer_cluster_fetch_calls = 0
+    for row in alert_fetch_rows:
+        try:
+            result_body = json.loads(row["result_json"] or "{}")
+        except json.JSONDecodeError:
+            result_body = {}
+        if not isinstance(result_body, dict):
+            continue
+        data = result_body.get("data")
+        if not isinstance(data, dict):
+            continue
+        mode = str(data.get("mode", "")).lower()
+        priority_buckets = data.get("priority_buckets")
+        backlog_schedule = data.get("backlog_schedule")
+        hotspot_summary = data.get("hotspot_summary")
+        processing_guardrails = data.get("processing_guardrails")
+        recommended_next_actions = data.get("recommended_next_actions")
+        ack_recommendations = data.get("ack_recommendations")
+
+        if mode == "clusters":
+            cluster_mode_fetch_calls += 1
+        if isinstance(priority_buckets, dict):
+            fetch_calls_with_priority_buckets += 1
+        if isinstance(backlog_schedule, dict):
+            fetch_calls_with_backlog_schedule += 1
+        if isinstance(hotspot_summary, dict):
+            fetch_calls_with_hotspot_summary += 1
+        if isinstance(processing_guardrails, dict):
+            fetch_calls_with_processing_guardrails += 1
+        if isinstance(recommended_next_actions, list):
+            fetch_calls_with_recommended_next_actions += 1
+        if isinstance(ack_recommendations, list):
+            fetch_calls_with_ack_recommendations += 1
+            if any(item.get("verdict") == "suggest_ack_triaged" for item in ack_recommendations if isinstance(item, dict)):
+                fetch_calls_with_ack_suggestions += 1
+
+        if (
+            mode == "clusters"
+            and isinstance(priority_buckets, dict)
+            and isinstance(backlog_schedule, dict)
+            and isinstance(hotspot_summary, dict)
+            and isinstance(processing_guardrails, dict)
+            and isinstance(ack_recommendations, list)
+        ):
+            five_layer_cluster_fetch_calls += 1
+
+    layer_min_assertions = {
+        "min_cluster_mode_fetch_calls": cluster_mode_fetch_calls,
+        "min_fetch_calls_with_priority_buckets": fetch_calls_with_priority_buckets,
+        "min_fetch_calls_with_backlog_schedule": fetch_calls_with_backlog_schedule,
+        "min_fetch_calls_with_hotspot_summary": fetch_calls_with_hotspot_summary,
+        "min_fetch_calls_with_processing_guardrails": fetch_calls_with_processing_guardrails,
+        "min_fetch_calls_with_recommended_next_actions": fetch_calls_with_recommended_next_actions,
+        "min_fetch_calls_with_ack_recommendations": fetch_calls_with_ack_recommendations,
+        "min_fetch_calls_with_ack_suggestions": fetch_calls_with_ack_suggestions,
+        "min_five_layer_cluster_fetch_calls": five_layer_cluster_fetch_calls,
+    }
+    for assertion_key, actual_value in layer_min_assertions.items():
+        required_value = int(final_assertions.get(assertion_key, 0))
+        if actual_value < required_value:
+            raise HermesSlowVerificationError(
+                "final_db_assertions",
+                f"expected at least {required_value} for {assertion_key}, got {actual_value}",
+            )
 
     patrol_runs = conn.execute(
         """
@@ -855,6 +931,15 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         "tool_calls_count": len(tool_names),
         "tool_names": tool_names,
         "failed_tool_calls_count": len(failed_tool_rows),
+        "cluster_mode_fetch_calls": cluster_mode_fetch_calls,
+        "fetch_calls_with_priority_buckets": fetch_calls_with_priority_buckets,
+        "fetch_calls_with_backlog_schedule": fetch_calls_with_backlog_schedule,
+        "fetch_calls_with_hotspot_summary": fetch_calls_with_hotspot_summary,
+        "fetch_calls_with_processing_guardrails": fetch_calls_with_processing_guardrails,
+        "fetch_calls_with_recommended_next_actions": fetch_calls_with_recommended_next_actions,
+        "fetch_calls_with_ack_recommendations": fetch_calls_with_ack_recommendations,
+        "fetch_calls_with_ack_suggestions": fetch_calls_with_ack_suggestions,
+        "five_layer_cluster_fetch_calls": five_layer_cluster_fetch_calls,
         "patrol_runs": [dict(row) for row in patrol_runs],
         "link_decisions_count": conn.execute("select count(*) from link_decisions").fetchone()[0],
         "case_assessments_count": case_assessments_count,
