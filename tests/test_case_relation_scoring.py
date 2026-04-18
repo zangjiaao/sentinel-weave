@@ -68,3 +68,25 @@ def test_case_relation_score_treats_reactivation_close_to_command_execution() ->
     )
     stage_factor = next(item for item in score.factors if item["factor_type"] == "stage_continuity")
     assert stage_factor["score"] >= 0.85
+
+
+def test_case_relation_score_boosts_same_asset_stage_progress_with_source_rotation() -> None:
+    score = score_case_relation(
+        left={
+            "current_stage": "persistence",
+            "overall_severity": "high",
+            "asset_ids": {"asset_api_prod", "asset_admin_portal", "asset_static_www"},
+            "src_ips": {"198.51.100.23"},
+            "last_event_at": "2026-04-11T14:20:00+08:00",
+        },
+        right={
+            "current_stage": "lateral_prep",
+            "overall_severity": "high",
+            "asset_ids": {"asset_api_prod"},
+            "src_ips": {"198.51.100.77"},
+            "last_event_at": "2026-04-12T11:05:00+08:00",
+        },
+    )
+    progress_factor = next(item for item in score.factors if item["factor_type"] == "same_asset_stage_progress")
+    assert progress_factor["score"] == 1.0
+    assert score.total >= 0.78

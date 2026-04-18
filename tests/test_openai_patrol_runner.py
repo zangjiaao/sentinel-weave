@@ -222,3 +222,66 @@ def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_
     assert result.turns == 3
     assert result.tool_calls == 1
     assert recorded_calls == 1
+
+
+def test_run_openai_patrol_local_precheck_blocks_empty_batch_without_backend_dispatch(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_local_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_upsert_batch",
+                        "call_id": "call_local_001",
+                        "arguments": '{"items":[]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_local_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_local_002",
+                        "arguments": '{"status":["new","open"],"limit":2}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_local_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    case_upsert_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'case.upsert-batch'"
+    ).fetchone()[0]
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.turns == 3
+    assert result.tool_calls == 1
+    assert case_upsert_calls == 0
+    assert alert_fetch_calls == 1

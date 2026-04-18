@@ -13,6 +13,7 @@ _SEVERITY_ORDER = {
     "critical": 4,
 }
 _RECON_TO_ATTACK_BRIDGE_BONUS_WEIGHT = 0.24
+_SAME_ASSET_STAGE_PROGRESS_BONUS_WEIGHT = 0.36
 
 
 @dataclass
@@ -99,6 +100,44 @@ def _recon_to_attack_bridge_score(
     return 1.0
 
 
+def _same_asset_stage_progress_score(
+    *,
+    left: dict[str, Any],
+    right: dict[str, Any],
+    left_assets: set[str],
+    right_assets: set[str],
+    shared_assets: set[str],
+    temporal_score: float,
+) -> float:
+    if not shared_assets:
+        return 0.0
+    if left_assets == right_assets:
+        return 0.0
+    if temporal_score < 0.8:
+        return 0.0
+
+    left_stage = normalize_stage(left.get("current_stage"))
+    right_stage = normalize_stage(right.get("current_stage"))
+    left_rank = stage_rank(left_stage)
+    right_rank = stage_rank(right_stage)
+    if min(left_rank, right_rank) < stage_rank("persistence"):
+        return 0.0
+    if max(left_rank, right_rank) < stage_rank("command_execution"):
+        return 0.0
+    if left_rank == right_rank:
+        return 0.0
+    if abs(left_rank - right_rank) > 2:
+        return 0.0
+
+    left_severity = _SEVERITY_ORDER.get(str(left.get("overall_severity") or "").lower(), 0)
+    right_severity = _SEVERITY_ORDER.get(str(right.get("overall_severity") or "").lower(), 0)
+    if max(left_severity, right_severity) < _SEVERITY_ORDER["high"]:
+        return 0.0
+    if min(left_severity, right_severity) < _SEVERITY_ORDER["medium"]:
+        return 0.0
+    return 1.0
+
+
 def score_case_relation(left: dict[str, Any], right: dict[str, Any]) -> CaseRelationScore:
     left_assets = _normalize_set(left.get("asset_ids"))
     right_assets = _normalize_set(right.get("asset_ids"))
@@ -119,6 +158,14 @@ def score_case_relation(left: dict[str, Any], right: dict[str, Any]) -> CaseRela
         right=right,
         shared_assets=asset_overlap,
         shared_src_ips=ip_overlap,
+        temporal_score=temporal_score,
+    )
+    same_asset_stage_progress_score = _same_asset_stage_progress_score(
+        left=left,
+        right=right,
+        left_assets=left_assets,
+        right_assets=right_assets,
+        shared_assets=asset_overlap,
         temporal_score=temporal_score,
     )
 
@@ -159,6 +206,12 @@ def score_case_relation(left: dict[str, Any], right: dict[str, Any]) -> CaseRela
             "weight": _RECON_TO_ATTACK_BRIDGE_BONUS_WEIGHT,
             "score": round(recon_bridge_score, 4),
             "summary": "recon continuation into high-signal attack chain",
+        },
+        {
+            "factor_type": "same_asset_stage_progress",
+            "weight": _SAME_ASSET_STAGE_PROGRESS_BONUS_WEIGHT,
+            "score": round(same_asset_stage_progress_score, 4),
+            "summary": "same asset high-signal stage progression despite source rotation",
         },
     ]
 

@@ -200,6 +200,19 @@ _REPEATED_INVALID_BLOCK_WARNINGS = {
     "batch_items_required",
 }
 
+_LOCAL_BATCH_ITEMS_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "case.upsert-batch": ["case_id", "title", "status", "overall_severity", "current_stage"],
+    "case.link-alert-batch": ["case_id", "alert_id", "confidence", "reason"],
+    "assessment.upsert-batch": [
+        "entity_type",
+        "entity_key",
+        "risk_level",
+        "assessment_confidence",
+        "verdict",
+        "reason_summary",
+    ],
+}
+
 
 def _tool_payload_signature(tool_name: str, payload: dict[str, Any]) -> str:
     try:
@@ -247,6 +260,30 @@ def _duplicate_invalid_block_result(tool_name: str) -> dict[str, Any]:
         "refs": {},
         "page": {"next_cursor": None, "has_more": False},
         "meta": {},
+    }
+
+
+def _prevalidate_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    required_fields = _LOCAL_BATCH_ITEMS_REQUIRED_FIELDS.get(tool_name)
+    if required_fields is None:
+        return None
+    items = payload.get("items")
+    if isinstance(items, list) and len(items) > 0:
+        return None
+    return {
+        "ok": False,
+        "summary": "payload 校验失败：items List should have at least 1 item after validation, not 0",
+        "data": {
+            "tool": tool_name,
+            "schema_guidance": {
+                "required_fields": required_fields,
+                "tip": "items 不能为空；单条写入也必须传 items=[{...}]",
+            },
+        },
+        "warnings": ["payload_validation_error", "batch_items_required", "tool_schema_guidance"],
+        "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {"source": "openai_runner_local_precheck"},
     }
 
 
@@ -675,10 +712,16 @@ def run_openai_patrol(
                 if payload_signature in invalid_tool_signatures:
                     tool_result = _duplicate_invalid_block_result(backend_tool_name)
                 else:
-                    tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
-                    tool_call_count += 1
-                    if _should_block_repeated_invalid_call(tool_result):
-                        invalid_tool_signatures.add(payload_signature)
+                    precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
+                    if precheck_result is not None:
+                        tool_result = precheck_result
+                        if _should_block_repeated_invalid_call(tool_result):
+                            invalid_tool_signatures.add(payload_signature)
+                    else:
+                        tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
+                        tool_call_count += 1
+                        if _should_block_repeated_invalid_call(tool_result):
+                            invalid_tool_signatures.add(payload_signature)
 
             function_outputs.append(
                 {

@@ -942,8 +942,6 @@ def _demote_superseded_confirmed_relations(conn: sqlite3.Connection, *, run_id: 
         for relation in relations:
             if relation["relation_id"] == best_relation["relation_id"]:
                 continue
-            if relation["last_run_id"] == run_id:
-                continue
             if float(relation["score"]) + _SUPERSEDED_RELATION_SCORE_MARGIN >= best_score:
                 continue
             demotions.setdefault(
