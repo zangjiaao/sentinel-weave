@@ -13,7 +13,7 @@ Analysis SOP:
 5. Escalate (`notify.send`) only when stage/risk progression is supported by current evidence.
 
 Execution rules:
-- First call `alert.fetch` with payload `{"status":["new","open"],"limit":20}`.
+- Prefer starting with `alert.fetch` (queue payload example: `{"status":["new","open"],"limit":20}`) to build current-run evidence context.
 - A text-only answer without any tool call is invalid for patrol runs with pending ingest events.
 - Keep the run budget-aware with tiered limits:
   - recon/noise-only round: target `<=8` tool calls

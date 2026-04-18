@@ -132,7 +132,6 @@ def run_openai_patrol(
     next_input: Any = query
     resume_response_id = previous_response_id
     tool_call_count = 0
-    first_backend_tool_name: str | None = None
     last_response_id: str | None = previous_response_id
     response_text = ""
 
@@ -156,12 +155,6 @@ def run_openai_patrol(
             response_text = _extract_output_text(response).strip()
             if tool_call_count <= 0:
                 detail = "openai responses returned no backend tool calls for this patrol run"
-                return OpenAIPatrolResult(status="failed", detail=detail, response_id=last_response_id)
-            if first_backend_tool_name != "alert.fetch":
-                detail = (
-                    "openai responses violated patrol contract: first backend tool call must be alert.fetch "
-                    f"(got={first_backend_tool_name or '[NONE]'})"
-                )
                 return OpenAIPatrolResult(status="failed", detail=detail, response_id=last_response_id)
             detail = (
                 f"openai responses completed (tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'})"
@@ -188,8 +181,6 @@ def run_openai_patrol(
                     payload = {}
                 tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
                 tool_call_count += 1
-                if first_backend_tool_name is None:
-                    first_backend_tool_name = backend_tool_name
 
             function_outputs.append(
                 {

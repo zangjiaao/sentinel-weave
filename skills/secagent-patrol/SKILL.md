@@ -13,7 +13,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 
 1. Confirm the `secagent` MCP server is available before starting analysis.
 2. 优先复用 MCP prompt 提供的参数说明；只有在 prompt 不存在时才回退到本 Skill 里的默认 payload。
-3. Start every patrol run with `alert.fetch` and a queue-style payload such as `{"status":["new","open"],"limit":20}`.
+3. 优先在巡检开始阶段调用 `alert.fetch` 拉取队列（示例 payload：`{"status":["new","open"],"limit":20}`），但可按证据上下文调整工具顺序。
 4. Keep the patrol bounded. Process at most 10 alerts per run and stop when `no_more_alerts`, `time_budget_exceeded`, or `high_risk_case_found`.
 5. 预算优先：若 run 有 `max_turns`（例如 18），采用分层预算并预留至少 3 次回合用于输出最终总结：
    - 纯 recon/noise 轮次：目标 `<=8` 次 tool 调用
@@ -41,7 +41,7 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 
 ## Tool Usage Rules
 
-- Use `alert.fetch` as the first tool in every patrol run.
+- Prefer using `alert.fetch` early in patrol runs to ground current queue context.
 - 告警详情统一使用 `alert.detail-batch`，单条补证也传单元素数组。
 - 同一轮中不要对同一 `alert_id` 重复调用 `alert.detail-batch`。
 - Use `case.get` before writing a severity or current-stage conclusion.
