@@ -220,6 +220,158 @@ def test_verify_round_db_state_accepts_reused_patrol_run_referenced_by_tool_call
     conn.close()
 
 
+def test_verify_round_db_state_allows_non_first_alert_fetch_when_present(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_round_nonfirst_fetch.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_nonfirst_fetch_001",
+            "mcp_auto",
+            "running",
+            "reuse run",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_nonfirst_001",
+            "2026-04-14T10:05:00+08:00",
+            "run_nonfirst_fetch_001",
+            "mcp",
+            "alert.detail-batch",
+            "{\"alert_ids\":[\"alt_demo_001\"]}",
+            1,
+            "ok",
+            "{\"ok\":true}",
+            9,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_nonfirst_002",
+            "2026-04-14T10:05:10+08:00",
+            "run_nonfirst_fetch_001",
+            "mcp",
+            "alert.fetch",
+            "{\"status\":[\"new\",\"open\"],\"limit\":5}",
+            1,
+            "ok",
+            "{\"ok\":true,\"summary\":\"ok\",\"data\":{\"mode\":\"alerts\",\"alerts\":[]}}",
+            11,
+        ),
+    )
+    conn.commit()
+
+    summary = _verify_round_db_state(
+        conn,
+        round_spec={
+            "round_id": "round_nonfirst_fetch",
+            "required_tool_names": ["alert.fetch"],
+            "required_any_tool_names": [],
+            "first_tool_name": "alert.fetch",
+        },
+        started_at="2026-04-14T10:04:00+08:00",
+    )
+    assert summary["tool_calls_count"] == 2
+    assert "alert.fetch" in summary["tool_names"]
+    conn.close()
+
+
+def test_verify_round_db_state_can_still_enforce_strict_first_tool_name(tmp_path: Path) -> None:
+    db_path = tmp_path / "slow_round_strict_first_fetch.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    conn.execute(
+        """
+        insert into patrol_runs (run_id, trigger_source, status, summary, started_at, analysis_cutoff_at, finished_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run_strict_first_fetch_001",
+            "mcp_auto",
+            "running",
+            "reuse run",
+            "2026-04-14T10:00:00+08:00",
+            "2026-04-14T10:00:00+08:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_strict_nonfirst_001",
+            "2026-04-14T10:05:00+08:00",
+            "run_strict_first_fetch_001",
+            "mcp",
+            "alert.detail-batch",
+            "{\"alert_ids\":[\"alt_demo_001\"]}",
+            1,
+            "ok",
+            "{\"ok\":true}",
+            9,
+        ),
+    )
+    conn.execute(
+        """
+        insert into agent_tool_calls (
+          call_id, occurred_at, run_id, source, tool_name, payload_json,
+          result_ok, result_summary, result_json, latency_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "call_strict_nonfirst_002",
+            "2026-04-14T10:05:10+08:00",
+            "run_strict_first_fetch_001",
+            "mcp",
+            "alert.fetch",
+            "{\"status\":[\"new\",\"open\"],\"limit\":5}",
+            1,
+            "ok",
+            "{\"ok\":true,\"summary\":\"ok\",\"data\":{\"mode\":\"alerts\",\"alerts\":[]}}",
+            11,
+        ),
+    )
+    conn.commit()
+
+    with pytest.raises(HermesSlowVerificationError, match="first tool call must be alert.fetch"):
+        _verify_round_db_state(
+            conn,
+            round_spec={
+                "round_id": "round_strict_nonfirst_fetch",
+                "required_tool_names": ["alert.fetch"],
+                "required_any_tool_names": [],
+                "first_tool_name": "alert.fetch",
+                "strict_first_tool_name": True,
+            },
+            started_at="2026-04-14T10:04:00+08:00",
+        )
+    conn.close()
+
+
 def test_load_integration_manifest_requires_zero_failed_tools_and_compromised_host() -> None:
     manifest = load_integration_manifest("hermes-slow-integration")
 

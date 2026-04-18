@@ -418,6 +418,11 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
                 "output_text": "[SILENT]",
                 "output": [{"type": "message", "role": "assistant"}],
             },
+            {
+                "id": "resp_openai_no_tools_retry",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
         ]
     )
 
@@ -586,6 +591,62 @@ def test_trigger_patrol_openai_mode_retries_fresh_when_resume_returns_no_tool_ca
     assert result["status"] == "success"
     assert len(fake_client.responses.calls) == 3
     assert fake_client.responses.calls[0]["previous_response_id"] == "resp_existing_retry_001"
+    assert "previous_response_id" not in fake_client.responses.calls[1]
+
+    conn = connect_db(db_path)
+    run_row = conn.execute(
+        "select summary from patrol_runs where run_id = ?",
+        (result["run_id"],),
+    ).fetchone()
+    conn.close()
+    assert "retried_fresh_after_no_tool=1" in str(run_row["summary"])
+
+
+def test_trigger_patrol_openai_mode_retries_once_when_fresh_attempt_returns_no_tool_calls(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_fresh_retry_001")], source="siem")
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL", True)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_fresh_retry_first_001",
+                "usage": {"input_tokens": 44, "output_tokens": 6},
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+            {
+                "id": "resp_fresh_retry_second_001",
+                "usage": {"input_tokens": 101, "output_tokens": 23},
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_fresh_retry_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_fresh_retry_second_002",
+                "usage": {"input_tokens": 70, "output_tokens": 8},
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+
+    assert result["status"] == "success"
+    assert len(fake_client.responses.calls) == 3
+    assert "previous_response_id" not in fake_client.responses.calls[0]
     assert "previous_response_id" not in fake_client.responses.calls[1]
 
     conn = connect_db(db_path)

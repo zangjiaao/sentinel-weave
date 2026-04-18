@@ -589,7 +589,6 @@ def trigger_patrol_from_ingest(
                 retried_fresh_after_no_tool = False
                 if (
                     openai_result.status != "success"
-                    and should_reuse_response
                     and DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL
                     and _is_no_backend_tool_failure(openai_result.detail)
                 ):

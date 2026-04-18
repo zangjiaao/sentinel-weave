@@ -311,8 +311,11 @@ def _assert_tool_requirements(*, tool_names: list[str], expectations: dict[str, 
     if first_tool_name:
         if not tool_names:
             raise HermesSlowVerificationError(stage, "expected at least one tool call")
-        if tool_names[0] != first_tool_name:
+        strict_first_tool_name = bool(expectations.get("strict_first_tool_name", False))
+        if strict_first_tool_name and tool_names[0] != first_tool_name:
             raise HermesSlowVerificationError(stage, f"first tool call must be {first_tool_name}, got {tool_names[0]}")
+        if first_tool_name not in tool_names:
+            raise HermesSlowVerificationError(stage, f"missing required tool: {first_tool_name}")
 
 
 def _verify_chat_output(*, chat_stdout: str, round_spec: dict[str, Any], artifact_dir: Path) -> None:
