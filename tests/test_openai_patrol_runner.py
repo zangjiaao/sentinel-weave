@@ -526,3 +526,158 @@ def test_run_openai_patrol_blocks_persistence_writes_until_read_phase_ready(tmp_
     assert result.tool_calls == 1
     assert case_upsert_calls == 0
     assert alert_fetch_calls == 1
+
+
+def test_run_openai_patrol_allows_case_upsert_after_core_discovery_without_ip_context(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_gate_relax_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_gate_relax_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_gate_relax_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_suspect_ip_topk",
+                        "call_id": "call_gate_relax_topk",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_gate_relax_003",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_detail_batch",
+                        "call_id": "call_gate_relax_detail",
+                        "arguments": '{"alert_ids":["alt_day1_scan_01"]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_gate_relax_004",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_upsert_batch",
+                        "call_id": "call_gate_relax_case_upsert",
+                        "arguments": '{"items":[{"case_id":"case_gate_relax_001","title":"gate relax","status":"open","overall_severity":"high","current_stage":"recon"}]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_gate_relax_005",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    dispatched_tools: list[str] = []
+
+    def _fake_dispatch(_conn, tool_name: str, _payload: dict, *, source: str = "mcp") -> dict:
+        dispatched_tools.append(f"{source}:{tool_name}")
+        return {
+            "ok": True,
+            "summary": "ok",
+            "data": {},
+            "warnings": [],
+            "refs": {},
+            "page": {"next_cursor": None, "has_more": False},
+            "meta": {},
+        }
+
+    monkeypatch.setattr("security_analyst_agent.openai_patrol_runner.dispatch_tool", _fake_dispatch)
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=6,
+        enforce_read_phase_gate=True,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 4
+    assert "mcp:case.upsert-batch" in dispatched_tools
+
+
+def test_run_openai_patrol_precheck_blocks_case_link_batch_when_case_missing(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_case_link_guard_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_case_link_guard_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_case_link_guard_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_link_alert_batch",
+                        "call_id": "call_case_link_guard_link",
+                        "arguments": '{"items":[{"case_id":"case_missing_for_link_guard","alert_id":"alt_day1_scan_01","confidence":0.8,"reason":"guard test"}]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_case_link_guard_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    case_link_batch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'case.link-alert-batch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert alert_fetch_calls == 1
+    assert case_link_batch_calls == 0

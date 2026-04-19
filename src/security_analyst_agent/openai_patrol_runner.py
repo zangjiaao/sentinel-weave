@@ -211,6 +211,7 @@ _REPEATED_INVALID_BLOCK_WARNINGS = {
     "detail_batch_requires_fetch_context",
     "detail_batch_alert_id_out_of_fetch_scope",
     "batch_items_required",
+    "case_link_requires_existing_case",
     "patrol_requires_initial_alert_fetch",
 }
 
@@ -265,6 +266,14 @@ _DISCOVERY_REQUIRED_TOOLS = (
     "alert.ip-context",
     "alert.detail-batch",
 )
+
+_WRITE_TOOL_DISCOVERY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "case.upsert-batch": (
+        "alert.fetch",
+        "alert.suspect-ip-topk",
+        "alert.detail-batch",
+    ),
+}
 
 
 def _tool_payload_signature(tool_name: str, payload: dict[str, Any]) -> str:
@@ -322,8 +331,9 @@ def _tool_call_kind(tool_name: str) -> str:
     return "write"
 
 
-def _read_phase_missing_tool(completed_tools: set[str]) -> str | None:
-    for tool_name in _DISCOVERY_REQUIRED_TOOLS:
+def _read_phase_missing_tool(completed_tools: set[str], *, write_tool_name: str) -> str | None:
+    required_tools = _WRITE_TOOL_DISCOVERY_REQUIREMENTS.get(write_tool_name, _DISCOVERY_REQUIRED_TOOLS)
+    for tool_name in required_tools:
         if tool_name not in completed_tools:
             return tool_name
     return None
@@ -401,6 +411,85 @@ def _prevalidate_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[s
         },
         "warnings": ["payload_validation_error", "batch_items_required", "tool_schema_guidance"],
         "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {"source": "openai_runner_local_precheck"},
+    }
+
+
+def _prevalidate_case_link_alert_batch_case_exists(
+    conn: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+
+    case_ids = list(
+        dict.fromkeys(
+            str(item.get("case_id") or "").strip()
+            for item in items
+            if isinstance(item, dict) and str(item.get("case_id") or "").strip()
+        )
+    )
+    if not case_ids:
+        return None
+
+    existing_case_rows = conn.execute(
+        f"""
+        select case_id
+        from cases
+        where case_id in ({", ".join("?" for _ in case_ids)})
+        """,
+        tuple(case_ids),
+    ).fetchall()
+    existing_case_ids = {str(row["case_id"]) for row in existing_case_rows}
+    missing_case_ids = [case_id for case_id in case_ids if case_id not in existing_case_ids]
+    if not missing_case_ids:
+        return None
+
+    available_case_rows = conn.execute(
+        """
+        select case_id
+        from cases
+        where merge_state is null or merge_state != 'merged'
+        order by case_id asc
+        limit 20
+        """
+    ).fetchall()
+    available_case_ids = [str(row["case_id"]) for row in available_case_rows]
+
+    return {
+        "ok": False,
+        "summary": (
+            "payload 校验失败：case.link-alert-batch 包含未创建案件，"
+            f"missing_case_count={len(missing_case_ids)}"
+        ),
+        "data": {
+            "tool": "case.link-alert-batch",
+            "missing_case_ids": missing_case_ids,
+            "available_case_ids_sample": available_case_ids,
+            "recommended_next_actions": [
+                {
+                    "tool": "case.upsert-batch",
+                    "reason": "先创建缺失案件后再执行告警关联",
+                },
+                {
+                    "tool": "case.list",
+                    "reason": "先查看当前可用案件，避免误用不存在的 case_id",
+                },
+                {
+                    "tool": "case.search",
+                    "reason": "按 src_ip/asset/stage 搜索候选案件后再关联",
+                },
+            ],
+        },
+        "warnings": (
+            ["payload_validation_error", "case_link_requires_existing_case"]
+            + [f"case_not_found:{case_id}" for case_id in missing_case_ids]
+        ),
+        "refs": {"case_ids": available_case_ids},
         "page": {"next_cursor": None, "has_more": False},
         "meta": {"source": "openai_runner_local_precheck"},
     }
@@ -951,11 +1040,19 @@ def run_openai_patrol(
                     elif (
                         enforce_read_phase_gate
                         and backend_tool_name in _PERSISTENCE_WRITE_TOOL_NAMES
-                        and (missing_tool := _read_phase_missing_tool(completed_discovery_tools)) is not None
+                        and (
+                            missing_tool := _read_phase_missing_tool(
+                                completed_discovery_tools,
+                                write_tool_name=backend_tool_name,
+                            )
+                        )
+                        is not None
                     ):
                         tool_result = _read_phase_guard_result(backend_tool_name, missing_tool=missing_tool)
                     else:
                         precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
+                        if precheck_result is None and backend_tool_name == "case.link-alert-batch":
+                            precheck_result = _prevalidate_case_link_alert_batch_case_exists(conn, payload)
                         if precheck_result is not None:
                             tool_result = precheck_result
                             if _should_block_repeated_invalid_call(tool_result):
