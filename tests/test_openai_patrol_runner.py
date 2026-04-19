@@ -980,3 +980,185 @@ def test_run_openai_patrol_stops_after_repeated_blocked_tool_loop(tmp_path) -> N
     assert result.status == "success"
     assert result.tool_calls == 1
     assert "stopped_after_blocked_tool_loop" in result.detail
+
+
+def test_run_openai_patrol_autofills_empty_case_upsert_and_seeds_links(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    for alert_id, src_ip, stage, occurred_at in [
+        ("alt_auto_case_001", "198.51.100.23", "exploit", "2026-04-13T10:00:00+08:00"),
+        ("alt_auto_case_002", "198.51.100.23", "persistence", "2026-04-13T10:02:00+08:00"),
+        ("alt_auto_case_003", "198.51.100.23", "command_execution", "2026-04-13T10:04:00+08:00"),
+        ("alt_auto_case_004", "203.0.113.88", "exploit", "2026-04-13T10:01:00+08:00"),
+        ("alt_auto_case_005", "203.0.113.88", "persistence", "2026-04-13T10:03:00+08:00"),
+        ("alt_auto_case_006", "203.0.113.88", "reactivation", "2026-04-13T10:05:00+08:00"),
+    ]:
+        conn.execute(
+            """
+            insert into alerts (
+              alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                occurred_at,
+                f"auto-case {alert_id}",
+                "open",
+                "high",
+                stage,
+                src_ip,
+                "203.0.113.10",
+                "asset_auto_case_api",
+            ),
+        )
+    conn.commit()
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_auto_case_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_auto_case_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_case_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_suspect_ip_topk",
+                        "call_id": "call_auto_case_topk",
+                        "arguments": '{"status":["new","open"],"top_k":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_case_003",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_upsert_batch",
+                        "call_id": "call_auto_case_upsert",
+                        "arguments": '{"items":[]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_case_004",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=6,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    auto_case_rows = conn.execute(
+        """
+        select case_id
+        from cases
+        where case_id like 'case_auto_hotspot_%'
+        order by case_id asc
+        """
+    ).fetchall()
+    auto_link_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where is_active = 1
+          and case_id like 'case_auto_hotspot_%'
+        """
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls >= 4
+    assert len(auto_case_rows) >= 1
+    assert auto_link_count >= 1
+
+
+def test_run_openai_patrol_auto_acks_low_recon_noise_when_model_does_not_ack(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_auto_noise_001",
+            "2026-04-13T09:00:00+08:00",
+            "auto ack low recon",
+            "open",
+            "low",
+            "recon",
+            "192.0.2.21",
+            "203.0.113.10",
+            "asset_static_www",
+        ),
+    )
+    conn.commit()
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_auto_ack_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_auto_ack_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_ack_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=4,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    ack_count = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.ack'"
+    ).fetchone()[0]
+    low_recon_status = conn.execute(
+        "select status from alerts where alert_id = 'alt_auto_noise_001'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 2
+    assert "auto_noise_ack=" in result.detail
+    assert ack_count == 1
+    assert low_recon_status == "triaged"

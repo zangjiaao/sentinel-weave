@@ -1272,6 +1272,72 @@ def test_mcp_alert_fetch_reuses_active_auto_run_without_creating_new_run(tmp_pat
     conn.close()
 
 
+def test_mcp_alert_fetch_backfills_hotspot_case_signature_links(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_auto_hotspot_198_51_100_23",
+            "title": "auto hotspot 198.51.100.23",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "exploit",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_hotspot_anchor_001",
+        case_id="case_auto_hotspot_198_51_100_23",
+        occurred_at="2026-04-13T12:00:00+08:00",
+        stage="exploit",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_hotspot_backfill_001",
+            "2026-04-13T12:03:00+08:00",
+            "hotspot backfill",
+            "open",
+            "high",
+            "persistence",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.commit()
+
+    result = dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    assert result["ok"] is True
+    assert "auto_fetch_hotspot_case_backfill_applied" in result["warnings"]
+
+    linked_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ?
+          and alert_id = ?
+          and is_active = 1
+        """,
+        ("case_auto_hotspot_198_51_100_23", "alt_hotspot_backfill_001"),
+    ).fetchone()[0]
+    assert linked_count == 1
+    conn.close()
+
+
 def test_mcp_auto_run_closes_after_alert_ack_when_queue_drained(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

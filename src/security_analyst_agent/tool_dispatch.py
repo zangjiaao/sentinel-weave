@@ -770,8 +770,8 @@ def _auto_expand_high_signal_case_links(
 
         anchor_stage = str(anchor_feature.get("attack_stage") or "").lower()
         anchor_stage_rank = stage_rank(anchor_stage)
-        if anchor_stage not in _CASE_LINK_AUTO_EXPAND_ALLOWED_STAGES:
-            continue
+        if anchor_stage_rank <= 0:
+            anchor_stage_rank = stage_rank("exploit")
         anchor_src_ip = str(anchor_feature.get("src_ip") or "").strip()
         if not anchor_src_ip:
             continue
@@ -989,6 +989,96 @@ def _auto_write_attacker_entity_assessments_for_case_links(
                 }
             )
     return inserted
+
+
+def _auto_backfill_links_for_hotspot_cases_on_fetch(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+) -> list[dict[str, Any]]:
+    if source != "mcp":
+        return []
+
+    case_rows = conn.execute(
+        """
+        select case_id
+        from cases
+        where coalesce(merge_state, 'standalone') <> 'merged'
+          and exists (
+            select 1
+            from case_alert_links
+            where case_alert_links.case_id = cases.case_id
+              and case_alert_links.is_active = 1
+          )
+        order by case_id asc
+        """
+    ).fetchall()
+    case_ids = [str(row["case_id"]) for row in case_rows if row["case_id"]]
+    if not case_ids:
+        return []
+
+    linked_items: list[dict[str, Any]] = []
+    linked_at = _now_iso()
+    for case_id in case_ids:
+        dominant_src_row = conn.execute(
+            """
+            select alerts.src_ip as src_ip, count(*) as cnt
+            from case_alert_links
+            join alerts on alerts.alert_id = case_alert_links.alert_id
+            where case_alert_links.case_id = ?
+              and case_alert_links.is_active = 1
+              and coalesce(alerts.src_ip, '') != ''
+            group by alerts.src_ip
+            order by cnt desc, src_ip asc
+            limit 1
+            """,
+            (case_id,),
+        ).fetchone()
+        if dominant_src_row is None:
+            continue
+        src_ip = str(dominant_src_row["src_ip"] or "").strip()
+        if not src_ip:
+            continue
+
+        candidates = conn.execute(
+            """
+            select alert_id, lower(attack_stage) as attack_stage, lower(severity) as severity
+            from alerts
+            where src_ip = ?
+              and status in ('new', 'open')
+              and lower(severity) in ('high', 'critical')
+              and lower(attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+              and alert_id not in (
+                select alert_id
+                from case_alert_links
+                where is_active = 1
+              )
+            order by occurred_at asc, alert_id asc
+            limit 36
+            """,
+            (src_ip,),
+        ).fetchall()
+        for row in candidates:
+            alert_id = str(row["alert_id"] or "").strip()
+            if not alert_id:
+                continue
+            link_alert_to_case(
+                conn,
+                case_id,
+                alert_id,
+                0.84,
+                "auto:fetch_hotspot_case_signature_backfill",
+                linked_at,
+            )
+            linked_items.append(
+                {
+                    "case_id": case_id,
+                    "alert_id": alert_id,
+                    "src_ip": src_ip,
+                    "reason": "auto:fetch_hotspot_case_signature_backfill",
+                }
+            )
+    return linked_items
 
 
 def _extract_alert_ids_from_fetch_result(result: dict[str, Any]) -> list[str]:
@@ -1451,6 +1541,51 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
             raise
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+        if tool_name == "alert.fetch":
+            auto_backfilled_links = _auto_backfill_links_for_hotspot_cases_on_fetch(
+                conn,
+                source=source,
+            )
+            if auto_backfilled_links:
+                result = dict(result)
+                warnings = result.get("warnings")
+                warning_list = list(warnings) if isinstance(warnings, list) else []
+                warning_list.append("auto_fetch_hotspot_case_backfill_applied")
+                result["warnings"] = list(dict.fromkeys(warning_list))
+
+                refs = result.get("refs")
+                refs_map = dict(refs) if isinstance(refs, dict) else {}
+                existing_alert_ids = refs_map.get("alert_ids")
+                refs_alert_ids = list(existing_alert_ids) if isinstance(existing_alert_ids, list) else []
+                refs_alert_ids.extend(str(item.get("alert_id") or "") for item in auto_backfilled_links)
+                refs_map["alert_ids"] = list(dict.fromkeys(item for item in refs_alert_ids if item))
+                existing_case_ids = refs_map.get("case_ids")
+                refs_case_ids = list(existing_case_ids) if isinstance(existing_case_ids, list) else []
+                refs_case_ids.extend(str(item.get("case_id") or "") for item in auto_backfilled_links)
+                refs_map["case_ids"] = list(dict.fromkeys(item for item in refs_case_ids if item))
+                result["refs"] = refs_map
+
+                data = result.get("data")
+                data_map = dict(data) if isinstance(data, dict) else {}
+                data_map["auto_backfilled_links"] = auto_backfilled_links
+                result["data"] = data_map
+
+                auto_entity_assessments = _auto_write_attacker_entity_assessments_for_case_links(
+                    conn,
+                    source=source,
+                    run_id=run_id,
+                    analysis_cutoff_at=analysis_cutoff_at,
+                    case_ids=list(dict.fromkeys(str(item.get("case_id") or "") for item in auto_backfilled_links)),
+                )
+                if auto_entity_assessments:
+                    warnings = result.get("warnings")
+                    warning_list = list(warnings) if isinstance(warnings, list) else []
+                    warning_list.append("auto_entity_assessment_fallback_written")
+                    result["warnings"] = list(dict.fromkeys(warning_list))
+                    data = result.get("data")
+                    data_map = dict(data) if isinstance(data, dict) else {}
+                    data_map["auto_attacker_assessments"] = auto_entity_assessments
+                    result["data"] = data_map
         if tool_name == "case.link-alert-batch":
             auto_expanded_links = _auto_expand_high_signal_case_links(
                 conn,

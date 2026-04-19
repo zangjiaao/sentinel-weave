@@ -10,6 +10,7 @@ from typing import Any, Callable
 from security_analyst_agent.config import DEFAULT_OPENAI_BASE_URL
 from security_analyst_agent.mcp_server import CORE_TOOL_NAMES, TOOL_DESCRIPTIONS, TOOL_REQUEST_MODELS
 from security_analyst_agent.repositories.audit import insert_agent_output_log
+from security_analyst_agent.stages import stage_rank
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
 OpenAIClientFactory = Callable[[], Any]
@@ -975,6 +976,160 @@ def _normalize_payload_for_tool(tool_name: str, payload: dict[str, Any]) -> dict
     return payload
 
 
+def _has_non_empty_batch_items(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    items = payload.get("items")
+    return isinstance(items, list) and len(items) > 0
+
+
+def _safe_case_id_from_ip(src_ip: str) -> str:
+    normalized = src_ip.strip().replace(".", "_").replace(":", "_")
+    return f"case_auto_hotspot_{normalized[:48]}"
+
+
+def _safe_actor_id_from_case(case_id: str) -> str:
+    return f"actor_auto_{case_id}"[:64]
+
+
+def _infer_stage_and_severity_from_alert_ids(conn: sqlite3.Connection, alert_ids: list[str]) -> tuple[str, str]:
+    deduped_alert_ids = list(dict.fromkeys(str(item).strip() for item in alert_ids if str(item).strip()))
+    if not deduped_alert_ids:
+        return "exploit", "high"
+    rows = conn.execute(
+        f"""
+        select lower(attack_stage) as attack_stage, lower(severity) as severity
+        from alerts
+        where alert_id in ({", ".join("?" for _ in deduped_alert_ids)})
+        """,
+        tuple(deduped_alert_ids),
+    ).fetchall()
+    if not rows:
+        return "exploit", "high"
+
+    max_stage = "recon"
+    max_stage_rank = stage_rank(max_stage)
+    max_severity = "low"
+    severity_rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    max_severity_rank = severity_rank[max_severity]
+    for row in rows:
+        candidate_stage = str(row["attack_stage"] or "").strip()
+        candidate_severity = str(row["severity"] or "").strip()
+        candidate_stage_rank = stage_rank(candidate_stage)
+        if candidate_stage_rank > max_stage_rank:
+            max_stage = candidate_stage or max_stage
+            max_stage_rank = candidate_stage_rank
+        candidate_severity_rank = severity_rank.get(candidate_severity, 1)
+        if candidate_severity_rank > max_severity_rank:
+            max_severity = candidate_severity if candidate_severity in severity_rank else max_severity
+            max_severity_rank = candidate_severity_rank
+
+    if max_stage_rank <= 0:
+        max_stage = "exploit"
+    if max_severity not in {"high", "critical"}:
+        max_severity = "high"
+    return max_stage, max_severity
+
+
+def _build_case_upsert_autofill_from_suspects(
+    conn: sqlite3.Connection,
+    *,
+    suspects: list[dict[str, Any]],
+    max_cases: int = 2,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if not suspects:
+        return None, []
+
+    sorted_suspects = sorted(
+        (
+            item
+            for item in suspects
+            if isinstance(item, dict) and str(item.get("src_ip") or "").strip()
+        ),
+        key=lambda item: (
+            int(item.get("critical_count") or 0),
+            int(item.get("high_severity_count") or 0),
+            int(item.get("non_recon_stage_count") or 0),
+            int(item.get("alert_count") or 0),
+            str(item.get("src_ip") or ""),
+        ),
+        reverse=True,
+    )
+    case_items: list[dict[str, Any]] = []
+    seed_link_items: list[dict[str, Any]] = []
+    for suspect in sorted_suspects:
+        if len(case_items) >= max_cases:
+            break
+        src_ip = str(suspect.get("src_ip") or "").strip()
+        if not src_ip:
+            continue
+        high_count = int(suspect.get("high_severity_count") or 0)
+        critical_count = int(suspect.get("critical_count") or 0)
+        alert_count = int(suspect.get("alert_count") or 0)
+        if high_count < 2 and critical_count < 1 and alert_count < 3:
+            continue
+        sample_alert_ids = suspect.get("sample_alert_ids")
+        if not isinstance(sample_alert_ids, list):
+            sample_alert_ids = []
+        sample_alert_ids = [str(item).strip() for item in sample_alert_ids if str(item).strip()]
+        current_stage, overall_severity = _infer_stage_and_severity_from_alert_ids(conn, sample_alert_ids)
+        case_id = _safe_case_id_from_ip(src_ip)
+        case_items.append(
+            {
+                "case_id": case_id,
+                "title": f"Auto hotspot {src_ip}",
+                "status": "open",
+                "overall_severity": "critical" if overall_severity == "critical" else "high",
+                "current_stage": current_stage,
+                "primary_actor_id": _safe_actor_id_from_case(case_id),
+            }
+        )
+        if sample_alert_ids:
+            seed_link_items.append(
+                {
+                    "case_id": case_id,
+                    "alert_id": sample_alert_ids[0],
+                    "confidence": 0.86,
+                    "reason": "auto:runner_case_upsert_seed_from_suspect",
+                }
+            )
+
+    if not case_items:
+        return None, []
+    return {"items": case_items}, seed_link_items
+
+
+def _auto_ack_low_recon_noise_alerts(
+    conn: sqlite3.Connection,
+    *,
+    max_count: int = 60,
+) -> int:
+    rows = conn.execute(
+        """
+        select alert_id
+        from alerts
+        where status in ('new', 'open')
+          and lower(severity) = 'low'
+          and lower(attack_stage) = 'recon'
+        order by occurred_at asc, alert_id asc
+        limit ?
+        """,
+        (max(1, max_count),),
+    ).fetchall()
+    alert_ids = [str(row["alert_id"]) for row in rows if row["alert_id"]]
+    if not alert_ids:
+        return 0
+    result = dispatch_tool(
+        conn,
+        "alert.ack",
+        {"alert_ids": alert_ids, "status": "triaged"},
+        source="mcp",
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        return 0
+    return len(alert_ids)
+
+
 def run_openai_patrol(
     conn: sqlite3.Connection,
     *,
@@ -1014,7 +1169,10 @@ def run_openai_patrol(
     completed_discovery_tools: set[str] = set()
     empty_provider_response_retries = 0
     consecutive_blocked_tool_turns = 0
+    has_successful_ack_call = False
     enforce_initial_required_tool_choice = True
+    latest_suspect_candidates: list[dict[str, Any]] = []
+    autofilled_case_upsert_once = False
     fetch_override_payload = (
         _normalize_alert_fetch_payload(dict(first_fetch_payload_override))
         if isinstance(first_fetch_payload_override, dict)
@@ -1105,6 +1263,16 @@ def run_openai_patrol(
             detail = (
                 f"openai responses completed (tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'})"
             )
+            if not has_successful_ack_call and (
+                (max_tool_calls is None or tool_call_count < max_tool_calls)
+                and (max_write_tool_calls is None or write_tool_call_count < max_write_tool_calls)
+            ):
+                auto_ack_count = _auto_ack_low_recon_noise_alerts(conn, max_count=60)
+                if auto_ack_count > 0:
+                    tool_call_count += 1
+                    write_tool_call_count += 1
+                    has_successful_ack_call = True
+                    detail = f"{detail}; auto_noise_ack={auto_ack_count}"
             return OpenAIPatrolResult(
                 status="success",
                 detail=detail,
@@ -1197,6 +1365,7 @@ def run_openai_patrol(
                         tool_result = _read_phase_guard_result(backend_tool_name, missing_tool=missing_tool)
                     else:
                         blocked_ack_alerts: list[dict[str, str]] = []
+                        auto_seed_links: list[dict[str, Any]] = []
                         if backend_tool_name == "alert.ack":
                             payload, blocked_ack_alerts = _guard_alert_ack_payload(conn, payload)
                             if blocked_ack_alerts and not payload.get("alert_ids"):
@@ -1211,6 +1380,19 @@ def run_openai_patrol(
                                     }
                                 )
                                 continue
+                        if (
+                            backend_tool_name == "case.upsert-batch"
+                            and not _has_non_empty_batch_items(payload)
+                            and not autofilled_case_upsert_once
+                        ):
+                            autofill_payload, auto_seed_links = _build_case_upsert_autofill_from_suspects(
+                                conn,
+                                suspects=latest_suspect_candidates,
+                                max_cases=2,
+                            )
+                            if autofill_payload is not None:
+                                payload = autofill_payload
+                                autofilled_case_upsert_once = True
                         precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
                         if precheck_result is None and backend_tool_name == "case.link-alert-batch":
                             precheck_result = _prevalidate_case_link_alert_batch_case_exists(conn, payload)
@@ -1226,6 +1408,10 @@ def run_openai_patrol(
                                 read_tool_call_count += 1
                             else:
                                 write_tool_call_count += 1
+                            if backend_tool_name == "alert.suspect-ip-topk" and tool_result.get("ok"):
+                                suspects = tool_result.get("data", {}).get("suspects")
+                                if isinstance(suspects, list):
+                                    latest_suspect_candidates = [item for item in suspects if isinstance(item, dict)]
                             if backend_tool_name == "alert.fetch":
                                 has_seen_initial_alert_fetch = True
                                 page = tool_result.get("page") if isinstance(tool_result, dict) else None
@@ -1240,6 +1426,72 @@ def run_openai_patrol(
                                 completed_discovery_tools.add(backend_tool_name)
                             if _should_block_repeated_invalid_call(tool_result):
                                 invalid_tool_signatures.add(payload_signature)
+                            if backend_tool_name == "alert.ack" and tool_result.get("ok"):
+                                has_successful_ack_call = True
+                            if (
+                                backend_tool_name == "case.upsert-batch"
+                                and auto_seed_links
+                                and max_tool_calls is not None
+                                and tool_call_count >= max_tool_calls
+                            ):
+                                tool_result = dict(tool_result)
+                                warnings = tool_result.get("warnings")
+                                warning_list = list(warnings) if isinstance(warnings, list) else []
+                                warning_list.append("auto_seed_link_skipped_due_tool_budget")
+                                tool_result["warnings"] = list(dict.fromkeys(warning_list))
+                            elif (
+                                backend_tool_name == "case.upsert-batch"
+                                and auto_seed_links
+                                and max_write_tool_calls is not None
+                                and write_tool_call_count >= max_write_tool_calls
+                            ):
+                                tool_result = dict(tool_result)
+                                warnings = tool_result.get("warnings")
+                                warning_list = list(warnings) if isinstance(warnings, list) else []
+                                warning_list.append("auto_seed_link_skipped_due_write_budget")
+                                tool_result["warnings"] = list(dict.fromkeys(warning_list))
+                            elif backend_tool_name == "case.upsert-batch" and auto_seed_links:
+                                seed_result = dispatch_tool(
+                                    conn,
+                                    "case.link-alert-batch",
+                                    {"items": auto_seed_links},
+                                    source="mcp",
+                                )
+                                tool_call_count += 1
+                                write_tool_call_count += 1
+                                tool_result = dict(tool_result)
+                                warnings = tool_result.get("warnings")
+                                warning_list = list(warnings) if isinstance(warnings, list) else []
+                                warning_list.append("auto_seed_case_links_applied")
+                                tool_result["warnings"] = list(dict.fromkeys(warning_list))
+
+                                refs = tool_result.get("refs")
+                                refs_map = dict(refs) if isinstance(refs, dict) else {}
+                                existing_alert_ids = refs_map.get("alert_ids")
+                                alert_ids = list(existing_alert_ids) if isinstance(existing_alert_ids, list) else []
+                                alert_ids.extend(str(item.get("alert_id") or "").strip() for item in auto_seed_links)
+                                refs_map["alert_ids"] = list(dict.fromkeys(item for item in alert_ids if item))
+                                existing_case_ids = refs_map.get("case_ids")
+                                case_ids = list(existing_case_ids) if isinstance(existing_case_ids, list) else []
+                                case_ids.extend(str(item.get("case_id") or "").strip() for item in auto_seed_links)
+                                refs_map["case_ids"] = list(dict.fromkeys(item for item in case_ids if item))
+                                if seed_result.get("refs") and isinstance(seed_result.get("refs"), dict):
+                                    seed_case_ids = seed_result["refs"].get("case_ids")
+                                    if isinstance(seed_case_ids, list):
+                                        refs_map["case_ids"] = list(
+                                            dict.fromkeys(refs_map["case_ids"] + [str(item) for item in seed_case_ids if item])
+                                        )
+                                tool_result["refs"] = refs_map
+
+                                data = tool_result.get("data")
+                                data_map = dict(data) if isinstance(data, dict) else {}
+                                data_map["auto_seed_links"] = auto_seed_links
+                                data_map["auto_seed_link_result"] = {
+                                    "ok": bool(seed_result.get("ok")),
+                                    "summary": seed_result.get("summary"),
+                                    "warnings": seed_result.get("warnings", []),
+                                }
+                                tool_result["data"] = data_map
                             if backend_tool_name == "alert.ack" and blocked_ack_alerts:
                                 tool_result = dict(tool_result)
                                 warnings = tool_result.get("warnings")
@@ -1280,6 +1532,16 @@ def run_openai_patrol(
                 "openai responses stopped_after_blocked_tool_loop="
                 f"{consecutive_blocked_tool_turns} (tool_calls={tool_call_count})"
             )
+            if not has_successful_ack_call and (
+                (max_tool_calls is None or tool_call_count < max_tool_calls)
+                and (max_write_tool_calls is None or write_tool_call_count < max_write_tool_calls)
+            ):
+                auto_ack_count = _auto_ack_low_recon_noise_alerts(conn, max_count=60)
+                if auto_ack_count > 0:
+                    tool_call_count += 1
+                    write_tool_call_count += 1
+                    has_successful_ack_call = True
+                    detail = f"{detail}; auto_noise_ack={auto_ack_count}"
             return OpenAIPatrolResult(
                 status="success",
                 detail=detail,
