@@ -378,3 +378,136 @@ def test_run_openai_patrol_requires_alert_fetch_before_other_tools(tmp_path) -> 
     assert result.tool_calls == 1
     assert case_upsert_calls == 0
     assert alert_fetch_calls == 1
+
+
+def test_run_openai_patrol_enforces_total_tool_budget(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_budget_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_budget_001",
+                        "arguments": '{"status":["new","open"],"limit":2}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_budget_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_budget_002",
+                        "arguments": '{"status":["new","open"],"limit":2}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_budget_003",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_budget_003",
+                        "arguments": '{"status":["new","open"],"limit":2}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_budget_004",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        max_tool_calls=2,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 2
+    assert alert_fetch_calls == 2
+
+
+def test_run_openai_patrol_blocks_persistence_writes_until_read_phase_ready(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_phase_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_phase_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_phase_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_upsert_batch",
+                        "call_id": "call_phase_case_upsert",
+                        "arguments": '{"items":[{"case_id":"case_phase_001","title":"phase","status":"open","overall_severity":"high","current_stage":"recon"}]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_phase_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        enforce_read_phase_gate=True,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    case_upsert_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'case.upsert-batch'"
+    ).fetchone()[0]
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert case_upsert_calls == 0
+    assert alert_fetch_calls == 1

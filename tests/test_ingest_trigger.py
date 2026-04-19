@@ -4,6 +4,7 @@ import subprocess
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.ingest import ingest_alert_bundle
+from security_analyst_agent.openai_patrol_runner import OpenAIPatrolResult
 from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
 
 
@@ -836,3 +837,125 @@ def test_trigger_patrol_openai_mode_normalizes_malformed_actor_batch_payload(tmp
 
     assert [row["tool_name"] for row in rows] == ["alert.fetch", "actor.case-link-batch"]
     assert rows[1]["result_ok"] == 1
+
+
+def test_trigger_patrol_openai_mode_persists_and_reuses_fetch_cursor(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(
+        db_path,
+        [_build_alert("alt_ingest_openai_cursor_001"), _build_alert("alt_ingest_openai_cursor_002")],
+        source="siem",
+    )
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_cursor_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_cursor_001",
+                        "arguments": '{"status":["new","open"],"mode":"clusters","cluster_min_count":1,"limit":1}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_cursor_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+            {
+                "id": "resp_openai_cursor_003",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_cursor_003",
+                        "arguments": '{"status":["new","open"],"mode":"clusters","cluster_min_count":1,"limit":1}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_cursor_004",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    first = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert first["status"] == "success"
+
+    conn = connect_db(db_path)
+    first_state = json.loads(
+        conn.execute(
+            "select state_value_json from patrol_state where state_key = 'openai_patrol_session'"
+        ).fetchone()["state_value_json"]
+    )
+    resume_payload = first_state.get("fetch_resume_payload")
+    assert isinstance(resume_payload, dict)
+    resume_cursor = resume_payload.get("cursor")
+    assert isinstance(resume_cursor, str) and resume_cursor != ""
+    conn.close()
+
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_cursor_003")], source="siem")
+    second = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert second["status"] == "success"
+
+    conn = connect_db(db_path)
+    second_fetch_payload = json.loads(
+        conn.execute(
+            """
+            select payload_json
+            from agent_tool_calls
+            where run_id = ? and tool_name = 'alert.fetch'
+            order by occurred_at asc, rowid asc
+            limit 1
+            """,
+            (second["run_id"],),
+        ).fetchone()["payload_json"]
+    )
+    conn.close()
+    assert second_fetch_payload.get("cursor") == resume_cursor
+
+
+def test_trigger_patrol_openai_mode_applies_large_queue_tool_budget(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    alerts = [_build_alert(f"alt_ingest_budget_{index:04d}") for index in range(500)]
+    ingest_alert_bundle(db_path, alerts, source="siem")
+
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run_openai_patrol(_conn, **kwargs):
+        captured_kwargs.update(kwargs)
+        return OpenAIPatrolResult(
+            status="success",
+            detail="ok",
+            response_id="resp_budget_ok_001",
+            turns=2,
+            tool_calls=1,
+        )
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.run_openai_patrol", fake_run_openai_patrol)
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: _FakeOpenAIClient([]),
+    )
+    assert result["status"] == "success"
+    assert captured_kwargs["max_tool_calls"] == 10
+    assert captured_kwargs["max_read_tool_calls"] == 7
+    assert captured_kwargs["max_write_tool_calls"] == 3
+    assert captured_kwargs["enforce_read_phase_gate"] is True

@@ -21,9 +21,12 @@ class OpenAIPatrolResult:
     response_id: str | None
     turns: int = 0
     tool_calls: int = 0
+    read_tool_calls: int = 0
+    write_tool_calls: int = 0
     usage_input_tokens: int = 0
     usage_output_tokens: int = 0
     usage_cached_input_tokens: int = 0
+    fetch_resume_payload: dict[str, Any] | None = None
 
 
 def _default_openai_client_factory() -> Any:
@@ -216,6 +219,45 @@ _LOCAL_BATCH_ITEMS_REQUIRED_FIELDS: dict[str, list[str]] = {
     ],
 }
 
+_READ_ONLY_TOOL_NAMES = {
+    "alert.fetch",
+    "alert.suspect-ip-topk",
+    "alert.ip-context",
+    "alert.detail-batch",
+    "asset.search",
+    "case.list",
+    "case.search",
+    "case.get",
+    "case.timeline",
+    "case.explain-link",
+    "actor.case-find-candidates",
+    "actor.case-list",
+    "actor.case-get",
+    "intel.lookup",
+    "notify.preview",
+    "report.draft",
+}
+
+_PERSISTENCE_WRITE_TOOL_NAMES = {
+    "case.upsert-batch",
+    "case.link-alert-batch",
+    "case.update-risk",
+    "assessment.upsert-batch",
+    "timeline.upsert",
+    "evidence.upsert",
+    "actor.case-upsert",
+    "actor.case-add-observation-batch",
+    "actor.case-link-batch",
+    "notify.send",
+}
+
+_DISCOVERY_REQUIRED_TOOLS = (
+    "alert.fetch",
+    "alert.suspect-ip-topk",
+    "alert.ip-context",
+    "alert.detail-batch",
+)
+
 
 def _tool_payload_signature(tool_name: str, payload: dict[str, Any]) -> str:
     try:
@@ -263,6 +305,72 @@ def _duplicate_invalid_block_result(tool_name: str) -> dict[str, Any]:
         "refs": {},
         "page": {"next_cursor": None, "has_more": False},
         "meta": {},
+    }
+
+
+def _tool_call_kind(tool_name: str) -> str:
+    if tool_name in _READ_ONLY_TOOL_NAMES:
+        return "read"
+    return "write"
+
+
+def _read_phase_missing_tool(completed_tools: set[str]) -> str | None:
+    for tool_name in _DISCOVERY_REQUIRED_TOOLS:
+        if tool_name not in completed_tools:
+            return tool_name
+    return None
+
+
+def _tool_budget_exceeded_result(
+    *,
+    tool_name: str,
+    scope: str,
+    limit: int,
+    used: int,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "summary": "巡检预算守门触发：本轮工具预算已达上限",
+        "data": {
+            "tool": tool_name,
+            "blocked_reason": "tool_budget_exceeded",
+            "scope": scope,
+            "limit": limit,
+            "used": used,
+            "recommended_next_actions": [
+                {
+                    "tool": "alert.ack",
+                    "reason": "若当前已有明确噪音结论，可批量 ack 后结束本轮",
+                }
+            ],
+        },
+        "warnings": ["tool_budget_exceeded", f"budget_scope:{scope}"],
+        "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {"source": "openai_runner_budget_guard"},
+    }
+
+
+def _read_phase_guard_result(tool_name: str, *, missing_tool: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "summary": "巡检流程约束：当前仍在读阶段，请先完成关键取证再执行建案/写入工具",
+        "data": {
+            "tool": tool_name,
+            "blocked_reason": "read_phase_not_ready",
+            "required_sequence": list(_DISCOVERY_REQUIRED_TOOLS),
+            "next_required_tool": missing_tool,
+            "recommended_next_actions": [
+                {
+                    "tool": missing_tool,
+                    "reason": "先补齐发现阶段证据，再进行 case/assessment/evidence 写入",
+                }
+            ],
+        },
+        "warnings": ["patrol_read_phase_not_ready"],
+        "refs": {},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {"source": "openai_runner_read_phase_guard"},
     }
 
 
@@ -658,6 +766,11 @@ def run_openai_patrol(
     query: str,
     previous_response_id: str | None,
     max_turns: int,
+    max_tool_calls: int | None = None,
+    max_read_tool_calls: int | None = None,
+    max_write_tool_calls: int | None = None,
+    enforce_read_phase_gate: bool = False,
+    first_fetch_payload_override: dict[str, Any] | None = None,
     client_factory: OpenAIClientFactory | None = None,
     tool_profile: str = "compact",
 ) -> OpenAIPatrolResult:
@@ -677,8 +790,17 @@ def run_openai_patrol(
     usage_input_tokens = 0
     usage_output_tokens = 0
     usage_cached_input_tokens = 0
+    read_tool_call_count = 0
+    write_tool_call_count = 0
     invalid_tool_signatures: set[str] = set()
     has_seen_initial_alert_fetch = False
+    completed_discovery_tools: set[str] = set()
+    fetch_override_payload = (
+        _normalize_alert_fetch_payload(dict(first_fetch_payload_override))
+        if isinstance(first_fetch_payload_override, dict)
+        else None
+    )
+    next_fetch_resume_payload: dict[str, Any] | None = None
 
     for _ in range(max_turns):
         turn_count += 1
@@ -713,9 +835,12 @@ def run_openai_patrol(
                     response_id=last_response_id,
                     turns=turn_count,
                     tool_calls=tool_call_count,
+                    read_tool_calls=read_tool_call_count,
+                    write_tool_calls=write_tool_call_count,
                     usage_input_tokens=usage_input_tokens,
                     usage_output_tokens=usage_output_tokens,
                     usage_cached_input_tokens=usage_cached_input_tokens,
+                    fetch_resume_payload=next_fetch_resume_payload,
                 )
             detail = (
                 f"openai responses completed (tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'})"
@@ -726,9 +851,12 @@ def run_openai_patrol(
                 response_id=last_response_id,
                 turns=turn_count,
                 tool_calls=tool_call_count,
+                read_tool_calls=read_tool_call_count,
+                write_tool_calls=write_tool_call_count,
                 usage_input_tokens=usage_input_tokens,
                 usage_output_tokens=usage_output_tokens,
                 usage_cached_input_tokens=usage_cached_input_tokens,
+                fetch_resume_payload=next_fetch_resume_payload,
             )
 
         function_outputs: list[dict[str, str]] = []
@@ -750,6 +878,12 @@ def run_openai_patrol(
                 except json.JSONDecodeError:
                     payload = {}
                 payload = _normalize_payload_for_tool(backend_tool_name, payload)
+                if (
+                    backend_tool_name == "alert.fetch"
+                    and not has_seen_initial_alert_fetch
+                    and fetch_override_payload is not None
+                ):
+                    payload = dict(fetch_override_payload)
                 payload_signature = _tool_payload_signature(backend_tool_name, payload)
                 if payload_signature in invalid_tool_signatures:
                     tool_result = _duplicate_invalid_block_result(backend_tool_name)
@@ -758,18 +892,69 @@ def run_openai_patrol(
                     if _should_block_repeated_invalid_call(tool_result):
                         invalid_tool_signatures.add(payload_signature)
                 else:
-                    precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
-                    if precheck_result is not None:
-                        tool_result = precheck_result
-                        if _should_block_repeated_invalid_call(tool_result):
-                            invalid_tool_signatures.add(payload_signature)
+                    call_kind = _tool_call_kind(backend_tool_name)
+                    if max_tool_calls is not None and tool_call_count >= max_tool_calls:
+                        tool_result = _tool_budget_exceeded_result(
+                            tool_name=backend_tool_name,
+                            scope="total",
+                            limit=max_tool_calls,
+                            used=tool_call_count,
+                        )
+                    elif (
+                        call_kind == "read"
+                        and max_read_tool_calls is not None
+                        and read_tool_call_count >= max_read_tool_calls
+                    ):
+                        tool_result = _tool_budget_exceeded_result(
+                            tool_name=backend_tool_name,
+                            scope="read",
+                            limit=max_read_tool_calls,
+                            used=read_tool_call_count,
+                        )
+                    elif (
+                        call_kind == "write"
+                        and max_write_tool_calls is not None
+                        and write_tool_call_count >= max_write_tool_calls
+                    ):
+                        tool_result = _tool_budget_exceeded_result(
+                            tool_name=backend_tool_name,
+                            scope="write",
+                            limit=max_write_tool_calls,
+                            used=write_tool_call_count,
+                        )
+                    elif (
+                        enforce_read_phase_gate
+                        and backend_tool_name in _PERSISTENCE_WRITE_TOOL_NAMES
+                        and (missing_tool := _read_phase_missing_tool(completed_discovery_tools)) is not None
+                    ):
+                        tool_result = _read_phase_guard_result(backend_tool_name, missing_tool=missing_tool)
                     else:
-                        tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
-                        tool_call_count += 1
-                        if backend_tool_name == "alert.fetch":
-                            has_seen_initial_alert_fetch = True
-                        if _should_block_repeated_invalid_call(tool_result):
-                            invalid_tool_signatures.add(payload_signature)
+                        precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
+                        if precheck_result is not None:
+                            tool_result = precheck_result
+                            if _should_block_repeated_invalid_call(tool_result):
+                                invalid_tool_signatures.add(payload_signature)
+                        else:
+                            tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
+                            tool_call_count += 1
+                            if call_kind == "read":
+                                read_tool_call_count += 1
+                            else:
+                                write_tool_call_count += 1
+                            if backend_tool_name == "alert.fetch":
+                                has_seen_initial_alert_fetch = True
+                                page = tool_result.get("page") if isinstance(tool_result, dict) else None
+                                page_has_more = bool(page.get("has_more")) if isinstance(page, dict) else False
+                                page_next_cursor = page.get("next_cursor") if isinstance(page, dict) else None
+                                if page_has_more and isinstance(page_next_cursor, str) and page_next_cursor.strip():
+                                    next_fetch_resume_payload = dict(payload)
+                                    next_fetch_resume_payload["cursor"] = page_next_cursor.strip()
+                                else:
+                                    next_fetch_resume_payload = None
+                            if tool_result.get("ok") and backend_tool_name in _DISCOVERY_REQUIRED_TOOLS:
+                                completed_discovery_tools.add(backend_tool_name)
+                            if _should_block_repeated_invalid_call(tool_result):
+                                invalid_tool_signatures.add(payload_signature)
 
             function_outputs.append(
                 {
@@ -790,7 +975,10 @@ def run_openai_patrol(
         response_id=last_response_id,
         turns=turn_count,
         tool_calls=tool_call_count,
+        read_tool_calls=read_tool_call_count,
+        write_tool_calls=write_tool_call_count,
         usage_input_tokens=usage_input_tokens,
         usage_output_tokens=usage_output_tokens,
         usage_cached_input_tokens=usage_cached_input_tokens,
+        fetch_resume_payload=next_fetch_resume_payload,
     )

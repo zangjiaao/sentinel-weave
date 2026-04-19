@@ -351,6 +351,29 @@ def _format_openai_usage_suffix(
     )
 
 
+def _derive_openai_tool_budget(event_count: int) -> dict[str, int | bool]:
+    if event_count >= 500:
+        return {
+            "max_tool_calls": 10,
+            "max_read_tool_calls": 7,
+            "max_write_tool_calls": 3,
+            "enforce_read_phase_gate": True,
+        }
+    if event_count >= 200:
+        return {
+            "max_tool_calls": 14,
+            "max_read_tool_calls": 10,
+            "max_write_tool_calls": 4,
+            "enforce_read_phase_gate": True,
+        }
+    return {
+        "max_tool_calls": 20,
+        "max_read_tool_calls": 14,
+        "max_write_tool_calls": 6,
+        "enforce_read_phase_gate": False,
+    }
+
+
 def _should_flush_memory(conn: sqlite3.Connection, *, now: datetime, min_interval_seconds: int) -> bool:
     if min_interval_seconds <= 0:
         return True
@@ -572,6 +595,9 @@ def trigger_patrol_from_ingest(
                     "cumulative_cached_input_tokens",
                     default=0,
                 )
+                previous_fetch_resume_payload = openai_session_state.get("fetch_resume_payload")
+                if not isinstance(previous_fetch_resume_payload, dict):
+                    previous_fetch_resume_payload = None
                 rollover_reasons: list[str] = []
                 if has_existing_response:
                     if (
@@ -597,6 +623,7 @@ def trigger_patrol_from_ingest(
                     primary_query = _build_lightweight_patrol_query(event_ids)
                 else:
                     primary_query = bootstrap_query
+                budget = _derive_openai_tool_budget(len(event_ids))
 
                 openai_result = run_openai_patrol(
                     conn,
@@ -605,6 +632,11 @@ def trigger_patrol_from_ingest(
                     query=primary_query,
                     previous_response_id=str(existing_response_id) if should_reuse_response else None,
                     max_turns=patrol_max_turns,
+                    max_tool_calls=int(budget["max_tool_calls"]),
+                    max_read_tool_calls=int(budget["max_read_tool_calls"]),
+                    max_write_tool_calls=int(budget["max_write_tool_calls"]),
+                    enforce_read_phase_gate=bool(budget["enforce_read_phase_gate"]),
+                    first_fetch_payload_override=previous_fetch_resume_payload,
                     client_factory=openai_client_factory,
                     tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
                 )
@@ -622,6 +654,11 @@ def trigger_patrol_from_ingest(
                         query=bootstrap_query,
                         previous_response_id=None,
                         max_turns=patrol_max_turns,
+                        max_tool_calls=int(budget["max_tool_calls"]),
+                        max_read_tool_calls=int(budget["max_read_tool_calls"]),
+                        max_write_tool_calls=int(budget["max_write_tool_calls"]),
+                        enforce_read_phase_gate=bool(budget["enforce_read_phase_gate"]),
+                        first_fetch_payload_override=previous_fetch_resume_payload,
                         client_factory=openai_client_factory,
                         tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
                     )
@@ -646,6 +683,13 @@ def trigger_patrol_from_ingest(
                     detail_parts.append(f"session_rollover={'+'.join(rollover_reasons)}")
                 if retried_fresh_after_no_tool:
                     detail_parts.append("retried_fresh_after_no_tool=1")
+                detail_parts.append(
+                    "tool_budget="
+                    f"total:{budget['max_tool_calls']}/read:{budget['max_read_tool_calls']}/"
+                    f"write:{budget['max_write_tool_calls']}"
+                )
+                if openai_result.fetch_resume_payload:
+                    detail_parts.append("fetch_backlog=has_more")
                 detail = "; ".join(detail_parts)
                 if status == "success":
                     if should_reuse_response and not retried_fresh_after_no_tool:
@@ -681,6 +725,11 @@ def trigger_patrol_from_ingest(
                         next_state["last_rollover_reason"] = "+".join(rollover_reasons)
                     if retried_fresh_after_no_tool:
                         next_state["last_recovery"] = "fresh_retry_after_no_tool"
+                    if openai_result.fetch_resume_payload:
+                        next_state["fetch_resume_payload"] = openai_result.fetch_resume_payload
+                        next_state["fetch_backlog_has_more"] = True
+                    else:
+                        next_state["fetch_backlog_has_more"] = False
                     _upsert_patrol_state_value(
                         conn,
                         PATROL_OPENAI_SESSION_STATE_KEY,
