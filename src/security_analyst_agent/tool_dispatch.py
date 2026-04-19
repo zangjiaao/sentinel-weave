@@ -58,6 +58,7 @@ from security_analyst_agent.tools.output_tools import notify_preview, notify_sen
 ToolHandler = Callable[[sqlite3.Connection, dict], dict]
 
 _CASE_LINK_CONSISTENCY_SCORE_THRESHOLD = 0.55
+_CASE_LINK_REDIRECT_SCORE_THRESHOLD = 0.65
 _CASE_LINK_TIME_PROXIMITY_WINDOW = timedelta(hours=72)
 _CASE_LINK_FALLBACK_ASSESSMENT_MIN_CONFIDENCE = 0.8
 
@@ -258,20 +259,28 @@ def _load_case_link_profiles(conn: sqlite3.Connection, case_ids: list[str]) -> d
     return profiles
 
 
-def _case_link_consistency_decision(
+def _load_active_case_ids(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """
+        select distinct case_id
+        from case_alert_links
+        where is_active = 1
+        order by case_id asc
+        """
+    ).fetchall()
+    return [str(row["case_id"]) for row in rows if row["case_id"]]
+
+
+def _case_profile_consistency(
     *,
     case_profile: dict[str, Any],
     alert_feature: dict[str, Any],
-    request_confidence: float,
-) -> dict[str, Any]:
-    active_alert_count = int(case_profile.get("active_alert_count") or 0)
-    if active_alert_count <= 0:
-        return {"skip": False, "score": 1.0, "reasons": [], "signals": {}}
-
+) -> tuple[float, dict[str, Any]]:
     case_src_ips = case_profile.get("src_ips") or set()
     case_asset_ids = case_profile.get("asset_ids") or set()
     case_max_stage_rank = int(case_profile.get("max_stage_rank") or 0)
     case_last_occurred_at = case_profile.get("last_occurred_at")
+    active_alert_count = int(case_profile.get("active_alert_count") or 0)
 
     alert_src_ip = str(alert_feature.get("src_ip") or "").strip()
     alert_asset_id = str(alert_feature.get("asset_id") or "").strip()
@@ -300,10 +309,77 @@ def _case_link_consistency_decision(
         consistency_score += 0.20
     if time_proximity:
         consistency_score += 0.10
+
+    signals = {
+        "same_src_ip": same_src_ip,
+        "same_asset_id": same_asset_id,
+        "stage_continuity": stage_continuity,
+        "time_proximity": time_proximity,
+        "active_alert_count": active_alert_count,
+    }
+    return round(consistency_score, 3), signals
+
+
+def _find_case_redirect_candidate(
+    *,
+    alert_feature: dict[str, Any],
+    case_profile_map: dict[str, dict[str, Any]],
+    exclude_case_id: str | None,
+) -> dict[str, Any] | None:
+    best_candidate: dict[str, Any] | None = None
+    for case_id, profile in case_profile_map.items():
+        if exclude_case_id and case_id == exclude_case_id:
+            continue
+        active_alert_count = int(profile.get("active_alert_count") or 0)
+        if active_alert_count <= 0:
+            continue
+        score, signals = _case_profile_consistency(case_profile=profile, alert_feature=alert_feature)
+        if score < _CASE_LINK_REDIRECT_SCORE_THRESHOLD:
+            continue
+        if not (signals["same_src_ip"] or signals["same_asset_id"]):
+            continue
+        candidate = {
+            "case_id": case_id,
+            "score": score,
+            "signals": signals,
+            "active_alert_count": active_alert_count,
+        }
+        if best_candidate is None:
+            best_candidate = candidate
+            continue
+        current_key = (
+            float(candidate["score"]),
+            int(candidate["active_alert_count"]),
+            int(candidate["signals"]["same_src_ip"]),
+            int(candidate["signals"]["same_asset_id"]),
+            case_id,
+        )
+        best_key = (
+            float(best_candidate["score"]),
+            int(best_candidate["active_alert_count"]),
+            int(best_candidate["signals"]["same_src_ip"]),
+            int(best_candidate["signals"]["same_asset_id"]),
+            str(best_candidate["case_id"]),
+        )
+        if current_key > best_key:
+            best_candidate = candidate
+    return best_candidate
+
+
+def _case_link_consistency_decision(
+    *,
+    case_profile: dict[str, Any],
+    alert_feature: dict[str, Any],
+    request_confidence: float,
+) -> dict[str, Any]:
+    active_alert_count = int(case_profile.get("active_alert_count") or 0)
+    if active_alert_count <= 0:
+        return {"skip": False, "score": 1.0, "reasons": [], "signals": {}}
+    consistency_score, signals = _case_profile_consistency(case_profile=case_profile, alert_feature=alert_feature)
     if request_confidence >= 0.9:
         consistency_score += 0.05
 
-    has_anchor = same_src_ip or same_asset_id
+    has_anchor = bool(signals["same_src_ip"] or signals["same_asset_id"])
     skip = False
     reasons: list[str] = []
     if active_alert_count >= 2 and not has_anchor and request_confidence < 0.9:
@@ -317,13 +393,7 @@ def _case_link_consistency_decision(
         "skip": skip,
         "score": round(consistency_score, 3),
         "reasons": reasons,
-        "signals": {
-            "same_src_ip": same_src_ip,
-            "same_asset_id": same_asset_id,
-            "stage_continuity": stage_continuity,
-            "time_proximity": time_proximity,
-            "active_alert_count": active_alert_count,
-        },
+        "signals": signals,
     }
 
 
@@ -350,12 +420,24 @@ def _guard_case_link_alert_batch_payload(
     source: str,
 ) -> tuple[dict, dict[str, Any]]:
     if source != "mcp" or not DEFAULT_NEUTRAL_CASE_LINK_GUARD:
-        return payload, {"skipped_noise_alert_ids": [], "skipped_low_consistency_items": []}
+        return payload, {
+            "skipped_noise_alert_ids": [],
+            "skipped_low_consistency_items": [],
+            "redirected_items": [],
+        }
     if not isinstance(payload, dict):
-        return payload, {"skipped_noise_alert_ids": [], "skipped_low_consistency_items": []}
+        return payload, {
+            "skipped_noise_alert_ids": [],
+            "skipped_low_consistency_items": [],
+            "redirected_items": [],
+        }
     items = payload.get("items")
     if not isinstance(items, list):
-        return payload, {"skipped_noise_alert_ids": [], "skipped_low_consistency_items": []}
+        return payload, {
+            "skipped_noise_alert_ids": [],
+            "skipped_low_consistency_items": [],
+            "redirected_items": [],
+        }
 
     alert_ids = [
         str(item.get("alert_id") or "")
@@ -370,9 +452,11 @@ def _guard_case_link_alert_batch_payload(
     signal_map = _fetch_alert_signal_map(conn, alert_ids)
     alert_feature_map = _load_alert_feature_map(conn, alert_ids)
     case_profile_map = _load_case_link_profiles(conn, case_ids)
+    active_case_profile_map = _load_case_link_profiles(conn, _load_active_case_ids(conn))
     kept_items: list[dict] = []
     skipped_noise_alert_ids: list[str] = []
     skipped_low_consistency_items: list[dict[str, Any]] = []
+    redirected_items: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -385,16 +469,36 @@ def _guard_case_link_alert_batch_payload(
             continue
 
         case_id = str(item.get("case_id") or "").strip()
-        if case_id:
+        alert_feature = alert_feature_map.get(alert_id)
+        if case_id and alert_feature:
             case_profile = case_profile_map.get(case_id)
-            alert_feature = alert_feature_map.get(alert_id)
-            if case_profile and alert_feature:
+            if case_profile and int(case_profile.get("active_alert_count") or 0) > 0:
                 consistency = _case_link_consistency_decision(
                     case_profile=case_profile,
                     alert_feature=alert_feature,
                     request_confidence=_to_float(item.get("confidence"), default=0.0),
                 )
                 if consistency["skip"]:
+                    redirect_candidate = _find_case_redirect_candidate(
+                        alert_feature=alert_feature,
+                        case_profile_map=active_case_profile_map,
+                        exclude_case_id=case_id,
+                    )
+                    if redirect_candidate is not None:
+                        rewritten_item = dict(item)
+                        rewritten_item["case_id"] = str(redirect_candidate["case_id"])
+                        kept_items.append(rewritten_item)
+                        redirected_items.append(
+                            {
+                                "alert_id": alert_id,
+                                "from_case_id": case_id,
+                                "to_case_id": str(redirect_candidate["case_id"]),
+                                "redirect_score": float(redirect_candidate["score"]),
+                                "redirect_signals": redirect_candidate["signals"],
+                                "redirect_reason": "consistency_redirect_to_existing_case",
+                            }
+                        )
+                        continue
                     skipped_low_consistency_items.append(
                         {
                             "case_id": case_id,
@@ -405,14 +509,40 @@ def _guard_case_link_alert_batch_payload(
                         }
                     )
                     continue
+            else:
+                redirect_candidate = _find_case_redirect_candidate(
+                    alert_feature=alert_feature,
+                    case_profile_map=active_case_profile_map,
+                    exclude_case_id=case_id,
+                )
+                if redirect_candidate is not None:
+                    rewritten_item = dict(item)
+                    rewritten_item["case_id"] = str(redirect_candidate["case_id"])
+                    kept_items.append(rewritten_item)
+                    redirected_items.append(
+                        {
+                            "alert_id": alert_id,
+                            "from_case_id": case_id,
+                            "to_case_id": str(redirect_candidate["case_id"]),
+                            "redirect_score": float(redirect_candidate["score"]),
+                            "redirect_signals": redirect_candidate["signals"],
+                            "redirect_reason": "missing_case_profile_redirect_to_existing_case",
+                        }
+                    )
+                    continue
         kept_items.append(item)
-    if not skipped_noise_alert_ids and not skipped_low_consistency_items:
-        return payload, {"skipped_noise_alert_ids": [], "skipped_low_consistency_items": []}
+    if not skipped_noise_alert_ids and not skipped_low_consistency_items and not redirected_items:
+        return payload, {
+            "skipped_noise_alert_ids": [],
+            "skipped_low_consistency_items": [],
+            "redirected_items": [],
+        }
     next_payload = dict(payload)
     next_payload["items"] = kept_items
     return next_payload, {
         "skipped_noise_alert_ids": list(dict.fromkeys(skipped_noise_alert_ids)),
         "skipped_low_consistency_items": skipped_low_consistency_items,
+        "redirected_items": redirected_items,
     }
 
 
@@ -811,6 +941,7 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
     try:
         skipped_noise_alert_ids: list[str] = []
         skipped_low_consistency_items: list[dict[str, Any]] = []
+        redirected_case_link_items: list[dict[str, Any]] = []
         if tool_name == "alert.fetch":
             payload = _normalize_alert_fetch_payload_for_mcp(payload, source=source)
         if tool_name == "alert.detail-batch":
@@ -846,6 +977,7 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
             )
             skipped_noise_alert_ids = list(guard_meta.get("skipped_noise_alert_ids") or [])
             skipped_low_consistency_items = list(guard_meta.get("skipped_low_consistency_items") or [])
+            redirected_case_link_items = list(guard_meta.get("redirected_items") or [])
             if (skipped_noise_alert_ids or skipped_low_consistency_items) and not payload.get("items"):
                 skipped_alert_ids = skipped_noise_alert_ids + [
                     str(item.get("alert_id") or "")
@@ -868,6 +1000,7 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                         "skipped_alert_ids": list(dict.fromkeys(item for item in skipped_alert_ids if item)),
                         "skipped_noise_alert_ids": skipped_noise_alert_ids,
                         "skipped_low_consistency_items": skipped_low_consistency_items,
+                        "redirected_items": redirected_case_link_items,
                     },
                     "warnings": warnings,
                     "refs": {"alert_ids": list(dict.fromkeys(item for item in skipped_alert_ids if item))},
@@ -1017,7 +1150,7 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                 data_map = dict(data) if isinstance(data, dict) else {}
                 data_map["auto_assessed_case_ids"] = auto_assessed_case_ids
                 result["data"] = data_map
-        if skipped_noise_alert_ids or skipped_low_consistency_items:
+        if skipped_noise_alert_ids or skipped_low_consistency_items or redirected_case_link_items:
             result = dict(result)
             warnings = result.get("warnings")
             warnings_list = list(warnings) if isinstance(warnings, list) else []
@@ -1025,6 +1158,8 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                 warnings_list.append("neutral_case_link_guard_skipped_noise_recon_alerts")
             if skipped_low_consistency_items:
                 warnings_list.append("neutral_case_link_guard_skipped_low_consistency_links")
+            if redirected_case_link_items:
+                warnings_list.append("neutral_case_link_guard_redirected_case_links")
             result["warnings"] = list(dict.fromkeys(warnings_list))
 
             refs = result.get("refs")
@@ -1037,7 +1172,20 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                 for item in skipped_low_consistency_items
                 if isinstance(item, dict)
             )
+            refs_alert_ids.extend(
+                str(item.get("alert_id") or "")
+                for item in redirected_case_link_items
+                if isinstance(item, dict)
+            )
             refs_map["alert_ids"] = list(dict.fromkeys(item for item in refs_alert_ids if item))
+            existing_case_ids = refs_map.get("case_ids")
+            refs_case_ids = list(existing_case_ids) if isinstance(existing_case_ids, list) else []
+            refs_case_ids.extend(
+                str(item.get("to_case_id") or "")
+                for item in redirected_case_link_items
+                if isinstance(item, dict)
+            )
+            refs_map["case_ids"] = list(dict.fromkeys(item for item in refs_case_ids if item))
             result["refs"] = refs_map
 
             data = result.get("data")
@@ -1046,6 +1194,7 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
             data_map["skipped_alert_ids"] = skipped_alert_ids
             data_map["skipped_noise_alert_ids"] = skipped_noise_alert_ids
             data_map["skipped_low_consistency_items"] = skipped_low_consistency_items
+            data_map["redirected_items"] = redirected_case_link_items
             result["data"] = data_map
         finalize_mcp_auto_run_after_tool(
             conn,

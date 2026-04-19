@@ -735,3 +735,196 @@ def test_run_openai_patrol_retries_empty_provider_response_before_failing(tmp_pa
     assert result.tool_calls == 1
     assert alert_fetch_calls == 1
     assert len(fake_client.responses.calls) == 3
+
+
+def test_run_openai_patrol_alert_ack_guard_filters_unlinked_high_signal_alerts(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_ack_guard_high_001",
+            "2026-04-13T14:00:00+08:00",
+            "high signal for ack guard",
+            "open",
+            "critical",
+            "persistence",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_ack_guard_low_001",
+            "2026-04-13T14:01:00+08:00",
+            "low signal for ack guard",
+            "open",
+            "low",
+            "recon",
+            "198.51.100.200",
+            "203.0.113.11",
+            "asset_static_www",
+        ),
+    )
+    conn.commit()
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_ack_guard_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_ack_guard_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_ack_guard_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_ack",
+                        "call_id": "call_ack_guard_ack",
+                        "arguments": '{"alert_ids":["alt_ack_guard_high_001","alt_ack_guard_low_001"],"status":"triaged"}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_ack_guard_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    high_status = conn.execute(
+        "select status from alerts where alert_id = ?",
+        ("alt_ack_guard_high_001",),
+    ).fetchone()[0]
+    low_status = conn.execute(
+        "select status from alerts where alert_id = ?",
+        ("alt_ack_guard_low_001",),
+    ).fetchone()[0]
+    ack_call = conn.execute(
+        """
+        select result_json
+        from agent_tool_calls
+        where tool_name = 'alert.ack'
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 2
+    assert high_status == "open"
+    assert low_status == "triaged"
+    assert ack_call is not None
+
+
+def test_run_openai_patrol_alert_ack_guard_can_skip_entire_ack_call(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_ack_guard_high_only_001",
+            "2026-04-13T14:10:00+08:00",
+            "high signal only",
+            "open",
+            "high",
+            "command_execution",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.commit()
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_ack_guard_only_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_ack_guard_only_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_ack_guard_only_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_ack",
+                        "call_id": "call_ack_guard_only_ack",
+                        "arguments": '{"alert_ids":["alt_ack_guard_high_only_001"],"status":"triaged"}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_ack_guard_only_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    high_status = conn.execute(
+        "select status from alerts where alert_id = ?",
+        ("alt_ack_guard_high_only_001",),
+    ).fetchone()[0]
+    ack_call_count = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.ack'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert high_status == "open"
+    assert ack_call_count == 0

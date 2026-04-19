@@ -226,6 +226,14 @@ _REPEATED_INVALID_BLOCK_WARNINGS = {
     "patrol_requires_initial_alert_fetch",
 }
 
+_ACK_GUARD_HIGH_SIGNAL_STAGES = {
+    "exploit",
+    "persistence",
+    "command_execution",
+    "lateral_prep",
+    "reactivation",
+}
+
 _LOCAL_BATCH_ITEMS_REQUIRED_FIELDS: dict[str, list[str]] = {
     "case.upsert-batch": ["case_id", "title", "status", "overall_severity", "current_stage"],
     "case.link-alert-batch": ["case_id", "alert_id", "confidence", "reason"],
@@ -503,6 +511,106 @@ def _prevalidate_case_link_alert_batch_case_exists(
         "refs": {"case_ids": available_case_ids},
         "page": {"next_cursor": None, "has_more": False},
         "meta": {"source": "openai_runner_local_precheck"},
+    }
+
+
+def _guard_alert_ack_payload(
+    conn: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    if not isinstance(payload, dict):
+        return payload, []
+    raw_alert_ids = payload.get("alert_ids")
+    if not isinstance(raw_alert_ids, list):
+        return payload, []
+    requested_alert_ids = list(dict.fromkeys(str(item).strip() for item in raw_alert_ids if str(item).strip()))
+    if not requested_alert_ids:
+        return payload, []
+
+    rows = conn.execute(
+        f"""
+        select
+          alerts.alert_id,
+          lower(alerts.severity) as severity,
+          lower(alerts.attack_stage) as attack_stage,
+          case when exists (
+            select 1
+            from case_alert_links
+            where case_alert_links.alert_id = alerts.alert_id and case_alert_links.is_active = 1
+          ) then 1 else 0 end as has_active_case_link
+        from alerts
+        where alerts.alert_id in ({", ".join("?" for _ in requested_alert_ids)})
+        """,
+        tuple(requested_alert_ids),
+    ).fetchall()
+    if not rows:
+        return payload, []
+
+    blocked_alerts: list[dict[str, str]] = []
+    blocked_alert_id_set: set[str] = set()
+    for row in rows:
+        alert_id = str(row["alert_id"] or "").strip()
+        if not alert_id:
+            continue
+        severity = str(row["severity"] or "").strip()
+        attack_stage = str(row["attack_stage"] or "").strip()
+        has_active_case_link = int(row["has_active_case_link"] or 0) > 0
+        is_high_signal = severity in {"high", "critical"} or attack_stage in _ACK_GUARD_HIGH_SIGNAL_STAGES
+        if not is_high_signal or has_active_case_link:
+            continue
+        blocked_alert_id_set.add(alert_id)
+        blocked_alerts.append(
+            {
+                "alert_id": alert_id,
+                "severity": severity or "unknown",
+                "attack_stage": attack_stage or "unknown",
+                "reason": "high_signal_unlinked_case",
+            }
+        )
+
+    if not blocked_alerts:
+        return payload, []
+
+    kept_alert_ids = [alert_id for alert_id in requested_alert_ids if alert_id not in blocked_alert_id_set]
+    next_payload = dict(payload)
+    next_payload["alert_ids"] = kept_alert_ids
+    return next_payload, blocked_alerts
+
+
+def _alert_ack_guard_skip_result(
+    blocked_alerts: list[dict[str, str]],
+) -> dict[str, Any]:
+    blocked_alert_ids = list(
+        dict.fromkeys(str(item.get("alert_id") or "").strip() for item in blocked_alerts if item.get("alert_id"))
+    )
+    return {
+        "ok": True,
+        "summary": (
+            "ack_guard skipped high-signal unlinked alerts; "
+            f"blocked_count={len(blocked_alert_ids)}"
+        ),
+        "data": {
+            "tool": "alert.ack",
+            "blocked_alerts": blocked_alerts,
+            "recommended_next_actions": [
+                {
+                    "tool": "alert.detail-batch",
+                    "reason": "先补齐高信号告警详情，确认攻击证据链",
+                },
+                {
+                    "tool": "case.search",
+                    "reason": "先检索候选案件后再关联高信号告警",
+                },
+                {
+                    "tool": "case.link-alert-batch",
+                    "reason": "高信号告警应先入案，再执行 ack 出队",
+                },
+            ],
+        },
+        "warnings": ["ack_guard_skipped_unlinked_high_signal_alerts"],
+        "refs": {"alert_ids": blocked_alert_ids},
+        "page": {"next_cursor": None, "has_more": False},
+        "meta": {"source": "openai_runner_ack_guard"},
     }
 
 
@@ -1085,6 +1193,21 @@ def run_openai_patrol(
                     ):
                         tool_result = _read_phase_guard_result(backend_tool_name, missing_tool=missing_tool)
                     else:
+                        blocked_ack_alerts: list[dict[str, str]] = []
+                        if backend_tool_name == "alert.ack":
+                            payload, blocked_ack_alerts = _guard_alert_ack_payload(conn, payload)
+                            if blocked_ack_alerts and not payload.get("alert_ids"):
+                                tool_result = _alert_ack_guard_skip_result(blocked_ack_alerts)
+                                if _should_block_repeated_invalid_call(tool_result):
+                                    invalid_tool_signatures.add(payload_signature)
+                                function_outputs.append(
+                                    {
+                                        "type": "function_call_output",
+                                        "call_id": call["call_id"],
+                                        "output": json.dumps(tool_result, ensure_ascii=False),
+                                    }
+                                )
+                                continue
                         precheck_result = _prevalidate_tool_payload(backend_tool_name, payload)
                         if precheck_result is None and backend_tool_name == "case.link-alert-batch":
                             precheck_result = _prevalidate_case_link_alert_batch_case_exists(conn, payload)
@@ -1113,6 +1236,29 @@ def run_openai_patrol(
                                 completed_discovery_tools.add(backend_tool_name)
                             if _should_block_repeated_invalid_call(tool_result):
                                 invalid_tool_signatures.add(payload_signature)
+                            if backend_tool_name == "alert.ack" and blocked_ack_alerts:
+                                tool_result = dict(tool_result)
+                                warnings = tool_result.get("warnings")
+                                warnings_list = list(warnings) if isinstance(warnings, list) else []
+                                warnings_list.append("ack_guard_skipped_unlinked_high_signal_alerts")
+                                tool_result["warnings"] = list(dict.fromkeys(warnings_list))
+
+                                refs = tool_result.get("refs")
+                                refs_map = dict(refs) if isinstance(refs, dict) else {}
+                                existing_alert_ids = refs_map.get("alert_ids")
+                                refs_alert_ids = list(existing_alert_ids) if isinstance(existing_alert_ids, list) else []
+                                refs_alert_ids.extend(
+                                    str(item.get("alert_id") or "").strip()
+                                    for item in blocked_ack_alerts
+                                    if item.get("alert_id")
+                                )
+                                refs_map["alert_ids"] = list(dict.fromkeys(item for item in refs_alert_ids if item))
+                                tool_result["refs"] = refs_map
+
+                                data = tool_result.get("data")
+                                data_map = dict(data) if isinstance(data, dict) else {}
+                                data_map["blocked_alerts"] = blocked_ack_alerts
+                                tool_result["data"] = data_map
 
             function_outputs.append(
                 {

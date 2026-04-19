@@ -912,9 +912,9 @@ def test_mcp_case_link_batch_writes_fallback_case_assessment(tmp_path) -> None:
             "open",
             "high",
             "exploit",
-            "198.51.100.23",
+            "198.51.100.250",
             "203.0.113.10",
-            "asset_api_prod",
+            "asset_guard_only_api",
         ),
     )
     conn.commit()
@@ -952,6 +952,119 @@ def test_mcp_case_link_batch_writes_fallback_case_assessment(tmp_path) -> None:
     assert assessment_row["reason_summary"] == "auto:case.link-alert-batch_high_confidence_fallback"
     assert float(assessment_row["assessment_confidence"]) >= 0.86
     assert assessment_row["run_id"] is not None
+    conn.close()
+
+
+def test_mcp_case_link_batch_redirects_to_existing_consistent_case(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_redirect_main_001",
+            "title": "redirect main",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_redirect_main",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_redirect_seed_001",
+        case_id="case_redirect_main_001",
+        occurred_at="2026-04-13T12:00:00+08:00",
+        stage="exploit",
+        src_ip="198.51.100.251",
+        asset_id="asset_redirect_api",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_redirect_seed_002",
+        case_id="case_redirect_main_001",
+        occurred_at="2026-04-13T12:06:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.251",
+        asset_id="asset_redirect_admin",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_redirect_new_001",
+            "title": "redirect new",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "recon",
+            "primary_actor_id": "actor_redirect_new",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_redirect_target_001",
+            "2026-04-13T12:09:00+08:00",
+            "redirect target",
+            "open",
+            "critical",
+            "command_execution",
+            "198.51.100.251",
+            "203.0.113.10",
+            "asset_redirect_api",
+        ),
+    )
+    conn.commit()
+
+    result = dispatch_tool(
+        conn,
+        "case.link-alert-batch",
+        {
+            "items": [
+                {
+                    "case_id": "case_redirect_new_001",
+                    "alert_id": "alt_redirect_target_001",
+                    "confidence": 0.82,
+                    "reason": "redirect test",
+                }
+            ]
+        },
+        source="mcp",
+    )
+    assert result["ok"] is True
+    assert "neutral_case_link_guard_redirected_case_links" in result["warnings"]
+    redirected_items = result["data"]["redirected_items"]
+    assert len(redirected_items) == 1
+    assert redirected_items[0]["from_case_id"] == "case_redirect_new_001"
+    assert redirected_items[0]["to_case_id"] == "case_redirect_main_001"
+
+    redirected_link_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ? and alert_id = ? and is_active = 1
+        """,
+        ("case_redirect_main_001", "alt_redirect_target_001"),
+    ).fetchone()[0]
+    original_link_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ? and alert_id = ? and is_active = 1
+        """,
+        ("case_redirect_new_001", "alt_redirect_target_001"),
+    ).fetchone()[0]
+    assert redirected_link_count == 1
+    assert original_link_count == 0
     conn.close()
 
 
