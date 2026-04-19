@@ -18,6 +18,7 @@ class CaseSearchRequest(BaseModel):
     status: list[str] = Field(default_factory=list)
     min_severity: str | None = None
     src_ip: str | None = None
+    src_ips: list[str] = Field(default_factory=list)
     asset_id: str | None = None
     attack_stage: str | None = None
     keyword: str | None = None
@@ -26,10 +27,10 @@ class CaseSearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_lookup_key(self) -> "CaseSearchRequest":
-        if any([self.src_ip, self.asset_id, self.attack_stage, self.keyword]):
+        if any([self.src_ip, self.src_ips, self.asset_id, self.attack_stage, self.keyword]):
             return self
         raise ValueError(
-            "case.search requires at least one lookup key (src_ip/asset_id/attack_stage/keyword); "
+            "case.search requires at least one lookup key (src_ip/src_ips/asset_id/attack_stage/keyword); "
             "use case.list first when case_id is unknown and lookup keys are unavailable"
         )
 

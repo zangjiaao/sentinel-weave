@@ -21,6 +21,8 @@ from security_analyst_agent.schemas.alert_tools import (
     AlertAckRequest,
     AlertDetailBatchRequest,
     AlertFetchRequest,
+    AlertIpContextRequest,
+    AlertSuspectIpTopkRequest,
 )
 from security_analyst_agent.schemas.assessment_tools import AssessmentUpsertBatchRequest
 from security_analyst_agent.schemas.asset_tools import AssetSearchRequest
@@ -42,6 +44,8 @@ from security_analyst_agent.tool_dispatch import dispatch_tool
 
 CORE_TOOL_NAMES = (
     "alert.fetch",
+    "alert.suspect-ip-topk",
+    "alert.ip-context",
     "alert.detail-batch",
     "alert.ack",
     "asset.search",
@@ -69,7 +73,9 @@ CORE_TOOL_NAMES = (
 )
 
 TOOL_DESCRIPTIONS = {
-    "alert.fetch": "拉取待研判告警摘要队列。",
+    "alert.fetch": "拉取待研判告警摘要队列（含本轮新增告警的轻量摘要）。",
+    "alert.suspect-ip-topk": "基于频次/高危占比/阶段推进/跨资产扩散，返回可疑攻击源 IP TopK。",
+    "alert.ip-context": "按 src_ip 汇总告警上下文（阶段、资产、高危占比）并返回样本告警列表。",
     "alert.detail-batch": "批量读取多条告警详情与关键证据摘要（alert_ids 必须来自本轮 alert.fetch 返回）。",
     "alert.ack": "将已处理告警标记为 triaged/closed，避免重复出队。",
     "asset.search": "按指标搜索资产并返回资产上下文。",
@@ -81,7 +87,7 @@ TOOL_DESCRIPTIONS = {
     "actor.case-link-batch": "批量将案内画像关联到告警、证据或时间线节点。",
     "case.get": "读取案件头部摘要与当前风险结论。",
     "case.list": "按状态/严重度/阶段列出案件摘要，避免盲猜 case_id。",
-    "case.search": "按 src_ip/asset/stage/关键词检索候选案件（至少提供一个检索键），辅助复用既有案件。",
+    "case.search": "按 src_ip/src_ips/asset/stage/关键词检索候选案件（至少提供一个检索键），辅助复用既有案件。",
     "case.timeline": "读取案件时间线与攻击阶段演进。",
     "case.explain-link": "解释事件与案件之间的关联依据。",
     "case.upsert-batch": "批量创建或更新案件主记录（items 不能为空；单案也传一条 item）。",
@@ -97,6 +103,8 @@ TOOL_DESCRIPTIONS = {
 }
 
 PROMPT_SCHEMA_MODELS: dict[str, type[BaseModel]] = {
+    "alert.suspect-ip-topk": AlertSuspectIpTopkRequest,
+    "alert.ip-context": AlertIpContextRequest,
     "alert.ack": AlertAckRequest,
     "alert.detail-batch": AlertDetailBatchRequest,
     "case.link-alert-batch": CaseLinkAlertBatchRequest,
@@ -122,6 +130,8 @@ PROMPT_SCHEMA_MODELS: dict[str, type[BaseModel]] = {
 
 TOOL_REQUEST_MODELS: dict[str, type[BaseModel]] = {
     "alert.fetch": AlertFetchRequest,
+    "alert.suspect-ip-topk": AlertSuspectIpTopkRequest,
+    "alert.ip-context": AlertIpContextRequest,
     "alert.detail-batch": AlertDetailBatchRequest,
     "alert.ack": AlertAckRequest,
     "asset.search": AssetSearchRequest,
@@ -149,6 +159,13 @@ TOOL_REQUEST_MODELS: dict[str, type[BaseModel]] = {
 }
 
 PROMPT_EXTRA_GUIDANCE: dict[str, list[str]] = {
+    "alert.suspect-ip-topk": [
+        "建议在高噪音轮次优先调用，用统计筛出可疑攻击源，再决定是否 detail 深挖。",
+        "`queue_only=true` 时优先分析当前入库批次；若当前批次为空会自动回退全局筛选。",
+    ],
+    "alert.ip-context": [
+        "先用 `alert.suspect-ip-topk` 选 IP，再用本工具补全该 IP 的阶段与资产扩散上下文。",
+    ],
     "alert.detail-batch": [
         "`alert_ids` 必须来自本次巡检内 `alert.fetch` 已返回的真实 ID，不要猜测或拼接。",
         "同一轮中若收到 `detail_batch_requires_fetch_context`，先执行 `alert.fetch`，不要原样重复调用。",

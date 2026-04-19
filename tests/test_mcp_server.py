@@ -8,6 +8,8 @@ def test_mcp_tool_names_match_core_contract() -> None:
 
     assert CORE_TOOL_NAMES == (
         "alert.fetch",
+        "alert.suspect-ip-topk",
+        "alert.ip-context",
         "alert.detail-batch",
         "alert.ack",
         "asset.search",

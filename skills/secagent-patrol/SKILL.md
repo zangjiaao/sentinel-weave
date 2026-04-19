@@ -13,35 +13,38 @@ Use this skill to run an evidence-based patrol loop with `secagent` MCP. Let `MC
 
 1. Confirm the `secagent` MCP server is available before starting analysis.
 2. 优先复用 MCP prompt 提供的参数说明；只有在 prompt 不存在时才回退到本 Skill 里的默认 payload。
-3. 优先在巡检开始阶段调用 `alert.fetch` 拉取队列（示例 payload：`{"status":["new","open"],"limit":20}`），但可按证据上下文调整工具顺序。
-4. Keep the patrol bounded. Process at most 10 alerts per run and stop when `no_more_alerts`, `time_budget_exceeded`, or `high_risk_case_found`.
-5. 预算优先：若 run 有 `max_turns`（例如 18），采用分层预算并预留至少 3 次回合用于输出最终总结：
+3. 优先在巡检开始阶段调用 `alert.fetch` 拉取队列（示例 payload：`{"status":["new","open"],"limit":20}`），先阅读其中的 `ingest_batch_summary`（本轮新增告警总量、严重度分布、攻击源热点）。
+4. 高噪音场景下，先做统计学筛选：`alert.suspect-ip-topk` 挑可疑源，再用 `alert.ip-context` 拉该源的阶段推进/资产扩散上下文，最后再进入 `alert.detail-batch` 深挖。
+5. Keep the patrol bounded. Process at most 10 alerts per run and stop when `no_more_alerts`, `time_budget_exceeded`, or `high_risk_case_found`.
+6. 预算优先：若 run 有 `max_turns`（例如 18），采用分层预算并预留至少 3 次回合用于输出最终总结：
    - 纯 recon/noise 轮次：目标 `<=8` 次 tool 调用
    - 高信号轮次（含 persistence/command_execution/lateral_prep）：目标 `<=15` 次 tool 调用
    - 绝对硬上限：`<=18` 次 tool 调用
    - 单轮默认“单次写入”策略：`assessment.upsert-batch` 至多 1 次、`case.update-risk` 至多 1 次、`alert.ack` 至多 1 次；除非前一次写入失败才重试
    - `evidence.upsert` 只写关键代表性证据，禁止按同质告警逐条 fan-out 写入
-6. 对同一攻击链内“同阶段、同类型、同来源”的告警，优先做代表性取样，避免逐条 fan-out 调用。
-7. 对同一案件同一阶段，优先写 1 条聚合 `timeline.upsert`，不要为每条同质告警各写一条时间线。
-8. `alert.ack` 尽量批量一次提交本轮已处理告警，避免拆成多次调用。
-9. 告警详情统一走 `alert.detail-batch`：单条详情也传单元素 `alert_ids`，避免反复单条调用。
-10. For each material alert, call `case.get` and `case.timeline`, then `case.explain-link` when explicit linkage evidence is needed.
-11. Never fabricate `case_id` for `case.get`; only use IDs returned by tools (`alert.fetch` / `alert.detail-batch` / `case.*`).
-12. If representative alerts already contain `case_id`, maintain that case first and avoid splitting into a new case unless evidence clearly diverges.
-13. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
-14. If a case record is missing or stale, create or refresh it with `case.upsert-batch` (single case also uses one-item batch), then maintain it with `case.link-alert-batch` and `case.update-risk` only for alerts with material chain value.
-15. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
-16. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
-17. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert-batch` (single entity also uses one-item batch).
-18. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
-19. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
-20. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
-21. Call `report.draft` only when the user explicitly requests a report.
-22. If there is genuinely nothing new to report, return exactly `[SILENT]`.
+7. 对同一攻击链内“同阶段、同类型、同来源”的告警，优先做代表性取样，避免逐条 fan-out 调用。
+8. 对同一案件同一阶段，优先写 1 条聚合 `timeline.upsert`，不要为每条同质告警各写一条时间线。
+9. `alert.ack` 尽量批量一次提交本轮已处理告警，避免拆成多次调用。
+10. 告警详情统一走 `alert.detail-batch`：单条详情也传单元素 `alert_ids`，避免反复单条调用。
+11. For each material alert, call `case.get` and `case.timeline`, then `case.explain-link` when explicit linkage evidence is needed.
+12. Never fabricate `case_id` for `case.get`; only use IDs returned by tools (`alert.fetch` / `alert.detail-batch` / `case.*`).
+13. If representative alerts already contain `case_id`, maintain that case first and avoid splitting into a new case unless evidence clearly diverges.
+14. In spike/PoC fixtures, only `alerts` / `assets` / `intel_cache` are preloaded. Treat `cases` / `case_alert_links` / `timeline_events` / `evidence` as derived runtime objects that must be created by the agent.
+15. If a case record is missing or stale, create or refresh it with `case.upsert-batch` (single case also uses one-item batch), then maintain it with `case.link-alert-batch` and `case.update-risk` only for alerts with material chain value.
+16. Use `evidence.upsert` to persist derived evidence records when you identify concrete exploit/webshell/control/lateral facts.
+17. Use `timeline.upsert` to persist attack-chain timeline nodes that combine alerts and evidence into a readable step.
+18. For attacker/compromised-host conclusions, persist structured entity verdicts with `assessment.upsert-batch` (single entity also uses one-item batch).
+19. For alerts already triaged in current run, call `alert.ack` with `status=triaged` (or `closed` when fully handled) to avoid repeated patrol reporting.
+20. Call `intel.lookup` only when current case evidence is insufficient and threat intelligence can add supporting context.
+21. Call `notify.send` only when escalation threshold is met. This tool is simulation-only and writes delivery records for audit.
+22. Call `report.draft` only when the user explicitly requests a report.
+23. If there is genuinely nothing new to report, return exactly `[SILENT]`.
 
 ## Tool Usage Rules
 
 - Prefer using `alert.fetch` early in patrol runs to ground current queue context.
+- 优先读取 `alert.fetch.data.ingest_batch_summary`，先确认本轮新增规模、严重度分布和热点源，再进入细节。
+- 在大规模告警下，优先 `alert.suspect-ip-topk` 做统计筛选，再用 `alert.ip-context` 拉单一攻击源上下文，然后再调用 `alert.detail-batch`。
 - 告警详情统一使用 `alert.detail-batch`，单条补证也传单元素数组。
 - 同一轮中不要对同一 `alert_id` 重复调用 `alert.detail-batch`。
 - Use `case.get` before writing a severity or current-stage conclusion.

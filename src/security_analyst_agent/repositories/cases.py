@@ -149,6 +149,7 @@ def search_cases(
     statuses: list[str],
     min_severity: str | None,
     src_ip: str | None,
+    src_ips: list[str],
     asset_id: str | None,
     attack_stage: str | None,
     include_merged: bool,
@@ -173,9 +174,11 @@ def search_cases(
     if not include_merged:
         conditions.append("coalesce(cases.merge_state, 'standalone') <> 'merged'")
 
-    if src_ip:
-        conditions.append("alerts.src_ip = ?")
-        params.append(src_ip)
+    candidate_src_ips = list(dict.fromkeys([item for item in [*src_ips, src_ip] if item]))
+    if candidate_src_ips:
+        placeholders = ", ".join("?" for _ in candidate_src_ips)
+        conditions.append(f"alerts.src_ip in ({placeholders})")
+        params.extend(candidate_src_ips)
 
     if asset_id:
         conditions.append("alerts.asset_id = ?")

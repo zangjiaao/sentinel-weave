@@ -19,6 +19,22 @@ class AlertFetchRequest(BaseModel):
     hotspot_top_n: int = Field(default=3, ge=1, le=10)
 
 
+class AlertSuspectIpTopkRequest(BaseModel):
+    status: list[str] = Field(default_factory=list)
+    min_severity: str | None = None
+    top_k: int = Field(default=5, ge=1, le=50)
+    min_alert_count: int = Field(default=2, ge=1, le=1000)
+    queue_only: bool = True
+
+
+class AlertIpContextRequest(BaseModel):
+    src_ip: str
+    status: list[str] = Field(default_factory=list)
+    min_severity: str | None = None
+    limit: int = Field(default=30, ge=1, le=200)
+    queue_only: bool = False
+
+
 class AlertDetailRequest(BaseModel):
     alert_id: str
 

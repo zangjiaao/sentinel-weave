@@ -96,6 +96,22 @@ def alert_fetch_command(
     _run_tool("alert.fetch", db_path, payload)
 
 
+@app.command("alert.suspect-ip-topk")
+def alert_suspect_ip_topk_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("alert.suspect-ip-topk", db_path, payload)
+
+
+@app.command("alert.ip-context")
+def alert_ip_context_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    _run_tool("alert.ip-context", db_path, payload)
+
+
 @app.command("alert.detail")
 def alert_detail_command(
     db_path: Path = typer.Option(..., "--db-path"),

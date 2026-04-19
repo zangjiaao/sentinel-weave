@@ -1,6 +1,13 @@
 from security_analyst_agent.schemas.alert_tools import AlertFetchRequest
 from security_analyst_agent.schemas.common import ToolResponse
-from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_detail_batch, alert_fetch
+from security_analyst_agent.tools.alert_tools import (
+    alert_ack,
+    alert_detail,
+    alert_detail_batch,
+    alert_fetch,
+    alert_ip_context,
+    alert_suspect_ip_topk,
+)
 
 
 def test_alert_fetch_request_defaults_limit_to_20() -> None:
@@ -21,6 +28,109 @@ def test_alert_fetch_returns_ranked_queue(db_conn) -> None:
     assert result["ok"] is True
     assert result["data"]["mode"] == "alerts"
     assert result["data"]["alerts"][0]["alert_id"] == "alt_day3_shell_01"
+
+
+def test_alert_fetch_includes_current_ingest_batch_summary(db_conn) -> None:
+    db_conn.execute(
+        """
+        insert into alert_ingest_events (event_id, alert_id, source, ingested_at, trigger_state)
+        values (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+        """,
+        (
+            "evt_fetch_summary_001",
+            "alt_day2_webshell_01",
+            "unit",
+            "2026-04-12T12:00:00+08:00",
+            "processing",
+            "evt_fetch_summary_002",
+            "alt_day3_shell_01",
+            "unit",
+            "2026-04-12T12:00:01+08:00",
+            "processing",
+        ),
+    )
+    db_conn.commit()
+
+    result = alert_fetch(db_conn, {"status": ["new", "open"], "limit": 10})
+    summary = result["data"]["ingest_batch_summary"]
+    assert summary["has_current_queue"] is True
+    assert summary["queue_event_count"] == 2
+    assert summary["queue_alert_count"] == 2
+    assert summary["severity_breakdown"]["high"] == 2
+    assert summary["top_src_ips"][0]["src_ip"] in {"198.51.100.23", "198.51.100.77"}
+
+
+def test_alert_suspect_ip_topk_returns_ranked_sources(db_conn) -> None:
+    rows = []
+    for index in range(6):
+        rows.append(
+            (
+                f"alt_suspect_rank_{index}",
+                f"2026-04-13T15:{index:02d}:00+08:00",
+                "高危链路活动",
+                "open",
+                "high",
+                "command_execution",
+                "203.0.113.88",
+                "203.0.113.10",
+                "asset_api_prod" if index < 3 else "asset_admin_portal",
+            )
+        )
+    for index in range(3):
+        rows.append(
+            (
+                f"alt_suspect_rank_low_{index}",
+                f"2026-04-13T15:3{index}:00+08:00",
+                "低危扫描噪音",
+                "open",
+                "low",
+                "recon",
+                "198.51.100.200",
+                "203.0.113.12",
+                "asset_static_www",
+            )
+        )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    result = alert_suspect_ip_topk(
+        db_conn,
+        {
+            "status": ["open"],
+            "top_k": 3,
+            "queue_only": False,
+            "min_alert_count": 2,
+        },
+    )
+    assert result["ok"] is True
+    suspects = result["data"]["suspects"]
+    assert len(suspects) >= 1
+    assert suspects[0]["src_ip"] == "203.0.113.88"
+    assert "high_severity_activity_detected" in suspects[0]["reason_codes"]
+    assert suspects[0]["asset_spread"] >= 2
+
+
+def test_alert_ip_context_returns_summary_and_alert_samples(db_conn) -> None:
+    result = alert_ip_context(
+        db_conn,
+        {
+            "src_ip": "198.51.100.23",
+            "status": ["open"],
+            "queue_only": False,
+            "limit": 10,
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["src_ip"] == "198.51.100.23"
+    assert result["data"]["summary"]["alert_count"] >= 2
+    assert len(result["data"]["alerts"]) >= 2
 
 
 def test_alert_detail_returns_parser_and_evidence_refs(db_conn) -> None:

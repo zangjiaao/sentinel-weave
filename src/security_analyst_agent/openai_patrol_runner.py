@@ -49,6 +49,8 @@ def _openai_tool_name(tool_name: str) -> str:
 
 COMPACT_TOOL_NAMES = (
     "alert.fetch",
+    "alert.suspect-ip-topk",
+    "alert.ip-context",
     "alert.detail-batch",
     "alert.ack",
     "case.list",

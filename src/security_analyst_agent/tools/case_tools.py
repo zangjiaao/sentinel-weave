@@ -103,7 +103,7 @@ def case_get(conn: sqlite3.Connection, payload: dict) -> dict:
                     },
                     {
                         "tool": "case.search",
-                        "reason": "refine candidates after obtaining src_ip/asset_id/attack_stage/keyword",
+                        "reason": "refine candidates after obtaining src_ip/src_ips/asset_id/attack_stage/keyword",
                     },
                 ],
             },
@@ -161,6 +161,7 @@ def case_search(conn: sqlite3.Connection, payload: dict) -> dict:
         statuses=request.status,
         min_severity=request.min_severity,
         src_ip=request.src_ip,
+        src_ips=request.src_ips,
         asset_id=request.asset_id,
         attack_stage=request.attack_stage,
         include_merged=request.include_merged,

@@ -19,8 +19,318 @@ from security_analyst_agent.schemas.alert_tools import (
     AlertDetailBatchRequest,
     AlertDetailRequest,
     AlertFetchRequest,
+    AlertIpContextRequest,
+    AlertSuspectIpTopkRequest,
 )
 from security_analyst_agent.schemas.common import ToolResponse
+
+_SEVERITY_ORDER_SQL = (
+    "case {column} "
+    "when 'low' then 1 "
+    "when 'medium' then 2 "
+    "when 'high' then 3 "
+    "when 'critical' then 4 "
+    "else 0 end"
+)
+
+
+def _severity_order_sql(column: str) -> str:
+    return _SEVERITY_ORDER_SQL.format(column=column)
+
+
+def _severity_rank_min(min_severity: str | None) -> int:
+    if not min_severity:
+        return 0
+    return {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(str(min_severity).lower(), 0)
+
+
+def _build_filtered_alert_where(
+    *,
+    alias: str,
+    statuses: list[str],
+    min_severity: str | None,
+    analysis_cutoff_at: str | None,
+) -> tuple[str, list[object]]:
+    conditions: list[str] = []
+    params: list[object] = []
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        conditions.append(f"{alias}.status in ({placeholders})")
+        params.extend(statuses)
+
+    min_rank = _severity_rank_min(min_severity)
+    if min_rank > 0:
+        conditions.append(f"{_severity_order_sql(f'lower({alias}.severity)')} >= ?")
+        params.append(min_rank)
+
+    if analysis_cutoff_at:
+        conditions.append(f"{alias}.occurred_at <= ?")
+        params.append(analysis_cutoff_at)
+
+    where_clause = ""
+    if conditions:
+        where_clause = "where " + " and ".join(conditions)
+    return where_clause, params
+
+
+def _load_ingest_batch_summary(
+    conn: sqlite3.Connection,
+    *,
+    analysis_cutoff_at: str | None,
+    top_n: int,
+) -> dict[str, object]:
+    queue_event_count = int(
+        conn.execute(
+            """
+            select count(*)
+            from alert_ingest_events
+            where trigger_state in ('pending', 'processing')
+            """
+        ).fetchone()[0]
+    )
+    queue_alert_count = int(
+        conn.execute(
+            """
+            select count(distinct alert_id)
+            from alert_ingest_events
+            where trigger_state in ('pending', 'processing')
+            """
+        ).fetchone()[0]
+    )
+    if queue_alert_count <= 0:
+        return {
+            "analysis_scope": "current_ingest_queue",
+            "has_current_queue": False,
+            "queue_event_count": queue_event_count,
+            "queue_alert_count": 0,
+            "severity_breakdown": {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0},
+            "top_src_ips": [],
+            "top_assets": [],
+            "top_stages": [],
+        }
+
+    params: tuple[object, ...]
+    cutoff_clause = ""
+    if analysis_cutoff_at:
+        cutoff_clause = "and alerts.occurred_at <= ?"
+        params = (analysis_cutoff_at,)
+    else:
+        params = ()
+
+    row = conn.execute(
+        f"""
+        with queue_alert_ids as (
+          select distinct alert_id
+          from alert_ingest_events
+          where trigger_state in ('pending', 'processing')
+        )
+        select
+          count(*) as total_alert_count,
+          sum(case when lower(alerts.severity) = 'critical' then 1 else 0 end) as critical_count,
+          sum(case when lower(alerts.severity) = 'high' then 1 else 0 end) as high_count,
+          sum(case when lower(alerts.severity) = 'medium' then 1 else 0 end) as medium_count,
+          sum(case when lower(alerts.severity) = 'low' then 1 else 0 end) as low_count,
+          sum(case when lower(alerts.severity) not in ('critical', 'high', 'medium', 'low') then 1 else 0 end)
+            as unknown_count
+        from alerts
+        join queue_alert_ids on queue_alert_ids.alert_id = alerts.alert_id
+        where 1 = 1
+          {cutoff_clause}
+        """,
+        params,
+    ).fetchone()
+
+    top_src_ips_rows = conn.execute(
+        f"""
+        with queue_alert_ids as (
+          select distinct alert_id
+          from alert_ingest_events
+          where trigger_state in ('pending', 'processing')
+        )
+        select
+          coalesce(alerts.src_ip, 'unknown') as src_ip,
+          count(*) as alert_count,
+          sum(case when lower(alerts.severity) in ('high', 'critical') then 1 else 0 end) as high_severity_count
+        from alerts
+        join queue_alert_ids on queue_alert_ids.alert_id = alerts.alert_id
+        where 1 = 1
+          {cutoff_clause}
+        group by coalesce(alerts.src_ip, 'unknown')
+        order by high_severity_count desc, alert_count desc, src_ip asc
+        limit ?
+        """,
+        (*params, top_n),
+    ).fetchall()
+    top_assets_rows = conn.execute(
+        f"""
+        with queue_alert_ids as (
+          select distinct alert_id
+          from alert_ingest_events
+          where trigger_state in ('pending', 'processing')
+        )
+        select
+          coalesce(alerts.asset_id, 'unknown') as asset_id,
+          count(*) as alert_count,
+          sum(case when lower(alerts.severity) in ('high', 'critical') then 1 else 0 end) as high_severity_count
+        from alerts
+        join queue_alert_ids on queue_alert_ids.alert_id = alerts.alert_id
+        where 1 = 1
+          {cutoff_clause}
+        group by coalesce(alerts.asset_id, 'unknown')
+        order by high_severity_count desc, alert_count desc, asset_id asc
+        limit ?
+        """,
+        (*params, top_n),
+    ).fetchall()
+    top_stage_rows = conn.execute(
+        f"""
+        with queue_alert_ids as (
+          select distinct alert_id
+          from alert_ingest_events
+          where trigger_state in ('pending', 'processing')
+        )
+        select
+          coalesce(lower(alerts.attack_stage), 'unknown') as attack_stage,
+          count(*) as alert_count
+        from alerts
+        join queue_alert_ids on queue_alert_ids.alert_id = alerts.alert_id
+        where 1 = 1
+          {cutoff_clause}
+        group by coalesce(lower(alerts.attack_stage), 'unknown')
+        order by alert_count desc, attack_stage asc
+        limit ?
+        """,
+        (*params, top_n),
+    ).fetchall()
+
+    return {
+        "analysis_scope": "current_ingest_queue",
+        "has_current_queue": True,
+        "queue_event_count": queue_event_count,
+        "queue_alert_count": queue_alert_count,
+        "severity_breakdown": {
+            "critical": int(row["critical_count"] or 0),
+            "high": int(row["high_count"] or 0),
+            "medium": int(row["medium_count"] or 0),
+            "low": int(row["low_count"] or 0),
+            "unknown": int(row["unknown_count"] or 0),
+        },
+        "top_src_ips": [
+            {
+                "src_ip": str(item["src_ip"]),
+                "alert_count": int(item["alert_count"]),
+                "high_severity_count": int(item["high_severity_count"] or 0),
+            }
+            for item in top_src_ips_rows
+        ],
+        "top_assets": [
+            {
+                "asset_id": str(item["asset_id"]),
+                "alert_count": int(item["alert_count"]),
+                "high_severity_count": int(item["high_severity_count"] or 0),
+            }
+            for item in top_assets_rows
+        ],
+        "top_stages": [
+            {"attack_stage": str(item["attack_stage"]), "alert_count": int(item["alert_count"])}
+            for item in top_stage_rows
+        ],
+    }
+
+
+def _fetch_suspect_ip_rows(
+    conn: sqlite3.Connection,
+    *,
+    statuses: list[str],
+    min_severity: str | None,
+    analysis_cutoff_at: str | None,
+    top_k: int,
+    min_alert_count: int,
+    queue_only: bool,
+) -> tuple[list[dict], bool]:
+    where_clause, params = _build_filtered_alert_where(
+        alias="alerts",
+        statuses=statuses,
+        min_severity=min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+    queue_only_applied = queue_only and int(
+        conn.execute(
+            """
+            select count(*)
+            from alert_ingest_events
+            where trigger_state in ('pending', 'processing')
+            """
+        ).fetchone()[0]
+    ) > 0
+    queue_join = ""
+    if queue_only_applied:
+        queue_join = """
+        join (
+          select distinct alert_id
+          from alert_ingest_events
+          where trigger_state in ('pending', 'processing')
+        ) as queue_alert_ids on queue_alert_ids.alert_id = alerts.alert_id
+        """
+
+    rows = conn.execute(
+        f"""
+        with scoped_alerts as (
+          select
+            alerts.alert_id,
+            alerts.occurred_at,
+            coalesce(alerts.src_ip, '') as src_ip,
+            coalesce(alerts.asset_id, 'unknown') as asset_id,
+            lower(alerts.severity) as severity,
+            coalesce(lower(alerts.attack_stage), 'unknown') as attack_stage
+          from alerts
+          {queue_join}
+          {where_clause}
+        )
+        select
+          scoped_alerts.src_ip as src_ip,
+          count(*) as alert_count,
+          sum(case when scoped_alerts.severity in ('high', 'critical') then 1 else 0 end) as high_severity_count,
+          sum(case when scoped_alerts.severity = 'critical' then 1 else 0 end) as critical_count,
+          count(distinct scoped_alerts.asset_id) as asset_spread,
+          count(distinct case when scoped_alerts.attack_stage not in ('unknown', 'recon', '') then scoped_alerts.attack_stage end)
+            as non_recon_stage_count,
+          min(scoped_alerts.occurred_at) as first_occurred_at,
+          max(scoped_alerts.occurred_at) as last_occurred_at,
+          (
+            sum(case when scoped_alerts.severity = 'critical' then 1 else 0 end) * 10
+            + sum(case when scoped_alerts.severity in ('high', 'critical') then 1 else 0 end) * 4
+            + count(distinct case when scoped_alerts.attack_stage not in ('unknown', 'recon', '') then scoped_alerts.attack_stage end) * 6
+            + count(distinct scoped_alerts.asset_id) * 2
+            + case when count(*) > 40 then 40 else count(*) end
+          ) as suspect_score
+        from scoped_alerts
+        where scoped_alerts.src_ip <> ''
+        group by scoped_alerts.src_ip
+        having count(*) >= ?
+        order by suspect_score desc, high_severity_count desc, alert_count desc, scoped_alerts.src_ip asc
+        limit ?
+        """,
+        (*params, min_alert_count, top_k),
+    ).fetchall()
+    return [dict(row) for row in rows], queue_only_applied
+
+
+def _build_suspect_reason_codes(item: dict) -> list[str]:
+    reason_codes: list[str] = []
+    if int(item.get("critical_count", 0)) > 0:
+        reason_codes.append("critical_activity_detected")
+    if int(item.get("high_severity_count", 0)) > 0:
+        reason_codes.append("high_severity_activity_detected")
+    if int(item.get("non_recon_stage_count", 0)) >= 1:
+        reason_codes.append("post_recon_progression_detected")
+    if int(item.get("asset_spread", 0)) >= 2:
+        reason_codes.append("cross_asset_spread_detected")
+    if int(item.get("alert_count", 0)) >= 8:
+        reason_codes.append("high_frequency_activity")
+    if not reason_codes:
+        reason_codes.append("requires_followup_sampling")
+    return reason_codes
 
 
 def _is_homogeneous_noise_clusters(clusters: list[dict]) -> bool:
@@ -146,6 +456,11 @@ def _build_ack_recommendations(clusters: list[dict]) -> list[dict[str, object]]:
 def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
     request = AlertFetchRequest.model_validate(payload)
     analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    ingest_batch_summary = _load_ingest_batch_summary(
+        conn,
+        analysis_cutoff_at=analysis_cutoff_at,
+        top_n=request.hotspot_top_n,
+    )
     requested_mode = request.mode
     total_candidates: int | None = None
     if requested_mode in {"auto", "clusters"}:
@@ -309,6 +624,8 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
         if total_candidates is None:
             total_candidates = len(alerts)
         summary = f"返回 {len(alerts)} 条待研判告警摘要"
+    if not bool(ingest_batch_summary.get("has_current_queue")):
+        warnings.append("no_current_ingest_queue_snapshot")
 
     response = ToolResponse(
         ok=True,
@@ -326,10 +643,212 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             "recommended_next_actions": recommended_next_actions,
             "ack_recommendations": ack_recommendations,
             "omitted_alert_count": omitted_alert_count,
+            "ingest_batch_summary": ingest_batch_summary,
         },
         refs={"alert_ids": refs_alert_ids},
         warnings=warnings,
         page={"next_cursor": page_next_cursor, "has_more": page_has_more},
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def alert_suspect_ip_topk(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = AlertSuspectIpTopkRequest.model_validate(payload)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    rows, queue_only_applied = _fetch_suspect_ip_rows(
+        conn,
+        statuses=request.status,
+        min_severity=request.min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+        top_k=request.top_k,
+        min_alert_count=request.min_alert_count,
+        queue_only=request.queue_only,
+    )
+
+    suspects: list[dict[str, object]] = []
+    refs_alert_ids: list[str] = []
+    for row in rows:
+        sample_rows = conn.execute(
+            f"""
+            select
+              alerts.alert_id,
+              alerts.occurred_at,
+              alerts.severity,
+              alerts.attack_stage,
+              alerts.asset_id
+            from alerts
+            where alerts.src_ip = ?
+              and (? is null or alerts.occurred_at <= ?)
+            order by {_severity_order_sql('lower(alerts.severity)')} desc, alerts.occurred_at desc, alerts.alert_id asc
+            limit 5
+            """,
+            (row["src_ip"], analysis_cutoff_at, analysis_cutoff_at),
+        ).fetchall()
+        sample_alert_ids = [str(item["alert_id"]) for item in sample_rows]
+        refs_alert_ids.extend(sample_alert_ids)
+        suspects.append(
+            {
+                "src_ip": str(row["src_ip"]),
+                "suspect_score": int(row["suspect_score"]),
+                "alert_count": int(row["alert_count"]),
+                "high_severity_count": int(row["high_severity_count"]),
+                "critical_count": int(row["critical_count"]),
+                "asset_spread": int(row["asset_spread"]),
+                "non_recon_stage_count": int(row["non_recon_stage_count"]),
+                "first_occurred_at": row["first_occurred_at"],
+                "last_occurred_at": row["last_occurred_at"],
+                "reason_codes": _build_suspect_reason_codes(row),
+                "sample_alert_ids": sample_alert_ids,
+            }
+        )
+
+    warnings: list[str] = []
+    if request.queue_only and not queue_only_applied:
+        warnings.append("queue_only_fallback_to_filtered_alerts")
+
+    response = ToolResponse(
+        ok=True,
+        summary=f"返回 {len(suspects)} 个可疑攻击源 IP 候选",
+        data={
+            "suspects": suspects,
+            "scope": {
+                "queue_only_requested": request.queue_only,
+                "queue_only_applied": queue_only_applied,
+                "status": request.status,
+                "min_severity": request.min_severity,
+                "min_alert_count": request.min_alert_count,
+                "top_k": request.top_k,
+            },
+        },
+        refs={"alert_ids": list(dict.fromkeys(refs_alert_ids))},
+        warnings=warnings,
+    )
+    return response.model_dump(mode="json", by_alias=True)
+
+
+def alert_ip_context(conn: sqlite3.Connection, payload: dict) -> dict:
+    request = AlertIpContextRequest.model_validate(payload)
+    analysis_cutoff_at = load_active_analysis_cutoff(conn)
+    where_clause, where_params = _build_filtered_alert_where(
+        alias="alerts",
+        statuses=request.status,
+        min_severity=request.min_severity,
+        analysis_cutoff_at=analysis_cutoff_at,
+    )
+
+    queue_only_applied = request.queue_only and int(
+        conn.execute(
+            """
+            select count(*)
+            from alert_ingest_events
+            where trigger_state in ('pending', 'processing')
+            """
+        ).fetchone()[0]
+    ) > 0
+    queue_join = ""
+    if queue_only_applied:
+        queue_join = """
+        join (
+          select distinct alert_id
+          from alert_ingest_events
+          where trigger_state in ('pending', 'processing')
+        ) as queue_alert_ids on queue_alert_ids.alert_id = alerts.alert_id
+        """
+
+    rows = conn.execute(
+        f"""
+        select
+          alerts.alert_id,
+          alerts.occurred_at,
+          alerts.title,
+          alerts.status,
+          lower(alerts.severity) as severity,
+          coalesce(lower(alerts.attack_stage), 'unknown') as attack_stage,
+          alerts.asset_id,
+          alerts.dst_ip
+        from alerts
+        {queue_join}
+        {where_clause}
+          {"and" if where_clause else "where"} alerts.src_ip = ?
+        order by alerts.occurred_at desc, alerts.alert_id desc
+        limit ?
+        """,
+        (*where_params, request.src_ip, request.limit),
+    ).fetchall()
+    alerts = [dict(row) for row in rows]
+
+    summary_row = conn.execute(
+        f"""
+        select
+          count(*) as alert_count,
+          sum(case when lower(alerts.severity) in ('high', 'critical') then 1 else 0 end) as high_severity_count,
+          sum(case when lower(alerts.severity) = 'critical' then 1 else 0 end) as critical_count,
+          count(distinct coalesce(alerts.asset_id, 'unknown')) as asset_spread
+        from alerts
+        {queue_join}
+        {where_clause}
+          {"and" if where_clause else "where"} alerts.src_ip = ?
+        """,
+        (*where_params, request.src_ip),
+    ).fetchone()
+    stage_rows = conn.execute(
+        f"""
+        select
+          coalesce(lower(alerts.attack_stage), 'unknown') as attack_stage,
+          count(*) as alert_count
+        from alerts
+        {queue_join}
+        {where_clause}
+          {"and" if where_clause else "where"} alerts.src_ip = ?
+        group by coalesce(lower(alerts.attack_stage), 'unknown')
+        order by alert_count desc, attack_stage asc
+        """,
+        (*where_params, request.src_ip),
+    ).fetchall()
+    top_asset_rows = conn.execute(
+        f"""
+        select
+          coalesce(alerts.asset_id, 'unknown') as asset_id,
+          count(*) as alert_count
+        from alerts
+        {queue_join}
+        {where_clause}
+          {"and" if where_clause else "where"} alerts.src_ip = ?
+        group by coalesce(alerts.asset_id, 'unknown')
+        order by alert_count desc, asset_id asc
+        limit 5
+        """,
+        (*where_params, request.src_ip),
+    ).fetchall()
+
+    warnings: list[str] = []
+    if request.queue_only and not queue_only_applied:
+        warnings.append("queue_only_fallback_to_filtered_alerts")
+
+    response = ToolResponse(
+        ok=True,
+        summary=f"读取 src_ip={request.src_ip} 的告警上下文：{int(summary_row['alert_count'] or 0)} 条",
+        data={
+            "src_ip": request.src_ip,
+            "queue_only_applied": queue_only_applied,
+            "summary": {
+                "alert_count": int(summary_row["alert_count"] or 0),
+                "high_severity_count": int(summary_row["high_severity_count"] or 0),
+                "critical_count": int(summary_row["critical_count"] or 0),
+                "asset_spread": int(summary_row["asset_spread"] or 0),
+                "stage_breakdown": [
+                    {"attack_stage": str(item["attack_stage"]), "alert_count": int(item["alert_count"])}
+                    for item in stage_rows
+                ],
+                "top_assets": [
+                    {"asset_id": str(item["asset_id"]), "alert_count": int(item["alert_count"])}
+                    for item in top_asset_rows
+                ],
+            },
+            "alerts": alerts,
+        },
+        refs={"alert_ids": [item["alert_id"] for item in alerts]},
+        warnings=warnings,
     )
     return response.model_dump(mode="json", by_alias=True)
 

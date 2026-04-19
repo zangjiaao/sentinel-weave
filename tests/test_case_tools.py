@@ -79,6 +79,19 @@ def test_case_search_finds_case_by_src_and_stage(db_conn) -> None:
     assert any(item["case_id"] == "case_demo_001" for item in result["data"]["cases"])
 
 
+def test_case_search_supports_multiple_src_ips(db_conn) -> None:
+    result = case_search(
+        db_conn,
+        {
+            "src_ips": ["198.51.100.23", "203.0.113.250"],
+            "limit": 10,
+        },
+    )
+    assert result["ok"] is True
+    assert len(result["data"]["cases"]) >= 1
+    assert any(item["case_id"] == "case_demo_001" for item in result["data"]["cases"])
+
+
 def test_case_search_requires_lookup_key(db_conn) -> None:
     with pytest.raises(ValidationError, match="case.search requires at least one lookup key"):
         case_search(

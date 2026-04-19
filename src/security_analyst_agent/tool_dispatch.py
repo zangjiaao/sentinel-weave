@@ -16,7 +16,14 @@ from security_analyst_agent.repositories.audit import (
     reset_bound_run_context,
     resolve_run_context_for_dispatch,
 )
-from security_analyst_agent.tools.alert_tools import alert_ack, alert_detail, alert_detail_batch, alert_fetch
+from security_analyst_agent.tools.alert_tools import (
+    alert_ack,
+    alert_detail,
+    alert_detail_batch,
+    alert_fetch,
+    alert_ip_context,
+    alert_suspect_ip_topk,
+)
 from security_analyst_agent.tools.assessment_tools import assessment_upsert, assessment_upsert_batch
 from security_analyst_agent.tools.asset_tools import asset_search
 from security_analyst_agent.tools.actor_tools import (
@@ -49,6 +56,8 @@ ToolHandler = Callable[[sqlite3.Connection, dict], dict]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.fetch": alert_fetch,
+    "alert.suspect-ip-topk": alert_suspect_ip_topk,
+    "alert.ip-context": alert_ip_context,
     "alert.detail": alert_detail,
     "alert.detail-batch": alert_detail_batch,
     "alert.ack": alert_ack,
