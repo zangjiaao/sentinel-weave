@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from security_analyst_agent.config import DEFAULT_OPENAI_BASE_URL
 from security_analyst_agent.mcp_server import CORE_TOOL_NAMES, TOOL_DESCRIPTIONS, TOOL_REQUEST_MODELS
+from security_analyst_agent.repositories.audit import insert_agent_output_log
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
 OpenAIClientFactory = Callable[[], Any]
@@ -120,6 +121,13 @@ def _extract_output_text(response: Any) -> str:
     if isinstance(text, str):
         return text
     return ""
+
+
+def _extract_output_item_count(response: Any) -> int:
+    output = _read_attr_or_key(response, "output", [])
+    if isinstance(output, list):
+        return len(output)
+    return 0
 
 
 def _extract_tool_calls(response: Any) -> list[dict[str, str]]:
@@ -824,11 +832,29 @@ def run_openai_patrol(
             last_response_id = response_id
             resume_response_id = response_id
 
+        response_text = _extract_output_text(response).strip()
         tool_calls = _extract_tool_calls(response)
+        insert_agent_output_log(
+            conn,
+            source="openai",
+            turn_index=turn_count,
+            response_id=response_id,
+            has_tool_calls=bool(tool_calls),
+            output_text=response_text,
+            usage_input_tokens=usage_snapshot["input_tokens"],
+            usage_output_tokens=usage_snapshot["output_tokens"],
+            usage_cached_input_tokens=usage_snapshot["cached_input_tokens"],
+            meta={
+                "output_item_count": _extract_output_item_count(response),
+                "tool_call_names": [call["name"] for call in tool_calls],
+            },
+        )
         if not tool_calls:
-            response_text = _extract_output_text(response).strip()
             if tool_call_count <= 0:
-                detail = "openai responses returned no backend tool calls for this patrol run"
+                detail = (
+                    "openai responses returned no backend tool calls for this patrol run "
+                    f"(final_text={response_text or '[EMPTY]'})"
+                )
                 return OpenAIPatrolResult(
                     status="failed",
                     detail=detail,

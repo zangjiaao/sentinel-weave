@@ -751,6 +751,55 @@ def resolve_run_id_for_dispatch(conn: sqlite3.Connection, *, source: str, tool_n
     return run_id
 
 
+def insert_agent_output_log(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    turn_index: int,
+    response_id: str | None,
+    has_tool_calls: bool,
+    output_text: str,
+    usage_input_tokens: int,
+    usage_output_tokens: int,
+    usage_cached_input_tokens: int,
+    meta: dict[str, Any] | None = None,
+) -> str:
+    output_id = f"aout_{uuid4().hex[:12]}"
+    conn.execute(
+        """
+        insert into agent_outputs (
+          output_id,
+          occurred_at,
+          run_id,
+          source,
+          turn_index,
+          response_id,
+          has_tool_calls,
+          output_text,
+          usage_input_tokens,
+          usage_output_tokens,
+          usage_cached_input_tokens,
+          meta_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            output_id,
+            now_iso(),
+            _resolve_run_id(conn),
+            source,
+            int(turn_index),
+            response_id,
+            1 if has_tool_calls else 0,
+            output_text,
+            int(usage_input_tokens),
+            int(usage_output_tokens),
+            int(usage_cached_input_tokens),
+            json.dumps(meta or {}, ensure_ascii=False),
+        ),
+    )
+    return output_id
+
+
 def insert_tool_call_log(
     conn: sqlite3.Connection,
     *,

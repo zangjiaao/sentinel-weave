@@ -436,6 +436,35 @@ def create_schema(conn: sqlite3.Connection) -> None:
           state_value_json text not null,
           updated_at text not null
         );
+        create table if not exists agent_outputs (
+          output_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          source text not null,
+          turn_index integer not null,
+          response_id text,
+          has_tool_calls integer not null,
+          output_text text not null,
+          usage_input_tokens integer not null,
+          usage_output_tokens integer not null,
+          usage_cached_input_tokens integer not null,
+          meta_json text not null
+        );
+        create table if not exists agent_outputs_archive (
+          output_id text primary key,
+          occurred_at text not null,
+          run_id text,
+          source text not null,
+          turn_index integer not null,
+          response_id text,
+          has_tool_calls integer not null,
+          output_text text not null,
+          usage_input_tokens integer not null,
+          usage_output_tokens integer not null,
+          usage_cached_input_tokens integer not null,
+          meta_json text not null,
+          archived_at text not null
+        );
         create table if not exists agent_tool_calls (
           call_id text primary key,
           occurred_at text not null,
@@ -632,6 +661,12 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """
         create index if not exists idx_patrol_run_costs_started_at
         on patrol_run_costs(started_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_agent_outputs_run_time
+        on agent_outputs(run_id, occurred_at desc)
         """
     )
     _ensure_alerts_shape(conn)

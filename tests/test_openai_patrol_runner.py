@@ -167,6 +167,13 @@ def test_run_openai_patrol_keeps_tools_on_every_turn_and_collects_usage(tmp_path
         client_factory=lambda: fake_client,
         tool_profile="compact",
     )
+    output_rows = conn.execute(
+        """
+        select turn_index, response_id, has_tool_calls, output_text, meta_json
+        from agent_outputs
+        order by occurred_at asc, rowid asc
+        """
+    ).fetchall()
     conn.close()
 
     assert result.status == "success"
@@ -182,6 +189,14 @@ def test_run_openai_patrol_keeps_tools_on_every_turn_and_collects_usage(tmp_path
     assert fake_client.responses.calls[1]["previous_response_id"] == "resp_runner_001"
     assert "instructions" in fake_client.responses.calls[0]
     assert "instructions" not in fake_client.responses.calls[1]
+    assert len(output_rows) == 2
+    assert output_rows[0]["turn_index"] == 1
+    assert output_rows[0]["response_id"] == "resp_runner_001"
+    assert output_rows[0]["has_tool_calls"] == 1
+    assert output_rows[1]["turn_index"] == 2
+    assert output_rows[1]["response_id"] == "resp_runner_002"
+    assert output_rows[1]["has_tool_calls"] == 0
+    assert output_rows[1]["output_text"] == "[SILENT]"
 
 
 def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_path) -> None:

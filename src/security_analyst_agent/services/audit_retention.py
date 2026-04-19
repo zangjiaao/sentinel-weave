@@ -16,6 +16,12 @@ class AuditTableRetention:
 
 RETENTION_TABLES: tuple[AuditTableRetention, ...] = (
     AuditTableRetention(
+        table="agent_outputs",
+        archive_table="agent_outputs_archive",
+        key_column="output_id",
+        default_retention_days=30,
+    ),
+    AuditTableRetention(
         table="agent_tool_calls",
         archive_table="agent_tool_calls_archive",
         key_column="call_id",

@@ -9,6 +9,7 @@ def test_cli_shows_help() -> None:
     assert result.exit_code == 0
     assert "alert.fetch" in result.stdout
     assert "alert.detail-batch" in result.stdout
+    assert "audit.agent-outputs" in result.stdout
 
 
 def test_cli_exposes_actor_case_commands() -> None:

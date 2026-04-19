@@ -391,6 +391,63 @@ def patrol_trigger_command(
     typer.echo(json.dumps(result, ensure_ascii=False))
 
 
+@app.command("audit.agent-outputs")
+def audit_agent_outputs_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    limit: int = typer.Option(50, "--limit"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+) -> None:
+    if run_id:
+        rows = _query_rows(
+            db_path,
+            """
+            select
+              output_id,
+              occurred_at,
+              run_id,
+              source,
+              turn_index,
+              response_id,
+              has_tool_calls,
+              output_text,
+              usage_input_tokens,
+              usage_output_tokens,
+              usage_cached_input_tokens,
+              meta_json
+            from agent_outputs
+            where run_id = ?
+            order by occurred_at desc
+            limit ?
+            """,
+            (run_id, limit),
+        )
+    else:
+        rows = _query_rows(
+            db_path,
+            """
+            select
+              output_id,
+              occurred_at,
+              run_id,
+              source,
+              turn_index,
+              response_id,
+              has_tool_calls,
+              output_text,
+              usage_input_tokens,
+              usage_output_tokens,
+              usage_cached_input_tokens,
+              meta_json
+            from agent_outputs
+            order by occurred_at desc
+            limit ?
+            """,
+            (limit,),
+        )
+    rows = _decode_json_fields(rows, ["meta_json"])
+    typer.echo(json.dumps({"rows": rows}, ensure_ascii=False))
+
+
 @app.command("audit.tool-calls")
 def audit_tool_calls_command(
     db_path: Path = typer.Option(..., "--db-path"),
@@ -700,6 +757,7 @@ def audit_compact_command(
     dry_run: bool = typer.Option(False, "--dry-run"),
     vacuum: bool = typer.Option(False, "--vacuum"),
     now_iso: str | None = typer.Option(None, "--now-iso"),
+    agent_outputs_days: int = typer.Option(30, "--agent-outputs-days"),
     agent_tool_calls_days: int = typer.Option(30, "--agent-tool-calls-days"),
     case_changes_days: int = typer.Option(90, "--case-changes-days"),
     link_decisions_days: int = typer.Option(90, "--link-decisions-days"),
@@ -710,6 +768,7 @@ def audit_compact_command(
         body = compact_audit_logs(
             conn,
             retention_days={
+                "agent_outputs": agent_outputs_days,
                 "agent_tool_calls": agent_tool_calls_days,
                 "case_changes": case_changes_days,
                 "link_decisions": link_decisions_days,

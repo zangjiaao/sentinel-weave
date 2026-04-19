@@ -131,6 +131,7 @@ hermes cron tick
 
 ```bash
 uv run python -m security_analyst_agent.cli audit.tool-calls --db-path ./memory-spike.db --limit 30
+uv run python -m security_analyst_agent.cli audit.agent-outputs --db-path ./memory-spike.db --limit 30
 uv run python -m security_analyst_agent.cli audit.alert-decisions --db-path ./memory-spike.db --limit 30
 uv run python -m security_analyst_agent.cli audit.case-changes --db-path ./memory-spike.db --limit 30
 uv run python -m security_analyst_agent.cli audit.escalations --db-path ./memory-spike.db --limit 30
@@ -148,6 +149,7 @@ uv run python -m security_analyst_agent.cli context.patrol-state --db-path ./mem
 ```bash
 sqlite3 ./memory-spike.db "select run_id, trigger_source, status, started_at, finished_at from patrol_runs order by started_at desc limit 5;"
 uv run python -m security_analyst_agent.cli audit.tool-calls --db-path ./memory-spike.db --run-id <run_id> --limit 100
+uv run python -m security_analyst_agent.cli audit.agent-outputs --db-path ./memory-spike.db --run-id <run_id> --limit 100
 uv run python -m security_analyst_agent.cli audit.alert-decisions --db-path ./memory-spike.db --run-id <run_id> --limit 100
 uv run python -m security_analyst_agent.cli audit.case-changes --db-path ./memory-spike.db --run-id <run_id> --limit 100
 uv run python -m security_analyst_agent.cli audit.escalations --db-path ./memory-spike.db --run-id <run_id> --limit 100

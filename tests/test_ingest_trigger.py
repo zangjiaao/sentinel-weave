@@ -553,6 +553,15 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
         """,
         (result["run_id"],),
     ).fetchone()
+    output_rows = conn.execute(
+        """
+        select turn_index, has_tool_calls, output_text
+        from agent_outputs
+        where run_id = ?
+        order by occurred_at asc, rowid asc
+        """,
+        (result["run_id"],),
+    ).fetchall()
     event_row = conn.execute(
         "select trigger_state from alert_ingest_events order by rowid desc limit 1"
     ).fetchone()
@@ -564,6 +573,9 @@ def test_trigger_patrol_openai_mode_fails_without_backend_tool_calls(tmp_path) -
     assert run_cost is not None
     assert run_cost["trigger_mode"] == "openai"
     assert run_cost["status"] == "failed"
+    assert len(output_rows) == 2
+    assert all(row["has_tool_calls"] == 0 for row in output_rows)
+    assert all(row["output_text"] == "[SILENT]" for row in output_rows)
 
 
 def test_trigger_patrol_openai_mode_rolls_session_when_limits_reached(tmp_path, monkeypatch) -> None:

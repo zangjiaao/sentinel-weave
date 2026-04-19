@@ -1328,6 +1328,13 @@ def test_audit_compact_archives_old_rows_and_keeps_recent_rows(tmp_path) -> None
           ('call_old_001', '2025-01-01T00:00:00+00:00', null, 'cli', 'alert.fetch', '{}', 1, 'ok', '{}', 1),
           ('call_new_001', '2099-01-01T00:00:00+00:00', null, 'cli', 'alert.fetch', '{}', 1, 'ok', '{}', 1);
 
+        insert into agent_outputs (
+          output_id, occurred_at, run_id, source, turn_index, response_id, has_tool_calls, output_text,
+          usage_input_tokens, usage_output_tokens, usage_cached_input_tokens, meta_json
+        ) values
+          ('aout_old_001', '2025-01-01T00:00:00+00:00', null, 'openai', 1, 'resp_old_001', 0, '[SILENT]', 10, 2, 0, '{}'),
+          ('aout_new_001', '2099-01-01T00:00:00+00:00', null, 'openai', 1, 'resp_new_001', 0, '[SILENT]', 11, 3, 0, '{}');
+
         insert into case_changes (
           change_id, occurred_at, run_id, case_id, action, before_json, after_json, reason
         ) values
@@ -1363,12 +1370,16 @@ def test_audit_compact_archives_old_rows_and_keeps_recent_rows(tmp_path) -> None
     assert result.exit_code == 0
     body = json.loads(result.stdout)
     moved = {item["table"]: item["archived_rows"] for item in body["tables"]}
+    assert moved["agent_outputs"] == 1
     assert moved["agent_tool_calls"] == 1
     assert moved["case_changes"] == 1
     assert moved["link_decisions"] == 1
     assert moved["alert_decisions"] == 1
 
     conn = connect_db(db_path)
+    assert conn.execute("select count(*) from agent_outputs where output_id = 'aout_old_001'").fetchone()[0] == 0
+    assert conn.execute("select count(*) from agent_outputs where output_id = 'aout_new_001'").fetchone()[0] == 1
+    assert conn.execute("select count(*) from agent_outputs_archive where output_id = 'aout_old_001'").fetchone()[0] == 1
     assert conn.execute("select count(*) from agent_tool_calls where call_id = 'call_old_001'").fetchone()[0] == 0
     assert conn.execute("select count(*) from agent_tool_calls where call_id = 'call_new_001'").fetchone()[0] == 1
     assert conn.execute("select count(*) from agent_tool_calls_archive where call_id = 'call_old_001'").fetchone()[0] == 1
