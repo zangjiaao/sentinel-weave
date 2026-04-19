@@ -36,7 +36,7 @@ def test_main_analyst_prompt_contains_guardrails() -> None:
     assert "`notify.send` 默认使用 `channel=email` 与 `template=high_severity`" in text
     assert "仅在用户明确要求输出报告时调用 `report.draft`" in text
     assert "不要猜测或拼接不存在的 `case_id`" in text
-    assert "`alert_ids` 必须来自本次巡检中 `alert.fetch` 返回结果" in text
+    assert "`alert_ids` 必须来自本次巡检中 `alert.fetch` / `alert.suspect-ip-topk` / `alert.ip-context` 返回结果" in text
 
 
 def test_runtime_runbook_contains_smoke_loop_steps() -> None:
@@ -120,7 +120,10 @@ def test_patrol_prompt_contains_output_contract() -> None:
 
     assert "First call `alert.fetch`" in text
     assert "call `alert.detail-batch` with at least one representative alert before creating a new case" in text
-    assert "`alert.detail-batch` 的 `alert_ids` 只能使用本次巡检中 `alert.fetch` 返回过的真实 ID" in text
+    assert (
+        "`alert.detail-batch` 的 `alert_ids` 只能使用本次巡检中 `alert.fetch` / "
+        "`alert.suspect-ip-topk` / `alert.ip-context` 返回过的真实 ID"
+    ) in text
     assert "Never fabricate a `case_id` for `case.get`" in text
     assert "call `alert.ack` to set status to `triaged`" in text
     assert "Only call `intel.lookup` when evidence is insufficient" in text

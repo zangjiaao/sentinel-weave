@@ -371,6 +371,45 @@ def test_mcp_alert_detail_batch_rejects_ids_outside_fetch_scope(tmp_path) -> Non
     conn.close()
 
 
+def test_mcp_alert_detail_batch_accepts_ids_from_suspect_ip_scope(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    fetch_result = dispatch_tool(
+        conn,
+        "alert.fetch",
+        {"status": ["new", "open"], "limit": 1},
+        source="mcp",
+    )
+    assert fetch_result["ok"] is True
+    fetch_alert_ids = set(fetch_result.get("refs", {}).get("alert_ids", []))
+
+    suspect_result = dispatch_tool(
+        conn,
+        "alert.suspect-ip-topk",
+        {"status": ["new", "open"], "top_k": 1},
+        source="mcp",
+    )
+    assert suspect_result["ok"] is True
+    suspect_alert_ids = list(suspect_result.get("refs", {}).get("alert_ids", []))
+    assert suspect_alert_ids
+
+    suspect_only_alert_id = next((item for item in suspect_alert_ids if item not in fetch_alert_ids), None)
+    assert suspect_only_alert_id is not None
+
+    detail_result = dispatch_tool(
+        conn,
+        "alert.detail-batch",
+        {"alert_ids": [suspect_only_alert_id]},
+        source="mcp",
+    )
+    assert detail_result["ok"] is True
+    assert detail_result["data"]["alerts"][0]["alert_id"] == suspect_only_alert_id
+    conn.close()
+
+
 def test_audit_cli_commands_return_rows(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
@@ -746,6 +785,173 @@ def test_non_mcp_alert_fetch_keeps_alerts_mode_payload_unchanged(tmp_path) -> No
     payload = json.loads(fetch_call["payload_json"])
     assert payload["mode"] == "alerts"
     assert "auto_cluster_threshold" not in payload
+    conn.close()
+
+
+def test_mcp_case_link_batch_skips_low_consistency_links(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_guard_main_001",
+            "title": "guard main",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_guard_main",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_guard_seed_001",
+        case_id="case_guard_main_001",
+        occurred_at="2026-04-13T12:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_guard_seed_002",
+        case_id="case_guard_main_001",
+        occurred_at="2026-04-13T12:05:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        asset_id="asset_admin_portal",
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_guard_cross_001",
+            "2026-04-13T12:07:00+08:00",
+            "cross chain candidate",
+            "open",
+            "critical",
+            "persistence",
+            "203.0.113.88",
+            "203.0.113.20",
+            "asset_finance_admin",
+        ),
+    )
+    conn.commit()
+
+    result = dispatch_tool(
+        conn,
+        "case.link-alert-batch",
+        {
+            "items": [
+                {
+                    "case_id": "case_guard_main_001",
+                    "alert_id": "alt_guard_cross_001",
+                    "confidence": 0.8,
+                    "reason": "batch guard test",
+                }
+            ]
+        },
+        source="mcp",
+    )
+    assert result["ok"] is True
+    assert "neutral_case_link_guard_skipped_low_consistency_links" in result["warnings"]
+    skipped_items = result["data"]["skipped_low_consistency_items"]
+    assert len(skipped_items) == 1
+    assert skipped_items[0]["alert_id"] == "alt_guard_cross_001"
+    assert "missing_src_or_asset_anchor" in skipped_items[0]["reasons"]
+
+    active_link_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ? and alert_id = ? and is_active = 1
+        """,
+        ("case_guard_main_001", "alt_guard_cross_001"),
+    ).fetchone()[0]
+    assert active_link_count == 0
+    conn.close()
+
+
+def test_mcp_case_link_batch_writes_fallback_case_assessment(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    materialize_spike_runtime_demo(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 5}, source="mcp")
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_guard_assess_001",
+            "title": "guard assess",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "exploit",
+            "primary_actor_id": "actor_guard_assess",
+        },
+        source="cli",
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_guard_assess_001",
+            "2026-04-13T12:30:00+08:00",
+            "assessment fallback candidate",
+            "open",
+            "high",
+            "exploit",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.commit()
+
+    result = dispatch_tool(
+        conn,
+        "case.link-alert-batch",
+        {
+            "items": [
+                {
+                    "case_id": "case_guard_assess_001",
+                    "alert_id": "alt_guard_assess_001",
+                    "confidence": 0.86,
+                    "reason": "fallback assessment test",
+                }
+            ]
+        },
+        source="mcp",
+    )
+    assert result["ok"] is True
+    assert "auto_case_assessment_fallback_written" in result["warnings"]
+    assert "case_guard_assess_001" in result["data"]["auto_assessed_case_ids"]
+
+    assessment_row = conn.execute(
+        """
+        select case_id, reason_summary, assessment_confidence, run_id
+        from case_assessments
+        where case_id = ?
+        order by occurred_at desc, rowid desc
+        limit 1
+        """,
+        ("case_guard_assess_001",),
+    ).fetchone()
+    assert assessment_row is not None
+    assert assessment_row["reason_summary"] == "auto:case.link-alert-batch_high_confidence_fallback"
+    assert float(assessment_row["assessment_confidence"]) >= 0.86
+    assert assessment_row["run_id"] is not None
     conn.close()
 
 

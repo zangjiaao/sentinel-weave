@@ -185,6 +185,7 @@ def test_run_openai_patrol_keeps_tools_on_every_turn_and_collects_usage(tmp_path
     assert len(fake_client.responses.calls) == 2
     assert "tools" in fake_client.responses.calls[0]
     assert "tools" in fake_client.responses.calls[1]
+    assert fake_client.responses.calls[0]["tool_choice"] == "required"
     assert fake_client.responses.calls[0]["previous_response_id"] == "resp_prev_001"
     assert fake_client.responses.calls[1]["previous_response_id"] == "resp_runner_001"
     assert "instructions" in fake_client.responses.calls[0]
@@ -681,3 +682,56 @@ def test_run_openai_patrol_precheck_blocks_case_link_batch_when_case_missing(tmp
     assert result.tool_calls == 1
     assert alert_fetch_calls == 1
     assert case_link_batch_calls == 0
+
+
+def test_run_openai_patrol_retries_empty_provider_response_before_failing(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_empty_001",
+                "usage": {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}},
+                "output": [],
+            },
+            {
+                "id": "resp_recover_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_recover_fetch_001",
+                        "arguments": '{"status":["new","open"],"limit":2}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_recover_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert alert_fetch_calls == 1
+    assert len(fake_client.responses.calls) == 3

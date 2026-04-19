@@ -14,7 +14,7 @@
 - 默认先调用 `alert.fetch`
 - 单轮巡检优先代表性取样，避免对同一阶段同类告警逐条 fan-out 调用
 - 告警详情统一使用 `alert.detail-batch`（单条详情也传单元素数组）
-- `alert.detail-batch` 的 `alert_ids` 必须来自本次巡检中 `alert.fetch` 返回结果，不要猜测或拼接不存在的告警 ID
+- `alert.detail-batch` 的 `alert_ids` 必须来自本次巡检中 `alert.fetch` / `alert.suspect-ip-topk` / `alert.ip-context` 返回结果，不要猜测或拼接不存在的告警 ID
 - `case.get` 只使用工具返回的真实 `case_id`，不要猜测或拼接不存在的 `case_id`
 - 不确定 `case_id` 时：若暂无 `src_ip/asset/stage/keyword` 等检索键，先用 `case.list`；拿到检索线索后再用 `case.search`，最后再 `case.get`
 - 对已处理告警调用 `alert.ack` 出队，避免重复巡检

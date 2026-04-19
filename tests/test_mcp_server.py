@@ -159,7 +159,7 @@ def test_mcp_prompt_alert_detail_batch_contains_id_scope_guardrail() -> None:
     )
 
     assert "严格使用 `alert.detail-batch` 的后端请求 schema 字段" in text
-    assert "`alert_ids` 必须来自本次巡检内 `alert.fetch` 已返回的真实 ID" in text
+    assert "`alert_ids` 必须来自本次巡检内 `alert.fetch` / `alert.suspect-ip-topk` / `alert.ip-context` 已返回的真实 ID" in text
     assert "仅在 `secagent-patrol` skill 不可用时作为兜底说明" in text
 
 

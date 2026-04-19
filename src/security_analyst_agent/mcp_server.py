@@ -76,7 +76,10 @@ TOOL_DESCRIPTIONS = {
     "alert.fetch": "拉取待研判告警摘要队列（含本轮新增告警的轻量摘要）。",
     "alert.suspect-ip-topk": "基于频次/高危占比/阶段推进/跨资产扩散，返回可疑攻击源 IP TopK。",
     "alert.ip-context": "按 src_ip 汇总告警上下文（阶段、资产、高危占比）并返回样本告警列表。",
-    "alert.detail-batch": "批量读取多条告警详情与关键证据摘要（alert_ids 必须来自本轮 alert.fetch 返回）。",
+    "alert.detail-batch": (
+        "批量读取多条告警详情与关键证据摘要（alert_ids 必须来自本轮 "
+        "alert.fetch / alert.suspect-ip-topk / alert.ip-context 的返回）。"
+    ),
     "alert.ack": "将已处理告警标记为 triaged/closed，避免重复出队。",
     "asset.search": "按指标搜索资产并返回资产上下文。",
     "actor.case-list": "列出某个案件下的案内攻击者画像。",
@@ -167,8 +170,14 @@ PROMPT_EXTRA_GUIDANCE: dict[str, list[str]] = {
         "先用 `alert.suspect-ip-topk` 选 IP，再用本工具补全该 IP 的阶段与资产扩散上下文。",
     ],
     "alert.detail-batch": [
-        "`alert_ids` 必须来自本次巡检内 `alert.fetch` 已返回的真实 ID，不要猜测或拼接。",
-        "同一轮中若收到 `detail_batch_requires_fetch_context`，先执行 `alert.fetch`，不要原样重复调用。",
+        (
+            "`alert_ids` 必须来自本次巡检内 `alert.fetch` / `alert.suspect-ip-topk` / "
+            "`alert.ip-context` 已返回的真实 ID，不要猜测或拼接。"
+        ),
+        (
+            "同一轮中若收到 `detail_batch_requires_fetch_context`，先执行 "
+            "`alert.fetch` 或 `alert.suspect-ip-topk`，不要原样重复调用。"
+        ),
     ],
     "alert.ack": ["`status` 仅支持 `triaged` 或 `closed`。"],
     "case.explain-link": ["当前仅支持 `target_type=alert`。"],

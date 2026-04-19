@@ -194,7 +194,7 @@ def _build_openai_patrol_resume_instructions() -> str:
         "Process current pending alerts only.\n"
         "Avoid premature conclusions; keep uncertain findings as unknown/watch.\n"
         "Do not link low-severity recon-only alerts into cases by default.\n"
-        "Hard rules: alert.detail-batch alert_ids must come from this run's alert.fetch.\n"
+        "Hard rules: alert.detail-batch alert_ids must come from this run's alert.fetch/alert.suspect-ip-topk/alert.ip-context.\n"
         "Hard rules: batch write tools (case.upsert-batch/case.link-alert-batch/assessment.upsert-batch) require non-empty items.\n"
         "If a tool returns payload_validation_error or detail_batch_requires_fetch_context, do not retry the same payload.\n"
         "Use concise batched tool calls and return [SILENT] when no material update."

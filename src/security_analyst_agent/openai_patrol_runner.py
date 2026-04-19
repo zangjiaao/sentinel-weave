@@ -166,6 +166,17 @@ def _invoke_response_create(client: Any, request: dict[str, Any]) -> Any:
     return create(**request)
 
 
+def _invoke_response_create_with_tool_choice_fallback(client: Any, request: dict[str, Any]) -> Any:
+    try:
+        return _invoke_response_create(client, request)
+    except Exception:
+        if "tool_choice" not in request:
+            raise
+        fallback_request = dict(request)
+        fallback_request.pop("tool_choice", None)
+        return _invoke_response_create(client, fallback_request)
+
+
 def _to_int(value: Any, default: int = 0) -> int:
     if isinstance(value, bool):
         return default
@@ -892,6 +903,8 @@ def run_openai_patrol(
     invalid_tool_signatures: set[str] = set()
     has_seen_initial_alert_fetch = False
     completed_discovery_tools: set[str] = set()
+    empty_provider_response_retries = 0
+    enforce_initial_required_tool_choice = True
     fetch_override_payload = (
         _normalize_alert_fetch_payload(dict(first_fetch_payload_override))
         if isinstance(first_fetch_payload_override, dict)
@@ -906,11 +919,13 @@ def run_openai_patrol(
             "input": next_input,
             "tools": tools,
         }
+        if tool_call_count <= 0 and enforce_initial_required_tool_choice:
+            request["tool_choice"] = "required"
         if include_instructions:
             request["instructions"] = instructions
         if isinstance(resume_response_id, str) and resume_response_id.strip():
             request["previous_response_id"] = resume_response_id
-        response = _invoke_response_create(client, request)
+        response = _invoke_response_create_with_tool_choice_fallback(client, request)
         include_instructions = False
         usage_snapshot = _extract_usage_snapshot(response)
         usage_input_tokens += usage_snapshot["input_tokens"]
@@ -922,6 +937,7 @@ def run_openai_patrol(
             resume_response_id = response_id
 
         response_text = _extract_output_text(response).strip()
+        output_item_count = _extract_output_item_count(response)
         tool_calls = _extract_tool_calls(response)
         insert_agent_output_log(
             conn,
@@ -934,15 +950,34 @@ def run_openai_patrol(
             usage_output_tokens=usage_snapshot["output_tokens"],
             usage_cached_input_tokens=usage_snapshot["cached_input_tokens"],
             meta={
-                "output_item_count": _extract_output_item_count(response),
+                "output_item_count": output_item_count,
                 "tool_call_names": [call["name"] for call in tool_calls],
             },
         )
         if not tool_calls:
+            is_empty_provider_response = (
+                not response_text
+                and output_item_count == 0
+                and usage_snapshot["input_tokens"] == 0
+                and usage_snapshot["output_tokens"] == 0
+                and usage_snapshot["cached_input_tokens"] == 0
+            )
+            if (
+                tool_call_count <= 0
+                and is_empty_provider_response
+                and empty_provider_response_retries < 2
+                and turn_count < max_turns
+            ):
+                enforce_initial_required_tool_choice = False
+                empty_provider_response_retries += 1
+                include_instructions = True
+                resume_response_id = None
+                next_input = query
+                continue
             if tool_call_count <= 0:
                 detail = (
                     "openai responses returned no backend tool calls for this patrol run "
-                    f"(final_text={response_text or '[EMPTY]'})"
+                    f"(final_text={response_text or '[EMPTY]'}, empty_provider_responses={empty_provider_response_retries})"
                 )
                 return OpenAIPatrolResult(
                     status="failed",
