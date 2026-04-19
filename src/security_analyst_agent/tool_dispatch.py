@@ -77,6 +77,10 @@ _CASE_LINK_AUTO_EXPAND_ALLOWED_STAGES = {
 _ENTITY_ASSESSMENT_AUTO_MIN_ALERT_COUNT = 3
 _ENTITY_ASSESSMENT_AUTO_MIN_STAGE_COUNT = 2
 _ENTITY_ASSESSMENT_AUTO_MIN_MAX_STAGE_RANK = stage_rank("persistence")
+_FETCH_BACKFILL_MIN_MANUAL_LINK_COUNT = 2
+_FETCH_BACKFILL_MIN_STAGE_RANK = stage_rank("exploit")
+_FETCH_BACKFILL_MAX_PER_CASE = 8
+_FETCH_BACKFILL_MAX_TOTAL = 24
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.fetch": alert_fetch,
@@ -1020,6 +1024,31 @@ def _auto_backfill_links_for_hotspot_cases_on_fetch(
     linked_items: list[dict[str, Any]] = []
     linked_at = _now_iso()
     for case_id in case_ids:
+        if len(linked_items) >= _FETCH_BACKFILL_MAX_TOTAL:
+            break
+        case_row = conn.execute(
+            """
+            select current_stage
+            from cases
+            where case_id = ?
+            """,
+            (case_id,),
+        ).fetchone()
+        case_stage = str(case_row["current_stage"] or "").lower() if case_row else ""
+        if stage_rank(case_stage) < _FETCH_BACKFILL_MIN_STAGE_RANK:
+            continue
+        manual_anchor_count = conn.execute(
+            """
+            select count(*)
+            from case_alert_links
+            where case_id = ?
+              and is_active = 1
+              and coalesce(reason, '') not like 'auto:%'
+            """,
+            (case_id,),
+        ).fetchone()[0]
+        if int(manual_anchor_count or 0) < _FETCH_BACKFILL_MIN_MANUAL_LINK_COUNT:
+            continue
         dominant_src_row = conn.execute(
             """
             select alerts.src_ip as src_ip, count(*) as cnt
@@ -1058,7 +1087,12 @@ def _auto_backfill_links_for_hotspot_cases_on_fetch(
             """,
             (src_ip,),
         ).fetchall()
+        case_backfilled_count = 0
         for row in candidates:
+            if len(linked_items) >= _FETCH_BACKFILL_MAX_TOTAL:
+                break
+            if case_backfilled_count >= _FETCH_BACKFILL_MAX_PER_CASE:
+                break
             alert_id = str(row["alert_id"] or "").strip()
             if not alert_id:
                 continue
@@ -1078,6 +1112,7 @@ def _auto_backfill_links_for_hotspot_cases_on_fetch(
                     "reason": "auto:fetch_hotspot_case_signature_backfill",
                 }
             )
+            case_backfilled_count += 1
     return linked_items
 
 

@@ -109,6 +109,26 @@ def _load_cost_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _load_active_link_contribution(conn: sqlite3.Connection) -> dict[str, int]:
+    row = conn.execute(
+        """
+        select
+          count(*) as total_active_link_count,
+          sum(case when coalesce(reason, '') like 'auto:%' then 1 else 0 end) as auto_active_link_count
+        from case_alert_links
+        where is_active = 1
+        """
+    ).fetchone()
+    total = int(row["total_active_link_count"] or 0) if row is not None else 0
+    auto = int(row["auto_active_link_count"] or 0) if row is not None else 0
+    manual = max(0, total - auto)
+    return {
+        "total_active_link_count": total,
+        "auto_active_link_count": auto,
+        "manual_active_link_count": manual,
+    }
+
+
 def _dominant_chain_for_case(
     *,
     case_alert_ids: list[str],
@@ -199,6 +219,7 @@ def score_realistic_run(*, db_path: Path, answer_key_path: Path) -> dict[str, An
         best_case_by_alert_id = _load_active_alert_case_links(conn)
         current_ip_assessments = _load_current_ip_assessments(conn)
         cost_summary = _load_cost_summary(conn)
+        link_contribution = _load_active_link_contribution(conn)
     finally:
         conn.close()
 
@@ -259,6 +280,14 @@ def score_realistic_run(*, db_path: Path, answer_key_path: Path) -> dict[str, An
         if current_ip_assessments.get(ip, {}).get("verdict") == "attacker"
     )
     primary_ip_attacker_recall = _safe_div(len(attacker_hit_ips), len(primary_attack_ips))
+    auto_link_ratio = _safe_div(
+        link_contribution["auto_active_link_count"],
+        link_contribution["total_active_link_count"],
+    )
+    manual_link_ratio = _safe_div(
+        link_contribution["manual_active_link_count"],
+        link_contribution["total_active_link_count"],
+    )
 
     mean_high_signal_recall = _safe_div(
         sum(item["high_signal_recall"] for item in chain_metrics.values()),
@@ -328,6 +357,7 @@ def score_realistic_run(*, db_path: Path, answer_key_path: Path) -> dict[str, An
             "active_linked_alert_count": len(best_case_by_alert_id),
             "cases_with_active_links": len(case_alert_ids),
             "cases_mapped_to_attack_chain": len(dominant_chain_by_case_id),
+            "active_link_contribution": link_contribution,
         },
         "chains": chain_metrics,
         "metrics": {
@@ -336,6 +366,8 @@ def score_realistic_run(*, db_path: Path, answer_key_path: Path) -> dict[str, An
             "noise_leak_to_attack_case_rate": noise_leak_to_attack_case_rate,
             "primary_ip_attacker_recall": primary_ip_attacker_recall,
             "primary_ip_attacker_hits": attacker_hit_ips,
+            "auto_link_ratio": auto_link_ratio,
+            "manual_link_ratio": manual_link_ratio,
         },
         "cost": cost_summary,
         "score": {
@@ -368,6 +400,8 @@ def render_score_markdown(summary: dict[str, Any]) -> str:
             f"- Cross-chain mix rate: `{metrics['cross_chain_mix_rate']:.3f}`",
             f"- Noise leak to attack cases: `{metrics['noise_leak_to_attack_case_rate']:.3f}`",
             f"- Primary attacker IP recall: `{metrics['primary_ip_attacker_recall']:.3f}`",
+            f"- Auto link ratio: `{metrics['auto_link_ratio']:.3f}`",
+            f"- Manual link ratio: `{metrics['manual_link_ratio']:.3f}`",
             "",
             "## Chain Metrics",
         ]
@@ -420,4 +454,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

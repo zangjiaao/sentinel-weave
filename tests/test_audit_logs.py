@@ -1300,6 +1300,17 @@ def test_mcp_alert_fetch_backfills_hotspot_case_signature_links(tmp_path) -> Non
         confidence=0.9,
         asset_id="asset_api_prod",
     )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_hotspot_anchor_002",
+        case_id="case_auto_hotspot_198_51_100_23",
+        occurred_at="2026-04-13T12:01:00+08:00",
+        stage="exploit",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_admin_portal",
+    )
     conn.execute(
         """
         insert into alerts (

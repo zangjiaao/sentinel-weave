@@ -236,9 +236,11 @@ def test_score_realistic_run_computes_key_metrics(tmp_path) -> None:
     assert summary["metrics"]["cross_chain_mix_rate"] == 0.25
     assert summary["metrics"]["noise_leak_to_attack_case_rate"] == 0.5
     assert summary["metrics"]["primary_ip_attacker_recall"] == 1.0
+    assert summary["metrics"]["auto_link_ratio"] == 0.0
+    assert summary["metrics"]["manual_link_ratio"] == 1.0
+    assert summary["counts"]["active_link_contribution"]["manual_active_link_count"] == 5
     assert summary["cost"]["usage_total_tokens_total"] == 1120
     assert summary["score"]["pass"] is False
     markdown = render_score_markdown(summary)
     assert "Realistic Scenario Score" in markdown
     assert "cross_chain_mix_rate" in "\n".join(summary["score"]["fail_reasons"])
-
