@@ -112,6 +112,7 @@ NOISE_SRC_IP_POOL = (
 )
 DEFAULT_SEED = 20260419
 ATTACK_ALERTS_PER_CHAIN_PER_ROUND = 15
+HIGH_SIGNAL_STAGES = {"exploit", "persistence", "command_execution", "reactivation", "lateral_prep"}
 
 
 @dataclass(frozen=True)
@@ -288,13 +289,68 @@ def _build_noise_alerts(
     return alerts, alert_index
 
 
-def generate_rounds(
+def _build_answer_key(
+    *,
+    round_count: int,
+    alerts_per_round: int,
+    chain_count: int,
+    seed: int,
+    templates: tuple[AttackTemplate, ...],
+    alert_truth_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    chains: list[dict[str, Any]] = []
+    for template in templates:
+        stage_by_round = {
+            f"round_{round_index:02d}_realistic": template.stage_by_round[round_index]
+            for round_index in range(1, round_count + 1)
+            if round_index in template.stage_by_round
+        }
+        chains.append(
+            {
+                "chain_id": template.chain,
+                "primary_src_ip": template.src_ip_pool[0],
+                "src_ip_pool": list(template.src_ip_pool),
+                "assets": list(template.assets),
+                "stage_by_round": stage_by_round,
+            }
+        )
+
+    sorted_alert_truth = {alert_id: alert_truth_by_id[alert_id] for alert_id in sorted(alert_truth_by_id)}
+    attack_chain_ids = {template.chain for template in templates}
+    attack_alert_count = sum(1 for item in sorted_alert_truth.values() if item["chain_id"] in attack_chain_ids)
+    noise_alert_count = sum(1 for item in sorted_alert_truth.values() if item["chain_id"] == "noise")
+
+    return {
+        "schema_version": 1,
+        "generator": "security_analyst_agent.tools.generate_alert_fixture",
+        "seed": seed,
+        "round_count": round_count,
+        "alerts_per_round": alerts_per_round,
+        "chain_count": chain_count,
+        "attack_alerts_per_chain_per_round": ATTACK_ALERTS_PER_CHAIN_PER_ROUND,
+        "high_signal_stages": sorted(HIGH_SIGNAL_STAGES),
+        "chains": chains,
+        "expected_entities": {
+            "primary_attack_ips": [item["primary_src_ip"] for item in chains],
+            "all_attack_src_ips": sorted({ip for item in chains for ip in item["src_ip_pool"]}),
+            "noise_src_ip_pool": sorted(set(NOISE_SRC_IP_POOL)),
+        },
+        "totals": {
+            "alert_count": len(sorted_alert_truth),
+            "attack_alert_count": attack_alert_count,
+            "noise_alert_count": noise_alert_count,
+        },
+        "alert_truth": sorted_alert_truth,
+    }
+
+
+def generate_rounds_with_answer_key(
     *,
     round_count: int,
     alerts_per_round: int,
     chain_count: int,
     seed: int = DEFAULT_SEED,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if round_count <= 0:
         raise ValueError("round_count must be > 0")
     if alerts_per_round <= 0:
@@ -309,6 +365,7 @@ def generate_rounds(
     rng = random.Random(seed)
     templates = ATTACK_TEMPLATES[:chain_count]
     rounds: list[dict[str, Any]] = []
+    alert_truth_by_id: dict[str, dict[str, Any]] = {}
     previous_round_id: str | None = None
     next_alert_index = 1
 
@@ -323,6 +380,20 @@ def generate_rounds(
                 next_alert_index=next_alert_index,
             )
             attack_alerts.extend(generated)
+            for alert in generated:
+                alert_truth_by_id[alert["alert_id"]] = {
+                    "round_id": round_id,
+                    "chain_id": template.chain,
+                    "attack_stage": alert["attack_stage"],
+                    "severity": alert["severity"],
+                    "src_ip": alert.get("src_ip"),
+                    "asset_id": alert.get("asset_id"),
+                    "is_attack": True,
+                    "is_high_signal": (
+                        alert["attack_stage"] in HIGH_SIGNAL_STAGES
+                        and alert["severity"] in {"high", "critical"}
+                    ),
+                }
 
         noise_count = alerts_per_round - len(attack_alerts)
         noise_alerts, next_alert_index = _build_noise_alerts(
@@ -331,6 +402,17 @@ def generate_rounds(
             rng=rng,
             next_alert_index=next_alert_index,
         )
+        for alert in noise_alerts:
+            alert_truth_by_id[alert["alert_id"]] = {
+                "round_id": round_id,
+                "chain_id": "noise",
+                "attack_stage": alert["attack_stage"],
+                "severity": alert["severity"],
+                "src_ip": alert.get("src_ip"),
+                "asset_id": alert.get("asset_id"),
+                "is_attack": False,
+                "is_high_signal": False,
+            }
 
         alerts = attack_alerts + noise_alerts
         alerts.sort(key=lambda item: (item["occurred_at"], item["alert_id"]))
@@ -347,6 +429,30 @@ def generate_rounds(
             }
         )
         previous_round_id = round_id
+    answer_key = _build_answer_key(
+        round_count=round_count,
+        alerts_per_round=alerts_per_round,
+        chain_count=chain_count,
+        seed=seed,
+        templates=templates,
+        alert_truth_by_id=alert_truth_by_id,
+    )
+    return rounds, answer_key
+
+
+def generate_rounds(
+    *,
+    round_count: int,
+    alerts_per_round: int,
+    chain_count: int,
+    seed: int = DEFAULT_SEED,
+) -> list[dict[str, Any]]:
+    rounds, _ = generate_rounds_with_answer_key(
+        round_count=round_count,
+        alerts_per_round=alerts_per_round,
+        chain_count=chain_count,
+        seed=seed,
+    )
     return rounds
 
 
@@ -358,7 +464,7 @@ def write_rounds(
     chain_count: int,
     seed: int,
 ) -> Path:
-    rounds = generate_rounds(
+    rounds, answer_key = generate_rounds_with_answer_key(
         round_count=round_count,
         alerts_per_round=alerts_per_round,
         chain_count=chain_count,
@@ -367,6 +473,8 @@ def write_rounds(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "rounds.json"
     output_path.write_text(json.dumps(rounds, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    answer_key_path = output_dir / "answer_key.json"
+    answer_key_path.write_text(json.dumps(answer_key, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return output_path
 
 
@@ -391,6 +499,7 @@ def main() -> None:
             {
                 "ok": True,
                 "output_path": str(output_path),
+                "answer_key_path": str(output_path.parent / "answer_key.json"),
                 "rounds": args.rounds,
                 "per_round": args.per_round,
                 "chains": args.chains,

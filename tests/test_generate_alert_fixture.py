@@ -1,6 +1,10 @@
 import re
 
-from security_analyst_agent.tools.generate_alert_fixture import generate_rounds, write_rounds
+from security_analyst_agent.tools.generate_alert_fixture import (
+    generate_rounds,
+    generate_rounds_with_answer_key,
+    write_rounds,
+)
 
 
 def test_generate_rounds_is_deterministic_with_same_seed() -> None:
@@ -49,3 +53,23 @@ def test_write_rounds_generates_rounds_json(tmp_path) -> None:
     )
     assert output_path.name == "rounds.json"
     assert output_path.exists() is True
+    assert (output_path.parent / "answer_key.json").exists() is True
+
+
+def test_generate_rounds_with_answer_key_contains_ground_truth() -> None:
+    rounds, answer_key = generate_rounds_with_answer_key(
+        round_count=2,
+        alerts_per_round=80,
+        chain_count=2,
+        seed=20260419,
+    )
+    assert len(rounds) == 2
+    assert answer_key["schema_version"] == 1
+    assert answer_key["chain_count"] == 2
+    assert len(answer_key["chains"]) == 2
+    assert answer_key["expected_entities"]["primary_attack_ips"] == ["198.51.100.23", "203.0.113.88"]
+
+    all_alert_ids = {alert["alert_id"] for round_item in rounds for alert in round_item["alerts"]}
+    assert set(answer_key["alert_truth"]) == all_alert_ids
+    chain_values = {item["chain_id"] for item in answer_key["alert_truth"].values()}
+    assert chain_values == {"chain_a", "chain_b", "noise"}
