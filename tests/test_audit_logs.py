@@ -1068,6 +1068,178 @@ def test_mcp_case_link_batch_redirects_to_existing_consistent_case(tmp_path) -> 
     conn.close()
 
 
+def test_mcp_case_link_batch_auto_expands_high_signal_signature_alerts(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_expand_001",
+            "title": "expand case",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+        },
+        source="cli",
+    )
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 5}, source="mcp")
+
+    for alert_id, occurred_at in [
+        ("alt_expand_anchor_001", "2026-04-13T10:00:00+08:00"),
+        ("alt_expand_peer_002", "2026-04-13T10:03:00+08:00"),
+        ("alt_expand_peer_003", "2026-04-13T10:05:00+08:00"),
+    ]:
+        conn.execute(
+            """
+            insert into alerts (
+              alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                occurred_at,
+                f"expand {alert_id}",
+                "open",
+                "critical",
+                "command_execution",
+                "198.51.100.23",
+                "203.0.113.10",
+                "asset_expand_api",
+            ),
+        )
+    conn.commit()
+
+    result = dispatch_tool(
+        conn,
+        "case.link-alert-batch",
+        {
+            "items": [
+                {
+                    "case_id": "case_expand_001",
+                    "alert_id": "alt_expand_anchor_001",
+                    "confidence": 0.9,
+                    "reason": "anchor",
+                }
+            ]
+        },
+        source="mcp",
+    )
+    assert result["ok"] is True
+    assert "auto_case_link_signature_expanded" in result["warnings"]
+
+    linked_ids = {
+        row["alert_id"]
+        for row in conn.execute(
+            """
+            select alert_id
+            from case_alert_links
+            where case_id = ? and is_active = 1
+            """,
+            ("case_expand_001",),
+        ).fetchall()
+    }
+    assert "alt_expand_anchor_001" in linked_ids
+    assert "alt_expand_peer_002" in linked_ids
+    assert "alt_expand_peer_003" in linked_ids
+    conn.close()
+
+
+def test_mcp_case_link_batch_auto_writes_attacker_assessment_for_primary_ip(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_attacker_auto_001",
+            "title": "attacker auto case",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+        },
+        source="cli",
+    )
+    dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 5}, source="mcp")
+
+    staged_alerts = [
+        ("alt_attacker_auto_001", "2026-04-13T11:00:00+08:00", "exploit"),
+        ("alt_attacker_auto_002", "2026-04-13T11:03:00+08:00", "persistence"),
+        ("alt_attacker_auto_003", "2026-04-13T11:06:00+08:00", "command_execution"),
+    ]
+    for alert_id, occurred_at, stage in staged_alerts:
+        conn.execute(
+            """
+            insert into alerts (
+              alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                occurred_at,
+                f"attacker {alert_id}",
+                "open",
+                "high",
+                stage,
+                "198.51.100.23",
+                "203.0.113.10",
+                "asset_attack_api",
+            ),
+        )
+    conn.commit()
+
+    result = dispatch_tool(
+        conn,
+        "case.link-alert-batch",
+        {
+            "items": [
+                {
+                    "case_id": "case_attacker_auto_001",
+                    "alert_id": "alt_attacker_auto_001",
+                    "confidence": 0.9,
+                    "reason": "stage 1",
+                },
+                {
+                    "case_id": "case_attacker_auto_001",
+                    "alert_id": "alt_attacker_auto_002",
+                    "confidence": 0.9,
+                    "reason": "stage 2",
+                },
+                {
+                    "case_id": "case_attacker_auto_001",
+                    "alert_id": "alt_attacker_auto_003",
+                    "confidence": 0.9,
+                    "reason": "stage 3",
+                },
+            ]
+        },
+        source="mcp",
+    )
+    assert result["ok"] is True
+    assert "auto_entity_assessment_fallback_written" in result["warnings"]
+
+    assessment_row = conn.execute(
+        """
+        select verdict, risk_level, related_case_id
+        from entity_assessments
+        where entity_type = 'ip'
+          and entity_key = '198.51.100.23'
+          and related_case_id = 'case_attacker_auto_001'
+          and is_current = 1
+        order by occurred_at desc, rowid desc
+        limit 1
+        """
+    ).fetchone()
+    assert assessment_row is not None
+    assert assessment_row["verdict"] == "attacker"
+    assert assessment_row["risk_level"] in {"high", "critical"}
+    conn.close()
+
+
 def test_mcp_alert_fetch_reuses_active_auto_run_without_creating_new_run(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

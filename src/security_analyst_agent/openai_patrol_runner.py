@@ -293,6 +293,7 @@ _WRITE_TOOL_DISCOVERY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "alert.detail-batch",
     ),
 }
+_MAX_CONSECUTIVE_BLOCKED_TOOL_TURNS = 5
 
 
 def _tool_payload_signature(tool_name: str, payload: dict[str, Any]) -> str:
@@ -1012,6 +1013,7 @@ def run_openai_patrol(
     has_seen_initial_alert_fetch = False
     completed_discovery_tools: set[str] = set()
     empty_provider_response_retries = 0
+    consecutive_blocked_tool_turns = 0
     enforce_initial_required_tool_choice = True
     fetch_override_payload = (
         _normalize_alert_fetch_payload(dict(first_fetch_payload_override))
@@ -1118,6 +1120,7 @@ def run_openai_patrol(
             )
 
         function_outputs: list[dict[str, str]] = []
+        executed_backend_tool_calls_this_turn = 0
         for call in tool_calls:
             backend_tool_name = openai_name_map.get(call["name"])
             if backend_tool_name is None:
@@ -1218,6 +1221,7 @@ def run_openai_patrol(
                         else:
                             tool_result = dispatch_tool(conn, backend_tool_name, payload, source="mcp")
                             tool_call_count += 1
+                            executed_backend_tool_calls_this_turn += 1
                             if call_kind == "read":
                                 read_tool_call_count += 1
                             else:
@@ -1266,6 +1270,28 @@ def run_openai_patrol(
                     "call_id": call["call_id"],
                     "output": json.dumps(tool_result, ensure_ascii=False),
                 }
+            )
+        if tool_calls and executed_backend_tool_calls_this_turn <= 0:
+            consecutive_blocked_tool_turns += 1
+        else:
+            consecutive_blocked_tool_turns = 0
+        if consecutive_blocked_tool_turns >= _MAX_CONSECUTIVE_BLOCKED_TOOL_TURNS and tool_call_count > 0:
+            detail = (
+                "openai responses stopped_after_blocked_tool_loop="
+                f"{consecutive_blocked_tool_turns} (tool_calls={tool_call_count})"
+            )
+            return OpenAIPatrolResult(
+                status="success",
+                detail=detail,
+                response_id=last_response_id,
+                turns=turn_count,
+                tool_calls=tool_call_count,
+                read_tool_calls=read_tool_call_count,
+                write_tool_calls=write_tool_call_count,
+                usage_input_tokens=usage_input_tokens,
+                usage_output_tokens=usage_output_tokens,
+                usage_cached_input_tokens=usage_cached_input_tokens,
+                fetch_resume_payload=next_fetch_resume_payload,
             )
         next_input = function_outputs
 

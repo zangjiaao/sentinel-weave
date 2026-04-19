@@ -928,3 +928,55 @@ def test_run_openai_patrol_alert_ack_guard_can_skip_entire_ack_call(tmp_path) ->
     assert result.tool_calls == 1
     assert high_status == "open"
     assert ack_call_count == 0
+
+
+def test_run_openai_patrol_stops_after_repeated_blocked_tool_loop(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_block_loop_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_block_loop_fetch",
+                        "arguments": '{"status":["new","open"],"limit":2}',
+                    }
+                ],
+            },
+            *[
+                {
+                    "id": f"resp_block_loop_{index:03d}",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "name": "case_upsert_batch",
+                            "call_id": f"call_block_loop_{index:03d}",
+                            "arguments": '{"items":[]}',
+                        }
+                    ],
+                }
+                for index in range(2, 13)
+            ],
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=12,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert "stopped_after_blocked_tool_loop" in result.detail

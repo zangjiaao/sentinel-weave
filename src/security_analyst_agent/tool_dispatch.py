@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from pydantic import ValidationError
@@ -10,6 +10,7 @@ from security_analyst_agent.config import (
     DEFAULT_MCP_ALERT_FETCH_AUTO_CLUSTER_THRESHOLD,
     DEFAULT_NEUTRAL_CASE_LINK_GUARD,
 )
+from security_analyst_agent.repositories.assessments import upsert_entity_assessment
 from security_analyst_agent.repositories.audit import (
     bind_run_context,
     finalize_mcp_auto_run_after_tool,
@@ -18,6 +19,7 @@ from security_analyst_agent.repositories.audit import (
     reset_bound_run_context,
     resolve_run_context_for_dispatch,
 )
+from security_analyst_agent.repositories.cases import link_alert_to_case
 from security_analyst_agent.stages import stage_rank
 from security_analyst_agent.tools.alert_tools import (
     alert_ack,
@@ -61,6 +63,20 @@ _CASE_LINK_CONSISTENCY_SCORE_THRESHOLD = 0.55
 _CASE_LINK_REDIRECT_SCORE_THRESHOLD = 0.65
 _CASE_LINK_TIME_PROXIMITY_WINDOW = timedelta(hours=72)
 _CASE_LINK_FALLBACK_ASSESSMENT_MIN_CONFIDENCE = 0.8
+_CASE_LINK_AUTO_EXPAND_MIN_CONFIDENCE = 0.8
+_CASE_LINK_AUTO_EXPAND_TIME_WINDOW = timedelta(hours=72)
+_CASE_LINK_AUTO_EXPAND_MAX_PER_ANCHOR = 30
+_CASE_LINK_AUTO_EXPAND_MAX_TOTAL = 160
+_CASE_LINK_AUTO_EXPAND_ALLOWED_STAGES = {
+    "exploit",
+    "persistence",
+    "command_execution",
+    "reactivation",
+    "lateral_prep",
+}
+_ENTITY_ASSESSMENT_AUTO_MIN_ALERT_COUNT = 3
+_ENTITY_ASSESSMENT_AUTO_MIN_STAGE_COUNT = 2
+_ENTITY_ASSESSMENT_AUTO_MIN_MAX_STAGE_RANK = stage_rank("persistence")
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.fetch": alert_fetch,
@@ -170,6 +186,10 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed
     return parsed
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _load_alert_feature_map(conn: sqlite3.Connection, alert_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -664,6 +684,313 @@ def _insert_case_assessment_fallback_for_link_batch(
     return list(dict.fromkeys(inserted_case_ids))
 
 
+def _is_high_signal_alert_feature(alert_feature: dict[str, Any]) -> bool:
+    severity = str(alert_feature.get("severity") or "").lower()
+    stage = str(alert_feature.get("attack_stage") or "").lower()
+    if severity in {"high", "critical"}:
+        return True
+    return stage in _CASE_LINK_AUTO_EXPAND_ALLOWED_STAGES
+
+
+def _collect_case_ids_from_link_result(result: dict[str, Any]) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return []
+    links = data.get("links")
+    if not isinstance(links, list):
+        return []
+    collected: list[str] = []
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+        case_id = str(item.get("case_id") or "").strip()
+        if case_id:
+            collected.append(case_id)
+    return list(dict.fromkeys(collected))
+
+
+def _auto_expand_high_signal_case_links(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if source != "mcp":
+        return []
+    if not isinstance(result, dict) or not result.get("ok"):
+        return []
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return []
+    links = data.get("links")
+    if not isinstance(links, list):
+        return []
+
+    anchor_items: list[dict[str, Any]] = []
+    anchor_alert_ids: list[str] = []
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+        case_id = str(item.get("case_id") or "").strip()
+        alert_id = str(item.get("alert_id") or "").strip()
+        confidence = _to_float(item.get("confidence"), default=0.0)
+        if not case_id or not alert_id:
+            continue
+        if confidence < _CASE_LINK_AUTO_EXPAND_MIN_CONFIDENCE:
+            continue
+        anchor_items.append(
+            {
+                "case_id": case_id,
+                "alert_id": alert_id,
+                "confidence": confidence,
+            }
+        )
+        anchor_alert_ids.append(alert_id)
+    if not anchor_items:
+        return []
+
+    feature_map = _load_alert_feature_map(conn, anchor_alert_ids)
+    if not feature_map:
+        return []
+
+    expanded_items: list[dict[str, Any]] = []
+    expanded_pairs: set[tuple[str, str]] = set()
+    linked_at = _now_iso()
+
+    for anchor in anchor_items:
+        if len(expanded_items) >= _CASE_LINK_AUTO_EXPAND_MAX_TOTAL:
+            break
+        case_id = str(anchor["case_id"])
+        alert_id = str(anchor["alert_id"])
+        anchor_feature = feature_map.get(alert_id)
+        if not anchor_feature or not _is_high_signal_alert_feature(anchor_feature):
+            continue
+
+        anchor_stage = str(anchor_feature.get("attack_stage") or "").lower()
+        anchor_stage_rank = stage_rank(anchor_stage)
+        if anchor_stage not in _CASE_LINK_AUTO_EXPAND_ALLOWED_STAGES:
+            continue
+        anchor_src_ip = str(anchor_feature.get("src_ip") or "").strip()
+        if not anchor_src_ip:
+            continue
+        anchor_occurred_at = _parse_iso_datetime(str(anchor_feature.get("occurred_at") or ""))
+
+        rows = conn.execute(
+            """
+            select
+              alert_id,
+              occurred_at,
+              lower(severity) as severity,
+              lower(attack_stage) as attack_stage,
+              src_ip,
+              asset_id
+            from alerts
+            where src_ip = ?
+              and alert_id <> ?
+              and lower(severity) in ('high', 'critical')
+              and lower(attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+            order by occurred_at desc, alert_id asc
+            limit ?
+            """,
+            (anchor_src_ip, alert_id, _CASE_LINK_AUTO_EXPAND_MAX_PER_ANCHOR * 5),
+        ).fetchall()
+
+        per_anchor_count = 0
+        for row in rows:
+            if len(expanded_items) >= _CASE_LINK_AUTO_EXPAND_MAX_TOTAL:
+                break
+            if per_anchor_count >= _CASE_LINK_AUTO_EXPAND_MAX_PER_ANCHOR:
+                break
+            candidate_alert_id = str(row["alert_id"] or "").strip()
+            if not candidate_alert_id:
+                continue
+            pair_key = (case_id, candidate_alert_id)
+            if pair_key in expanded_pairs:
+                continue
+
+            candidate_stage = str(row["attack_stage"] or "").lower()
+            candidate_stage_rank = stage_rank(candidate_stage)
+            if candidate_stage_rank < max(2, anchor_stage_rank - 1):
+                continue
+
+            candidate_occurred_at = _parse_iso_datetime(str(row["occurred_at"] or ""))
+            if (
+                anchor_occurred_at is not None
+                and candidate_occurred_at is not None
+                and abs(anchor_occurred_at - candidate_occurred_at) > _CASE_LINK_AUTO_EXPAND_TIME_WINDOW
+            ):
+                continue
+
+            active_link_row = conn.execute(
+                """
+                select case_id
+                from case_alert_links
+                where alert_id = ? and is_active = 1
+                limit 1
+                """,
+                (candidate_alert_id,),
+            ).fetchone()
+            if active_link_row is not None:
+                if str(active_link_row["case_id"] or "").strip() != case_id:
+                    continue
+                continue
+
+            link_confidence = min(0.92, max(0.75, float(anchor["confidence"]) - 0.05))
+            link_alert_to_case(
+                conn,
+                case_id,
+                candidate_alert_id,
+                link_confidence,
+                "auto:high_signal_signature_expand",
+                linked_at,
+            )
+            expanded_pairs.add(pair_key)
+            expanded_items.append(
+                {
+                    "case_id": case_id,
+                    "alert_id": candidate_alert_id,
+                    "confidence": link_confidence,
+                    "reason": "auto:high_signal_signature_expand",
+                    "anchor_alert_id": alert_id,
+                }
+            )
+            per_anchor_count += 1
+
+    return expanded_items
+
+
+def _auto_write_attacker_entity_assessments_for_case_links(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    run_id: str | None,
+    analysis_cutoff_at: str | None,
+    case_ids: list[str],
+) -> list[dict[str, Any]]:
+    if source != "mcp" or not run_id:
+        return []
+    deduped_case_ids = list(dict.fromkeys(case_id for case_id in case_ids if case_id))
+    if not deduped_case_ids:
+        return []
+
+    inserted: list[dict[str, Any]] = []
+    for case_id in deduped_case_ids:
+        grouped_rows = conn.execute(
+            """
+            select
+              alerts.src_ip as src_ip,
+              count(*) as alert_count,
+              count(distinct lower(alerts.attack_stage)) as stage_count,
+              max(
+                case lower(alerts.attack_stage)
+                  when 'recon' then 1
+                  when 'exploit' then 2
+                  when 'persistence' then 3
+                  when 'command_execution' then 4
+                  when 'lateral_prep' then 5
+                  when 'reactivation' then 6
+                  else 0
+                end
+              ) as max_stage_rank
+            from case_alert_links
+            join alerts on alerts.alert_id = case_alert_links.alert_id
+            where case_alert_links.case_id = ?
+              and case_alert_links.is_active = 1
+              and coalesce(alerts.src_ip, '') != ''
+              and lower(alerts.severity) in ('high', 'critical')
+              and lower(alerts.attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+            group by alerts.src_ip
+            order by alert_count desc, stage_count desc, max_stage_rank desc, src_ip asc
+            """,
+            (case_id,),
+        ).fetchall()
+
+        for row in grouped_rows:
+            src_ip = str(row["src_ip"] or "").strip()
+            if not src_ip:
+                continue
+            alert_count = int(row["alert_count"] or 0)
+            stage_count = int(row["stage_count"] or 0)
+            max_stage_rank = int(row["max_stage_rank"] or 0)
+            if alert_count < _ENTITY_ASSESSMENT_AUTO_MIN_ALERT_COUNT:
+                continue
+            if stage_count < _ENTITY_ASSESSMENT_AUTO_MIN_STAGE_COUNT:
+                continue
+            if max_stage_rank < _ENTITY_ASSESSMENT_AUTO_MIN_MAX_STAGE_RANK:
+                continue
+
+            already_current = conn.execute(
+                """
+                select 1
+                from entity_assessments
+                where entity_type = 'ip'
+                  and entity_key = ?
+                  and related_case_id = ?
+                  and verdict = 'attacker'
+                  and risk_level in ('high', 'critical')
+                  and is_current = 1
+                limit 1
+                """,
+                (src_ip, case_id),
+            ).fetchone()
+            if already_current is not None:
+                continue
+
+            support_rows = conn.execute(
+                """
+                select alerts.alert_id, alerts.occurred_at
+                from case_alert_links
+                join alerts on alerts.alert_id = case_alert_links.alert_id
+                where case_alert_links.case_id = ?
+                  and case_alert_links.is_active = 1
+                  and alerts.src_ip = ?
+                  and lower(alerts.severity) in ('high', 'critical')
+                  and lower(alerts.attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+                order by alerts.occurred_at desc, alerts.alert_id asc
+                limit 12
+                """,
+                (case_id, src_ip),
+            ).fetchall()
+            supporting_alert_ids = [str(item["alert_id"]) for item in support_rows if item["alert_id"]]
+            if not supporting_alert_ids:
+                continue
+            first_seen_at = min((str(item["occurred_at"]) for item in support_rows if item["occurred_at"]), default=None)
+            last_seen_at = max((str(item["occurred_at"]) for item in support_rows if item["occurred_at"]), default=None)
+
+            confidence = min(0.96, 0.72 + 0.03 * min(alert_count, 6) + 0.02 * max(0, stage_count - 1))
+            upsert_entity_assessment(
+                conn,
+                entity_type="ip",
+                entity_key=src_ip,
+                entity_label=src_ip,
+                related_case_id=case_id,
+                risk_level="high",
+                assessment_confidence=confidence,
+                verdict="attacker",
+                reason_summary="auto:high_signal_case_link_continuity",
+                supporting_alert_ids=supporting_alert_ids,
+                supporting_evidence_ids=[],
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                run_id=run_id,
+                analysis_cutoff_at=analysis_cutoff_at,
+            )
+            inserted.append(
+                {
+                    "case_id": case_id,
+                    "entity_type": "ip",
+                    "entity_key": src_ip,
+                    "verdict": "attacker",
+                    "risk_level": "high",
+                    "assessment_confidence": round(confidence, 3),
+                    "supporting_alert_ids": supporting_alert_ids,
+                }
+            )
+    return inserted
+
+
 def _extract_alert_ids_from_fetch_result(result: dict[str, Any]) -> list[str]:
     collected: list[str] = []
     refs = result.get("refs")
@@ -1125,6 +1452,35 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
 
         latency_ms = int((time.perf_counter() - start) * 1000)
         if tool_name == "case.link-alert-batch":
+            auto_expanded_links = _auto_expand_high_signal_case_links(
+                conn,
+                source=source,
+                result=result,
+            )
+            if auto_expanded_links:
+                result = dict(result)
+                warnings = result.get("warnings")
+                warnings_list = list(warnings) if isinstance(warnings, list) else []
+                warnings_list.append("auto_case_link_signature_expanded")
+                result["warnings"] = list(dict.fromkeys(warnings_list))
+
+                refs = result.get("refs")
+                refs_map = dict(refs) if isinstance(refs, dict) else {}
+                existing_alert_ids = refs_map.get("alert_ids")
+                refs_alert_ids = list(existing_alert_ids) if isinstance(existing_alert_ids, list) else []
+                refs_alert_ids.extend(str(item.get("alert_id") or "") for item in auto_expanded_links)
+                refs_map["alert_ids"] = list(dict.fromkeys(item for item in refs_alert_ids if item))
+                existing_case_ids = refs_map.get("case_ids")
+                refs_case_ids = list(existing_case_ids) if isinstance(existing_case_ids, list) else []
+                refs_case_ids.extend(str(item.get("case_id") or "") for item in auto_expanded_links)
+                refs_map["case_ids"] = list(dict.fromkeys(item for item in refs_case_ids if item))
+                result["refs"] = refs_map
+
+                data = result.get("data")
+                data_map = dict(data) if isinstance(data, dict) else {}
+                data_map["auto_expanded_links"] = auto_expanded_links
+                result["data"] = data_map
+
             auto_assessed_case_ids = _insert_case_assessment_fallback_for_link_batch(
                 conn,
                 source=source,
@@ -1149,6 +1505,32 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                 data = result.get("data")
                 data_map = dict(data) if isinstance(data, dict) else {}
                 data_map["auto_assessed_case_ids"] = auto_assessed_case_ids
+                result["data"] = data_map
+            auto_assessments = _auto_write_attacker_entity_assessments_for_case_links(
+                conn,
+                source=source,
+                run_id=run_id,
+                analysis_cutoff_at=analysis_cutoff_at,
+                case_ids=_collect_case_ids_from_link_result(result),
+            )
+            if auto_assessments:
+                result = dict(result)
+                warnings = result.get("warnings")
+                warnings_list = list(warnings) if isinstance(warnings, list) else []
+                warnings_list.append("auto_entity_assessment_fallback_written")
+                result["warnings"] = list(dict.fromkeys(warnings_list))
+
+                refs = result.get("refs")
+                refs_map = dict(refs) if isinstance(refs, dict) else {}
+                existing_case_ids = refs_map.get("case_ids")
+                refs_case_ids = list(existing_case_ids) if isinstance(existing_case_ids, list) else []
+                refs_case_ids.extend(str(item.get("case_id") or "") for item in auto_assessments)
+                refs_map["case_ids"] = list(dict.fromkeys(item for item in refs_case_ids if item))
+                result["refs"] = refs_map
+
+                data = result.get("data")
+                data_map = dict(data) if isinstance(data, dict) else {}
+                data_map["auto_attacker_assessments"] = auto_assessments
                 result["data"] = data_map
         if skipped_noise_alert_ids or skipped_low_consistency_items or redirected_case_link_items:
             result = dict(result)
