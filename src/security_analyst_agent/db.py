@@ -49,6 +49,14 @@ def _ensure_case_alert_links_shape(conn: sqlite3.Connection) -> None:
     conn.execute("create index if not exists idx_case_alert_links_alert_id on case_alert_links(alert_id)")
 
 
+def _ensure_alerts_shape(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("pragma table_info(alerts)").fetchall()}
+    if not columns:
+        return
+    if "raw_attack_stage" not in columns:
+        conn.execute("alter table alerts add column raw_attack_stage text")
+
+
 def _ensure_patrol_runs_shape(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("pragma table_info(patrol_runs)").fetchall()}
     if not columns:
@@ -235,6 +243,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
           status text not null,
           severity text not null,
           attack_stage text not null,
+          raw_attack_stage text,
           src_ip text,
           dst_ip text,
           asset_id text
@@ -625,6 +634,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
         on patrol_run_costs(started_at desc)
         """
     )
+    _ensure_alerts_shape(conn)
     _ensure_case_alert_links_shape(conn)
     _ensure_patrol_runs_shape(conn)
     _ensure_cases_convergence_shape(conn)

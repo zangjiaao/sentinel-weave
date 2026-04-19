@@ -4,6 +4,7 @@ from pathlib import Path
 
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 from security_analyst_agent.db import connect_db
+from security_analyst_agent.hermes_slow_verify import load_integration_manifest, resolve_round_specs
 from security_analyst_agent.openai_slow_verify import _verify_with_mcp_auto_alias, run_openai_slow_integration
 
 
@@ -125,3 +126,11 @@ def test_run_openai_slow_integration_invokes_trigger_with_openai_mode(monkeypatc
     assert trigger_kwargs["trigger_mode"] == "openai"
     assert trigger_kwargs["patrol_max_turns"] == 7
     assert trigger_kwargs["openai_model"] == "gpt-5-mini"
+
+
+def test_load_realistic_manifest_and_round_specs() -> None:
+    manifest = load_integration_manifest("hermes-slow-integration-realistic")
+    assert manifest["fixture_dir"] == "fixtures/spike_memory_realistic"
+    specs = resolve_round_specs(manifest)
+    assert len(specs) == 5
+    assert specs[0]["round_id"] == "round_01_realistic"

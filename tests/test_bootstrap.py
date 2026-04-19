@@ -102,5 +102,15 @@ def test_create_schema_backfills_case_links_from_legacy_alert_case_id(tmp_path) 
         """,
         ("alt_legacy_001",),
     ).fetchone()
+    alert_columns = {item["name"] for item in conn.execute("pragma table_info(alerts)").fetchall()}
     assert row["case_id"] == "case_legacy_001"
     assert row["is_active"] == 1
+    assert "raw_attack_stage" in alert_columns
+
+
+def test_create_schema_adds_raw_attack_stage_column_for_alerts(tmp_path) -> None:
+    db_path = tmp_path / "schema.db"
+    conn = connect_db(db_path)
+    create_schema(conn)
+    columns = {row["name"] for row in conn.execute("pragma table_info(alerts)").fetchall()}
+    assert "raw_attack_stage" in columns

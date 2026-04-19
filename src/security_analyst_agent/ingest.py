@@ -19,6 +19,7 @@ def _upsert_alerts(conn: sqlite3.Connection, alerts: list[dict[str, Any]]) -> in
         "status",
         "severity",
         "attack_stage",
+        "raw_attack_stage",
         "src_ip",
         "dst_ip",
         "asset_id",

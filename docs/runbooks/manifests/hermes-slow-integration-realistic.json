@@ -1,0 +1,60 @@
+{
+  "scenario": "hermes-slow-integration-realistic",
+  "fixture_dir": "fixtures/spike_memory_realistic",
+  "skills": [],
+  "preflight_query": "Reply exactly READY",
+  "round_defaults": {
+    "query": "Run exactly one patrol pass against the current alert queue. Start with alert.fetch and set mode=auto with auto_cluster_threshold=8. Use secagent tools to triage alerts, maintain cases, and maintain attacker profiles only when evidence supports it. Infer attack chains from concrete continuity (timeline, target asset, stage progression, repeated source behavior). If evidence is incomplete, keep uncertainty explicit and avoid rushing to final conclusions. Keep tool usage budget-aware and avoid repetitive per-alert fan-out on homogeneous alerts. Output with exact Markdown headers: '## Patrol Action Summary', '## Remaining Uncertainty', '## Memory Summary'.",
+    "max_turns": 22,
+    "max_tool_calls": 24,
+    "required_output_headers": [
+      "## Patrol Action Summary",
+      "## Remaining Uncertainty",
+      "## Memory Summary"
+    ],
+    "required_tool_names": ["alert.fetch"],
+    "required_any_tool_names": [],
+    "min_tool_calls": 1,
+    "first_tool_name": "alert.fetch"
+  },
+  "rounds": [
+    {"round_id": "round_01_realistic"},
+    {"round_id": "round_02_realistic"},
+    {"round_id": "round_03_realistic"},
+    {"round_id": "round_04_realistic"},
+    {"round_id": "round_05_realistic"}
+  ],
+  "final_assertions": {
+    "min_patrol_runs": 5,
+    "min_tool_calls": 10,
+    "required_tool_names": ["alert.fetch", "alert.ack"],
+    "required_any_tool_names": [
+      ["alert.detail-batch", "case.get", "case.timeline", "case.explain-link"],
+      ["assessment.upsert-batch", "case.link-alert-batch", "case.update-risk"]
+    ],
+    "max_failed_tool_calls": 0,
+    "min_case_assessments": 1,
+    "min_converged_case_clusters": 0,
+    "required_current_entities": [],
+    "min_entity_assessments": 1,
+    "min_alert_decisions": 0,
+    "min_cluster_mode_fetch_calls": 1,
+    "min_fetch_calls_with_priority_buckets": 1,
+    "min_fetch_calls_with_backlog_schedule": 1,
+    "min_fetch_calls_with_hotspot_summary": 1,
+    "min_fetch_calls_with_processing_guardrails": 1,
+    "min_fetch_calls_with_recommended_next_actions": 1,
+    "min_fetch_calls_with_ack_recommendations": 1,
+    "min_five_layer_cluster_fetch_calls": 1,
+    "require_actor_coverage_for_high_signal_alerts": false,
+    "require_primary_case_actor_for_high_signal_cases": false,
+    "allow_single_chain_case_fallback": true,
+    "min_single_chain_cases": 1,
+    "single_chain_min_alerts": 3,
+    "single_chain_min_distinct_stages": 3,
+    "single_chain_stages": ["exploit", "persistence", "command_execution", "reactivation", "lateral_prep"],
+    "single_chain_severities": ["high", "critical"],
+    "high_signal_actor_stages": ["persistence", "command_execution", "reactivation", "lateral_prep"],
+    "high_signal_actor_severities": ["high", "critical"]
+  }
+}

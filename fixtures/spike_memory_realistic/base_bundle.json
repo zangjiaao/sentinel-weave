@@ -1,0 +1,85 @@
+{
+  "assets": [
+    {
+      "asset_id": "asset_api_prod",
+      "asset_name": "api-prod",
+      "system_name": "统一认证 API",
+      "owner_team": "identity",
+      "internet_exposed": 1,
+      "public_ip": "203.0.113.10",
+      "domain": "api.example.com"
+    },
+    {
+      "asset_id": "asset_admin_portal",
+      "asset_name": "admin-portal",
+      "system_name": "运营管理后台",
+      "owner_team": "ops",
+      "internet_exposed": 1,
+      "public_ip": "203.0.113.11",
+      "domain": "admin.example.com"
+    },
+    {
+      "asset_id": "asset_static_www",
+      "asset_name": "www-static",
+      "system_name": "官网静态站点",
+      "owner_team": "web",
+      "internet_exposed": 1,
+      "public_ip": "203.0.113.12",
+      "domain": "www.example.com"
+    },
+    {
+      "asset_id": "asset_billing_api",
+      "asset_name": "billing-api",
+      "system_name": "计费服务 API",
+      "owner_team": "finance-platform",
+      "internet_exposed": 1,
+      "public_ip": "203.0.113.20",
+      "domain": "billing.example.com"
+    },
+    {
+      "asset_id": "asset_finance_admin",
+      "asset_name": "finance-admin",
+      "system_name": "财务运营后台",
+      "owner_team": "finance-ops",
+      "internet_exposed": 1,
+      "public_ip": "203.0.113.21",
+      "domain": "finance-admin.example.com"
+    },
+    {
+      "asset_id": "asset_pay_gateway",
+      "asset_name": "pay-gateway",
+      "system_name": "支付网关入口",
+      "owner_team": "payments",
+      "internet_exposed": 1,
+      "public_ip": "203.0.113.22",
+      "domain": "pay.example.com"
+    }
+  ],
+  "cases": [],
+  "alerts": [],
+  "timeline_events": [],
+  "evidence": [],
+  "intel_cache": [
+    {
+      "indicator": "198.51.100.23",
+      "indicator_type": "ip",
+      "verdict": "malicious",
+      "confidence": 0.96,
+      "queried_at": "2026-04-13T09:00:00+08:00"
+    },
+    {
+      "indicator": "203.0.113.88",
+      "indicator_type": "ip",
+      "verdict": "malicious",
+      "confidence": 0.93,
+      "queried_at": "2026-04-13T09:00:00+08:00"
+    },
+    {
+      "indicator": "198.51.100.200",
+      "indicator_type": "ip",
+      "verdict": "benign",
+      "confidence": 0.9,
+      "queried_at": "2026-04-13T09:00:00+08:00"
+    }
+  ]
+}

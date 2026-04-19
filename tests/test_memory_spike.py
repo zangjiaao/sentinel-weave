@@ -33,6 +33,13 @@ def test_load_expanded_memory_spike_rounds_returns_ten_rounds() -> None:
     assert rounds[-1]["round_id"] == "round_10_chain_b_reactivation"
 
 
+def test_load_realistic_memory_spike_rounds_returns_five_rounds() -> None:
+    rounds = load_memory_spike_rounds(PROJECT_ROOT / "fixtures" / "spike_memory_realistic")
+    assert len(rounds) == 5
+    assert rounds[0]["round_id"] == "round_01_realistic"
+    assert len(rounds[0]["alerts"]) == 1000
+
+
 def test_bootstrap_memory_spike_loads_base_bundle(tmp_path) -> None:
     db_path = tmp_path / "memory-spike.db"
     bootstrap_memory_spike_database(db_path)
@@ -53,6 +60,18 @@ def test_bootstrap_expanded_memory_spike_loads_expanded_assets(tmp_path) -> None
     assert conn.execute("select count(*) from alerts").fetchone()[0] == 0
     assert conn.execute("select count(*) from cases").fetchone()[0] == 0
     assert conn.execute("select count(*) from verify_spike_round_runs").fetchone()[0] == 0
+
+
+def test_bootstrap_and_apply_realistic_round(tmp_path) -> None:
+    db_path = tmp_path / "memory-spike-realistic.db"
+    fixture_dir = PROJECT_ROOT / "fixtures" / "spike_memory_realistic"
+    bootstrap_memory_spike_database(db_path, fixture_dir=fixture_dir)
+    body = apply_memory_spike_round(db_path, "round_01_realistic", fixture_dir=fixture_dir)
+
+    conn = connect_db(db_path)
+    assert body["applied"] is True
+    assert conn.execute("select count(*) from alerts").fetchone()[0] == 1000
+    assert conn.execute("select count(*) from verify_spike_round_runs").fetchone()[0] == 1
 
 
 def test_apply_memory_spike_rounds_are_incremental_and_idempotent(tmp_path) -> None:

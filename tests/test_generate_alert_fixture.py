@@ -1,0 +1,51 @@
+import re
+
+from security_analyst_agent.tools.generate_alert_fixture import generate_rounds, write_rounds
+
+
+def test_generate_rounds_is_deterministic_with_same_seed() -> None:
+    rounds_a = generate_rounds(round_count=5, alerts_per_round=1000, chain_count=2, seed=20260419)
+    rounds_b = generate_rounds(round_count=5, alerts_per_round=1000, chain_count=2, seed=20260419)
+    assert rounds_a == rounds_b
+
+
+def test_generate_rounds_shape_distribution_and_stage_fallback() -> None:
+    rounds = generate_rounds(round_count=5, alerts_per_round=1000, chain_count=2, seed=7)
+    assert len(rounds) == 5
+    assert [item["round_id"] for item in rounds] == [
+        "round_01_realistic",
+        "round_02_realistic",
+        "round_03_realistic",
+        "round_04_realistic",
+        "round_05_realistic",
+    ]
+    assert all(len(item["alerts"]) == 1000 for item in rounds)
+    assert rounds[0]["previous_round_id"] is None
+    assert rounds[1]["previous_round_id"] == "round_01_realistic"
+
+    all_alerts = [alert for item in rounds for alert in item["alerts"]]
+    assert len(all_alerts) == 5000
+
+    attack_signal = [a for a in all_alerts if a["severity"] in {"high", "critical"}]
+    assert len(attack_signal) >= 80
+
+    assert all(a.get("attack_stage") for a in all_alerts)
+    unknown_stage_rows = [a for a in all_alerts if a["attack_stage"] == "unknown"]
+    assert unknown_stage_rows
+    assert all(a["raw_attack_stage"] is None or isinstance(a["raw_attack_stage"], str) for a in all_alerts)
+    assert any(a["raw_attack_stage"] is None for a in unknown_stage_rows)
+
+    bad_ids = [a["alert_id"] for a in all_alerts if re.search(r"(chain|round|r\d+)", a["alert_id"], re.I)]
+    assert bad_ids == []
+
+
+def test_write_rounds_generates_rounds_json(tmp_path) -> None:
+    output_path = write_rounds(
+        output_dir=tmp_path / "spike_memory_realistic",
+        round_count=2,
+        alerts_per_round=50,
+        chain_count=2,
+        seed=42,
+    )
+    assert output_path.name == "rounds.json"
+    assert output_path.exists() is True
