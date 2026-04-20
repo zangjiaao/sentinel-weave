@@ -64,3 +64,11 @@ def test_config_expands_tilde_for_path_env(monkeypatch) -> None:
     assert str(reloaded.DEFAULT_HERMES_HOME).startswith(home)
     assert str(reloaded.DEFAULT_HERMES_PATROL_HOME).startswith(home)
     assert str(reloaded.DEFAULT_HERMES_PATROL_PROMPT_PATH).startswith(home)
+
+
+def test_default_trigger_mode_is_openai(monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_PATROL_TRIGGER_MODE", raising=False)
+    import security_analyst_agent.config as config
+
+    reloaded = importlib.reload(config)
+    assert reloaded.DEFAULT_HERMES_PATROL_TRIGGER_MODE == "openai"

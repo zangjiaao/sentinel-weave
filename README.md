@@ -1,14 +1,13 @@
 # Security Analyst Agent (Phase 1)
 
-本仓库当前只实现 Phase 1 Tool backend（Task 1–8），用于本地 Spike 验证。
+本仓库当前实现安全分析后端（SQLite + Tool + OpenAI patrol），用于本地与半真实样本验证。
 
 ## Scope
 
-- 只读分析工具（本地 CLI + JSON 输入输出）
-- 仅使用 SQLite 种子数据
-- 不接 Hermes runtime
-- 不接真实设备
-- 不做前端
+- OpenAI patrol（默认）+ MCP/CLI 工具链
+- SQLite 事实库 + 导入作业化（CSV 上传/采样/映射/问题行回流）
+- 不依赖 Hermes runtime
+- Web 端可复用 `services/web_backend.py` 作为后端服务层
 
 ## Quick Start
 
@@ -17,12 +16,40 @@ uv sync --extra dev
 UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.bootstrap --db-path ./spike.db
 ```
 
+建议在 `.env` 中配置：
+
+```bash
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=...
+OPENAI_PATROL_MODEL=gpt-5.4
+HERMES_PATROL_TRIGGER_MODE=openai
+```
+
 ## Example
 
 ```bash
 UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli alert.fetch --db-path ./spike.db --payload '{"status":["new","open"],"limit":5}'
 UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli case.get --db-path ./spike.db --payload '{"case_id":"case_demo_001"}'
 UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli report.draft --db-path ./spike.db --payload '{"case_id":"case_demo_001","template":"incident_report_v1","tone":"professional"}'
+```
+
+## CSV 导入作业（Web 前置流程）
+
+```bash
+# 1) 上传 CSV 并创建导入作业
+UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli alert.import-csv \
+  --db-path ./spike.db \
+  --payload '{"csv_path":"./attacklist-2026-04-15.csv"}'
+
+# 2) 采样（给 Agent 产出 map）
+UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli alert.import-sample \
+  --db-path ./spike.db \
+  --payload '{"job_id":"job_xxx","limit_groups":20,"samples_per_group":3}'
+
+# 3) dry-run 预演 / 正式导入
+UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli alert.import-apply \
+  --db-path ./spike.db \
+  --payload '{"job_id":"job_xxx","dry_run":true}'
 ```
 
 ## Validate the Demo Chain
