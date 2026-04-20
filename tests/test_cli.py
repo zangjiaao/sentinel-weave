@@ -9,6 +9,11 @@ def test_cli_shows_help() -> None:
     assert result.exit_code == 0
     assert "alert.fetch" in result.stdout
     assert "alert.detail-batch" in result.stdout
+    assert "alert.raw-ingest" in result.stdout
+    assert "alert.raw-sample" in result.stdout
+    assert "alert.map-upsert" in result.stdout
+    assert "alert.map-apply" in result.stdout
+    assert "alert.unmapped-list" in result.stdout
     assert "audit.agent-outputs" in result.stdout
 
 

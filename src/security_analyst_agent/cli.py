@@ -7,6 +7,13 @@ from security_analyst_agent.config import DEFAULT_HERMES_CRON_JOB_ID
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.ingest import ingest_alert_bundle
 from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
+from security_analyst_agent.raw_mapping import (
+    apply_alert_normalization_maps,
+    ingest_raw_alert_bundle,
+    list_unmapped_alert_events,
+    sample_raw_alert_groups,
+    upsert_alert_normalization_maps,
+)
 from security_analyst_agent.schemas.common import ToolResponse
 from security_analyst_agent.services.audit_retention import compact_audit_logs
 from security_analyst_agent.tool_dispatch import dispatch_tool
@@ -378,6 +385,75 @@ def alert_ingest_command(
             "run_id": None,
             "job_id": job_id,
         }
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.raw-ingest")
+def alert_raw_ingest_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.raw-ingest")
+    events = body.get("events", [])
+    source = body.get("source", "raw_manual_import")
+    result = ingest_raw_alert_bundle(db_path=db_path, events=events, source=source)
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.raw-sample")
+def alert_raw_sample_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.raw-sample")
+    result = sample_raw_alert_groups(
+        db_path=db_path,
+        limit_groups=int(body.get("limit_groups", 20)),
+        samples_per_group=int(body.get("samples_per_group", 3)),
+        statuses=body.get("statuses"),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.map-upsert")
+def alert_map_upsert_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.map-upsert")
+    maps = body.get("maps", [])
+    result = upsert_alert_normalization_maps(db_path=db_path, maps=maps)
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.map-apply")
+def alert_map_apply_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.map-apply")
+    result = apply_alert_normalization_maps(
+        db_path=db_path,
+        limit=int(body.get("limit", 500)),
+        source=body.get("source"),
+        raw_event_ids=body.get("raw_event_ids"),
+        include_unmapped=bool(body.get("include_unmapped", False)),
+        dry_run=bool(body.get("dry_run", False)),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.unmapped-list")
+def alert_unmapped_list_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.unmapped-list")
+    result = list_unmapped_alert_events(
+        db_path=db_path,
+        limit=int(body.get("limit", 100)),
+        unresolved_only=bool(body.get("unresolved_only", True)),
+    )
     typer.echo(json.dumps(result, ensure_ascii=False))
 
 

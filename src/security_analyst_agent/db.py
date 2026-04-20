@@ -256,6 +256,41 @@ def create_schema(conn: sqlite3.Connection) -> None:
           dst_ip text,
           asset_id text
         );
+        create table if not exists raw_alert_events (
+          raw_event_id text primary key,
+          source text not null,
+          vendor text,
+          product text,
+          log_type text,
+          rule_id text,
+          occurred_at text,
+          payload_json text not null,
+          ingested_at text not null,
+          map_status text not null,
+          map_id text,
+          map_confidence real,
+          map_reason text,
+          normalized_alert_id text,
+          mapped_at text
+        );
+        create table if not exists alert_normalization_maps (
+          map_id text primary key,
+          priority integer not null,
+          enabled integer not null,
+          match_json text not null,
+          mapping_json text not null,
+          updated_at text not null
+        );
+        create table if not exists unmapped_alert_events (
+          raw_event_id text primary key,
+          source text not null,
+          reason text not null,
+          details_json text not null,
+          first_seen_at text not null,
+          last_seen_at text not null,
+          hit_count integer not null,
+          resolved integer not null
+        );
         create table if not exists cases (
           case_id text primary key,
           title text not null,
@@ -670,6 +705,30 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """
         create index if not exists idx_patrol_run_costs_started_at
         on patrol_run_costs(started_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_raw_alert_events_status_ingested
+        on raw_alert_events(map_status, ingested_at asc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_raw_alert_events_group
+        on raw_alert_events(source, vendor, product, log_type, rule_id)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_alert_normalization_maps_enabled_priority
+        on alert_normalization_maps(enabled, priority desc, updated_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_unmapped_alert_events_resolved_seen
+        on unmapped_alert_events(resolved, last_seen_at desc)
         """
     )
     conn.execute(
