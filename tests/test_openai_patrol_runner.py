@@ -93,6 +93,15 @@ def test_normalize_alert_fetch_payload_keeps_explicit_mode() -> None:
     assert "auto_cluster_threshold" not in normalized
 
 
+def test_normalize_alert_fetch_payload_disables_strategy_hints_in_objective_mode() -> None:
+    normalized = _normalize_payload_for_tool(
+        "alert.fetch",
+        {"status": ["new", "open"], "limit": 10},
+        objective_mode=True,
+    )
+    assert normalized["include_strategy_hints"] is False
+
+
 @dataclass
 class _UsageDetailsObject:
     cached_tokens: int
@@ -1162,3 +1171,172 @@ def test_run_openai_patrol_auto_acks_low_recon_noise_when_model_does_not_ack(tmp
     assert "auto_noise_ack=" in result.detail
     assert ack_count == 1
     assert low_recon_status == "triaged"
+
+
+def test_run_openai_patrol_objective_mode_disables_auto_case_seed_assist(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    rows = []
+    for index in range(6):
+        rows.append(
+            (
+                f"alt_auto_case_objective_{index}",
+                f"2026-04-13T11:{index:02d}:00+08:00",
+                f"auto-case objective alt_auto_case_objective_{index}",
+                "open",
+                "high",
+                "command_execution",
+                "198.51.100.250",
+                "203.0.113.10",
+                "asset_auto_case_api",
+            )
+        )
+    conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_auto_case_objective_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_auto_case_objective_fetch",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_case_objective_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_suspect_ip_topk",
+                        "call_id": "call_auto_case_objective_topk",
+                        "arguments": '{"status":["new","open"],"top_k":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_case_objective_003",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "case_upsert_batch",
+                        "call_id": "call_auto_case_objective_upsert",
+                        "arguments": '{"items":[]}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_case_objective_004",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=6,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+        objective_mode=True,
+    )
+
+    auto_case_count = conn.execute(
+        """
+        select count(*)
+        from cases
+        where case_id like 'case_auto_hotspot_%'
+        """
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert auto_case_count == 0
+
+
+def test_run_openai_patrol_objective_mode_disables_auto_ack_fallback(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_auto_noise_objective_001",
+            "2026-04-13T09:00:00+08:00",
+            "auto ack low recon objective",
+            "open",
+            "low",
+            "recon",
+            "192.0.2.23",
+            "203.0.113.10",
+            "asset_static_www",
+        ),
+    )
+    conn.commit()
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_auto_ack_objective_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_auto_ack_objective_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_auto_ack_objective_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=4,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+        objective_mode=True,
+    )
+
+    ack_count = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.ack'"
+    ).fetchone()[0]
+    low_recon_status = conn.execute(
+        "select status from alerts where alert_id = 'alt_auto_noise_objective_001'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert "auto_noise_ack=" not in result.detail
+    assert ack_count == 0
+    assert low_recon_status == "open"

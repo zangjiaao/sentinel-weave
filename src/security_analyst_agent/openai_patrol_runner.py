@@ -941,7 +941,7 @@ def _normalize_actor_case_link_batch_payload(payload: dict[str, Any]) -> dict[st
     return {"items": items}
 
 
-def _normalize_alert_fetch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_alert_fetch_payload(payload: dict[str, Any], *, objective_mode: bool = False) -> dict[str, Any]:
     normalized = dict(payload)
     if "status" not in normalized:
         normalized["status"] = ["new", "open"]
@@ -953,14 +953,21 @@ def _normalize_alert_fetch_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized["mode"] = mode
     if mode == "auto" and "auto_cluster_threshold" not in normalized:
         normalized["auto_cluster_threshold"] = 8
+    if objective_mode and "include_strategy_hints" not in normalized:
+        normalized["include_strategy_hints"] = False
     return normalized
 
 
-def _normalize_payload_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_payload_for_tool(
+    tool_name: str,
+    payload: dict[str, Any],
+    *,
+    objective_mode: bool = False,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     if tool_name == "alert.fetch":
-        return _normalize_alert_fetch_payload(payload)
+        return _normalize_alert_fetch_payload(payload, objective_mode=objective_mode)
     if tool_name == "case.upsert-batch":
         return _normalize_case_upsert_batch_payload(payload)
     if tool_name == "case.link-alert-batch":
@@ -1145,6 +1152,7 @@ def run_openai_patrol(
     first_fetch_payload_override: dict[str, Any] | None = None,
     client_factory: OpenAIClientFactory | None = None,
     tool_profile: str = "compact",
+    objective_mode: bool = False,
 ) -> OpenAIPatrolResult:
     if max_turns <= 0:
         return OpenAIPatrolResult(status="failed", detail="openai_patrol_max_turns_must_be_positive", response_id=None)
@@ -1174,7 +1182,7 @@ def run_openai_patrol(
     latest_suspect_candidates: list[dict[str, Any]] = []
     autofilled_case_upsert_once = False
     fetch_override_payload = (
-        _normalize_alert_fetch_payload(dict(first_fetch_payload_override))
+        _normalize_alert_fetch_payload(dict(first_fetch_payload_override), objective_mode=objective_mode)
         if isinstance(first_fetch_payload_override, dict)
         else None
     )
@@ -1263,7 +1271,7 @@ def run_openai_patrol(
             detail = (
                 f"openai responses completed (tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'})"
             )
-            if not has_successful_ack_call and (
+            if not objective_mode and not has_successful_ack_call and (
                 (max_tool_calls is None or tool_call_count < max_tool_calls)
                 and (max_write_tool_calls is None or write_tool_call_count < max_write_tool_calls)
             ):
@@ -1306,7 +1314,11 @@ def run_openai_patrol(
                     payload = json.loads(call["arguments"]) if call["arguments"].strip() else {}
                 except json.JSONDecodeError:
                     payload = {}
-                payload = _normalize_payload_for_tool(backend_tool_name, payload)
+                payload = _normalize_payload_for_tool(
+                    backend_tool_name,
+                    payload,
+                    objective_mode=objective_mode,
+                )
                 if (
                     backend_tool_name == "alert.fetch"
                     and not has_seen_initial_alert_fetch
@@ -1384,6 +1396,7 @@ def run_openai_patrol(
                             backend_tool_name == "case.upsert-batch"
                             and not _has_non_empty_batch_items(payload)
                             and not autofilled_case_upsert_once
+                            and not objective_mode
                         ):
                             autofill_payload, auto_seed_links = _build_case_upsert_autofill_from_suspects(
                                 conn,
@@ -1532,7 +1545,7 @@ def run_openai_patrol(
                 "openai responses stopped_after_blocked_tool_loop="
                 f"{consecutive_blocked_tool_turns} (tool_calls={tool_call_count})"
             )
-            if not has_successful_ack_call and (
+            if not objective_mode and not has_successful_ack_call and (
                 (max_tool_calls is None or tool_call_count < max_tool_calls)
                 and (max_write_tool_calls is None or write_tool_call_count < max_write_tool_calls)
             ):

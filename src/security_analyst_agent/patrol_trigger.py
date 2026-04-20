@@ -20,6 +20,7 @@ from security_analyst_agent.config import (
     DEFAULT_HERMES_PATROL_PROMPT_PATH,
     DEFAULT_HERMES_PATROL_TRIGGER_MODE,
     DEFAULT_OPENAI_PATROL_MODEL,
+    DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
     DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL,
     DEFAULT_OPENAI_PATROL_RESUME_COMPACT_INSTRUCTIONS,
     DEFAULT_OPENAI_PATROL_SESSION_MAX_INPUT_TOKENS,
@@ -639,6 +640,7 @@ def trigger_patrol_from_ingest(
                     first_fetch_payload_override=previous_fetch_resume_payload,
                     client_factory=openai_client_factory,
                     tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
+                    objective_mode=DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
                 )
                 retried_fresh_after_no_tool = False
                 if (
@@ -661,6 +663,7 @@ def trigger_patrol_from_ingest(
                         first_fetch_payload_override=previous_fetch_resume_payload,
                         client_factory=openai_client_factory,
                         tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
+                        objective_mode=DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
                     )
                 status = openai_result.status
                 usage_model = openai_model
@@ -687,6 +690,9 @@ def trigger_patrol_from_ingest(
                     "tool_budget="
                     f"total:{budget['max_tool_calls']}/read:{budget['max_read_tool_calls']}/"
                     f"write:{budget['max_write_tool_calls']}"
+                )
+                detail_parts.append(
+                    f"objective_mode={1 if DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE else 0}"
                 )
                 if openai_result.fetch_resume_payload:
                     detail_parts.append("fetch_backlog=has_more")

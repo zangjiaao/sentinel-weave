@@ -604,6 +604,53 @@ def test_alert_fetch_clusters_returns_budget_guardrails_and_next_actions(db_conn
     assert "detail_fanout_guardrail_applied" in result["warnings"]
 
 
+def test_alert_fetch_clusters_can_hide_strategy_hints_for_objective_mode(db_conn) -> None:
+    rows = []
+    for index in range(8):
+        rows.append(
+            (
+                f"alt_objective_cluster_{index}",
+                f"2026-04-13T15:{index:02d}:00+08:00",
+                "命令执行告警",
+                "new",
+                "high",
+                "command_execution",
+                "198.51.100.170",
+                "203.0.113.10",
+                "asset_api_prod",
+            )
+        )
+    db_conn.executemany(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    db_conn.commit()
+
+    result = alert_fetch(
+        db_conn,
+        {
+            "mode": "clusters",
+            "status": ["new"],
+            "limit": 5,
+            "cluster_min_count": 2,
+            "cluster_sample_size": 3,
+            "include_strategy_hints": False,
+        },
+    )
+    assert result["ok"] is True
+    assert result["data"]["mode"] == "clusters"
+    assert result["data"]["strategy_hints_included"] is False
+    assert result["data"]["processing_guardrails"] is None
+    assert result["data"]["recommended_next_actions"] is None
+    assert result["data"]["ack_recommendations"] is None
+    assert "ack_recommendations_available" not in result["warnings"]
+    assert "detail_fanout_guardrail_applied" not in result["warnings"]
+
+
 def test_alert_fetch_clusters_returns_ack_recommendation_for_homogeneous_noise(db_conn) -> None:
     rows = []
     for index in range(12):

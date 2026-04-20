@@ -570,18 +570,19 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
         }
         if page_has_more:
             warnings.append("cluster_backlog_remaining")
-        processing_guardrails, recommended_next_actions, detail_fanout_guardrail_applied = (
-            _build_cluster_guardrails_and_actions(
-                request=request,
-                clusters=clusters,
-                page_next_cursor=page_next_cursor,
+        if request.include_strategy_hints:
+            processing_guardrails, recommended_next_actions, detail_fanout_guardrail_applied = (
+                _build_cluster_guardrails_and_actions(
+                    request=request,
+                    clusters=clusters,
+                    page_next_cursor=page_next_cursor,
+                )
             )
-        )
-        ack_recommendations = _build_ack_recommendations(clusters)
-        if any(item.get("verdict") == "suggest_ack_triaged" for item in ack_recommendations):
-            warnings.append("ack_recommendations_available")
-        if detail_fanout_guardrail_applied:
-            warnings.append("detail_fanout_guardrail_applied")
+            ack_recommendations = _build_ack_recommendations(clusters)
+            if any(item.get("verdict") == "suggest_ack_triaged" for item in ack_recommendations):
+                warnings.append("ack_recommendations_available")
+            if detail_fanout_guardrail_applied:
+                warnings.append("detail_fanout_guardrail_applied")
 
         should_fallback_to_alerts = cluster_offset == 0 and len(clusters) == 0 and (total_candidates or 0) > 0
         if should_fallback_to_alerts:
@@ -644,6 +645,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             "ack_recommendations": ack_recommendations,
             "omitted_alert_count": omitted_alert_count,
             "ingest_batch_summary": ingest_batch_summary,
+            "strategy_hints_included": bool(request.include_strategy_hints),
         },
         refs={"alert_ids": refs_alert_ids},
         warnings=warnings,

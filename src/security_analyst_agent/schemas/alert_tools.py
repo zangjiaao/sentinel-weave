@@ -17,6 +17,7 @@ class AlertFetchRequest(BaseModel):
     cluster_min_count: int = Field(default=2, ge=1)
     cluster_sample_size: int = Field(default=3, ge=1, le=10)
     hotspot_top_n: int = Field(default=3, ge=1, le=10)
+    include_strategy_hints: bool = True
 
 
 class AlertSuspectIpTopkRequest(BaseModel):
