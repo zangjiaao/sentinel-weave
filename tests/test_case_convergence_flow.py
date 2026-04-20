@@ -1640,6 +1640,103 @@ def test_case_convergence_includes_active_status_case_in_relation_and_merge(tmp_
     conn.close()
 
 
+def test_case_convergence_rolls_up_small_standalone_case_into_related_main_case(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    conn.execute("update alerts set status = 'triaged'")
+    conn.commit()
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_rollup_main",
+            "title": "rollup main case",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "persistence",
+            "primary_actor_id": "actor_rollup_main",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_rollup_small",
+            "title": "rollup small case",
+            "status": "open",
+            "overall_severity": "medium",
+            "current_stage": "exploit",
+            "primary_actor_id": "actor_rollup_small",
+        },
+        source="cli",
+    )
+
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_rollup_main_1",
+        case_id="case_rollup_main",
+        occurred_at="2026-04-12T10:00:00+08:00",
+        stage="persistence",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_rollup_main_2",
+        case_id="case_rollup_main",
+        occurred_at="2026-04-12T10:05:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_rollup_main_3",
+        case_id="case_rollup_main",
+        occurred_at="2026-04-12T10:10:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_rollup_small_1",
+        case_id="case_rollup_small",
+        occurred_at="2026-04-12T10:12:00+08:00",
+        stage="exploit",
+        src_ip="198.51.100.91",
+        severity="medium",
+        confidence=0.85,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    summary = run_case_convergence_for_run(conn, run_id="run_small_case_rollup_1")
+    assert summary["small_case_rolled_up_count"] >= 1
+
+    small_row = conn.execute(
+        """
+        select merge_state, merged_into_case_id, canonical_case_id
+        from cases
+        where case_id = 'case_rollup_small'
+        """
+    ).fetchone()
+    assert small_row is not None
+    assert str(small_row["merge_state"]).lower() == "merged"
+    assert small_row["merged_into_case_id"] == "case_rollup_main"
+    assert small_row["canonical_case_id"] == "case_rollup_main"
+    conn.close()
+
+
 def test_case_convergence_can_reattach_case_after_stronger_new_relation(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

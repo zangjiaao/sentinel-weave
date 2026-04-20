@@ -158,3 +158,77 @@ def test_assessment_upsert_global_current_is_suppressed_when_case_current_exists
     ).fetchall()
     assert len(current_rows) == 1
     assert current_rows[0]["related_case_id"] == "case_demo_001"
+
+
+def test_assessment_upsert_normalizes_ip_prefixed_entity_key_and_supersedes_alias_current(db_conn) -> None:
+    first = assessment_upsert(
+        db_conn,
+        {
+            "entity_type": "ip",
+            "entity_key": "ip:198.51.100.23",
+            "entity_label": "ip:198.51.100.23",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.91,
+            "verdict": "attacker",
+            "reason_summary": "prefixed key first write",
+            "supporting_alert_ids": ["alt_day2_webshell_01"],
+            "supporting_evidence_ids": [],
+        },
+    )
+    second = assessment_upsert(
+        db_conn,
+        {
+            "entity_type": "ip",
+            "entity_key": "198.51.100.23",
+            "entity_label": "198.51.100.23",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.93,
+            "verdict": "attacker",
+            "reason_summary": "canonical key second write",
+            "supporting_alert_ids": ["alt_day3_shell_01"],
+            "supporting_evidence_ids": [],
+        },
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["data"]["assessment"]["entity_key"] == "198.51.100.23"
+    assert second["data"]["assessment"]["entity_key"] == "198.51.100.23"
+
+    current_rows = db_conn.execute(
+        """
+        select entity_key, is_current
+        from entity_assessments
+        where entity_type = 'ip'
+          and related_case_id = 'case_demo_001'
+          and is_current = 1
+        """
+    ).fetchall()
+    assert len(current_rows) == 1
+    assert current_rows[0]["entity_key"] == "198.51.100.23"
+
+
+def test_assessment_upsert_downgrades_compromised_host_without_minimum_support(db_conn) -> None:
+    result = assessment_upsert(
+        db_conn,
+        {
+            "entity_type": "asset",
+            "entity_key": "asset_api_prod",
+            "entity_label": "asset_api_prod",
+            "related_case_id": "case_demo_001",
+            "risk_level": "high",
+            "assessment_confidence": 0.92,
+            "verdict": "compromised_host",
+            "reason_summary": "single alert only",
+            "supporting_alert_ids": ["alt_day3_shell_01"],
+            "supporting_evidence_ids": [],
+        },
+    )
+
+    assert result["ok"] is True
+    assessment = result["data"]["assessment"]
+    assert assessment["verdict"] == "unknown"
+    assert assessment["risk_level"] == "medium"
+    assert "compromised_host_insufficient_support_downgraded_to_unknown" in result["warnings"]

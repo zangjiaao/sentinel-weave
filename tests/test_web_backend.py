@@ -5,6 +5,7 @@ from security_analyst_agent.bootstrap import bootstrap_spike_database, materiali
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.services.web_backend import (
     apply_job,
+    apply_job_with_trigger,
     get_asset_detail,
     get_case_detail,
     get_case_timeline,
@@ -125,6 +126,53 @@ def test_web_backend_trigger_patrol_openai_mode(tmp_path) -> None:
     summary = latest_patrol_summary(db_path=db_path)
     assert summary["run"] is not None
     assert summary["run"]["status"] == "dry_run_success"
+
+
+def test_web_backend_apply_job_with_trigger_dry_run(tmp_path) -> None:
+    db_path = tmp_path / "web-backend-apply-trigger.db"
+    csv_path = tmp_path / "alerts.csv"
+    _write_csv(
+        csv_path,
+        [{"event_time": "2026-04-20 09:00:00", "src_ip": "198.51.100.99", "signal": "x"}],
+    )
+    imported = import_csv_job(
+        db_path=db_path,
+        csv_path=csv_path,
+        occurred_at_column="event_time",
+        job_id="job_apply_trigger_001",
+    )
+    upsert_mapping_rules(
+        db_path=db_path,
+        maps=[
+            {
+                "map_id": "web_apply_trigger_map",
+                "priority": 100,
+                "enabled": True,
+                "match": {"source_prefix": "import_job:", "payload.row.signal": "x"},
+                "mapping": {
+                    "field_map": {
+                        "occurred_at": "payload.row.event_time",
+                        "src_ip": "payload.row.src_ip",
+                    },
+                    "defaults": {
+                        "title": "mapped trigger",
+                        "status": "new",
+                        "severity": "low",
+                        "attack_stage": "recon",
+                    },
+                },
+            }
+        ],
+    )
+    result = apply_job_with_trigger(
+        db_path=db_path,
+        job_id=str(imported["job"]["job_id"]),
+        trigger_after_apply=True,
+        trigger_dry_run=True,
+    )
+    assert result["apply_result"]["mapped"] == 1
+    assert result["trigger_result"]["status"] == "dry_run_success"
+    assert result["trigger_result"]["processed_events"] == 1
 
 
 def test_web_backend_read_models_for_mvp_modules(tmp_path) -> None:
@@ -262,6 +310,11 @@ def test_web_backend_read_models_for_mvp_modules(tmp_path) -> None:
     assert cases["items"]
     case_detail = get_case_detail(db_path=materialize_db_path, case_id="case_demo_001")
     assert case_detail["case"]["case_id"] == "case_demo_001"
+    assert "targets" in case_detail
+    assert "agent_judgement" in case_detail
+    assert "attacker_target_map" in case_detail
+    assert "attack_alert_timeline" in case_detail
+    assert "attack_behavior_analysis" in case_detail
     timeline = get_case_timeline(db_path=materialize_db_path, case_id="case_demo_001", include_evidence=True)
     assert timeline["items"]
     assets = list_assets_overview(db_path=materialize_db_path, limit=10)

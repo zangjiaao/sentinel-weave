@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from security_analyst_agent.entity_identity import ip_entity_key_aliases, normalize_entity_identity
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -29,6 +31,37 @@ def upsert_entity_assessment(
     analysis_cutoff_at: str | None,
 ) -> dict[str, object]:
     occurred_at = _now_iso()
+    entity_type, entity_key = normalize_entity_identity(entity_type, entity_key)
+    entity_label = str(entity_label or "").strip() or entity_key
+    if entity_type == "ip":
+        alias_keys = ip_entity_key_aliases(entity_key)
+        for alias_key in alias_keys:
+            if alias_key == entity_key:
+                continue
+            conn.execute(
+                """
+                update entity_assessments
+                set is_current = 0
+                where entity_type = 'ip'
+                  and entity_key = ?
+                  and coalesce(related_case_id, '') = coalesce(?, '')
+                  and is_current = 1
+                """,
+                (alias_key, related_case_id),
+            )
+            if related_case_id:
+                conn.execute(
+                    """
+                    update entity_assessments
+                    set is_current = 0
+                    where entity_type = 'ip'
+                      and entity_key = ?
+                      and related_case_id is null
+                      and is_current = 1
+                    """,
+                    (alias_key,),
+                )
+
     is_current_target = 1
     conn.execute(
         """

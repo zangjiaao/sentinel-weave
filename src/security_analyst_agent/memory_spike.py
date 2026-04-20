@@ -6,9 +6,15 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any
+from uuid import uuid4
 
-from security_analyst_agent.config import DEFAULT_MEMORY_SPIKE_DB_PATH, SPIKE_MEMORY_DIR
+from security_analyst_agent.config import (
+    DEFAULT_HERMES_PATROL_TRIGGER_MODE,
+    DEFAULT_MEMORY_SPIKE_DB_PATH,
+    SPIKE_MEMORY_DIR,
+)
 from security_analyst_agent.db import connect_db, create_schema
+from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
 
 
 RESET_TABLES = (
@@ -208,6 +214,52 @@ def apply_memory_spike_round(
     }
 
 
+def enqueue_round_ingest_events(
+    db_path: Path,
+    *,
+    round_id: str,
+    fixture_dir: Path = SPIKE_MEMORY_DIR,
+    source_prefix: str = "memory_spike",
+) -> dict[str, Any]:
+    round_map = _load_round_map(fixture_dir)
+    if round_id not in round_map:
+        raise ValueError(f"unknown round_id: {round_id}")
+
+    round_payload = round_map[round_id]
+    alerts = round_payload.get("alerts", [])
+    if not isinstance(alerts, list) or not alerts:
+        return {"round_id": round_id, "enqueued_events": 0}
+
+    conn = connect_db(db_path)
+    create_schema(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    rows: list[tuple[str, str, str, str, str]] = []
+    for index, alert in enumerate(alerts):
+        alert_id = str(alert.get("alert_id") or "").strip()
+        if not alert_id:
+            continue
+        rows.append(
+            (
+                f"evt_{source_prefix}_{round_id}_{index}_{uuid4().hex[:6]}",
+                alert_id,
+                f"{source_prefix}:{round_id}",
+                now,
+                "pending",
+            )
+        )
+    if rows:
+        conn.executemany(
+            """
+            insert into alert_ingest_events (event_id, alert_id, source, ingested_at, trigger_state)
+            values (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    conn.commit()
+    conn.close()
+    return {"round_id": round_id, "enqueued_events": len(rows)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Memory spike bootstrap/apply-round helper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -220,6 +272,11 @@ def main() -> None:
     apply_parser.add_argument("--db-path", type=Path, default=DEFAULT_MEMORY_SPIKE_DB_PATH)
     apply_parser.add_argument("--fixture-dir", type=Path, default=SPIKE_MEMORY_DIR)
     apply_parser.add_argument("--round-id", required=True)
+    apply_parser.add_argument("--enqueue-events", action="store_true")
+    apply_parser.add_argument("--trigger", action="store_true")
+    apply_parser.add_argument("--trigger-dry-run", action="store_true")
+    apply_parser.add_argument("--trigger-mode", default=DEFAULT_HERMES_PATROL_TRIGGER_MODE)
+    apply_parser.add_argument("--trigger-job-id", default=None)
 
     args = parser.parse_args()
     if args.command == "bootstrap":
@@ -228,6 +285,22 @@ def main() -> None:
         return
 
     body = apply_memory_spike_round(args.db_path, args.round_id, fixture_dir=args.fixture_dir)
+    if args.enqueue_events:
+        enqueue_result = enqueue_round_ingest_events(
+            args.db_path,
+            round_id=args.round_id,
+            fixture_dir=args.fixture_dir,
+        )
+        body["enqueued_events"] = int(enqueue_result["enqueued_events"])
+    if args.trigger:
+        trigger_kwargs: dict[str, Any] = {
+            "db_path": args.db_path,
+            "trigger_mode": args.trigger_mode,
+            "dry_run": bool(args.trigger_dry_run),
+        }
+        if args.trigger_job_id:
+            trigger_kwargs["job_id"] = str(args.trigger_job_id)
+        body["trigger_result"] = trigger_patrol_from_ingest(**trigger_kwargs)
     print(json.dumps(body, ensure_ascii=False))
 
 

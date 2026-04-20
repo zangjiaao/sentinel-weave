@@ -16,6 +16,14 @@ class PreviewMapRequest(BaseModel):
     raw_event_ids: list[str] | None = None
 
 
+class ApplyMapRequest(BaseModel):
+    limit: int = 500
+    include_unmapped: bool = False
+    raw_event_ids: list[str] | None = None
+    trigger_after_apply: bool = True
+    trigger_dry_run: bool = False
+
+
 class NotificationPreviewRequest(BaseModel):
     case_id: str
     channel: str = "feishu"
@@ -106,6 +114,21 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
                 limit=body.limit,
                 include_unmapped=body.include_unmapped,
                 raw_event_ids=body.raw_event_ids,
+            )
+        except ValueError as exc:
+            raise _translate_service_error(exc) from exc
+
+    @app.post("/api/intake/uploads/{job_id}/apply-map")
+    def apply_intake_upload_mapping(job_id: str, body: ApplyMapRequest) -> dict:
+        try:
+            return web_backend.apply_job_with_trigger(
+                db_path=_db_path(),
+                job_id=job_id,
+                limit=body.limit,
+                include_unmapped=body.include_unmapped,
+                raw_event_ids=body.raw_event_ids,
+                trigger_after_apply=body.trigger_after_apply,
+                trigger_dry_run=body.trigger_dry_run,
             )
         except ValueError as exc:
             raise _translate_service_error(exc) from exc
@@ -244,4 +267,3 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
 
 
 app = create_app()
-

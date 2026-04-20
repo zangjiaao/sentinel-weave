@@ -40,6 +40,10 @@ _SEVERITY_ORDER = {
 _HIGH_SIGNAL_ACTOR_STAGES = {"exploit", "persistence", "command_execution", "reactivation", "lateral_prep"}
 _HIGH_SIGNAL_ACTOR_SEVERITIES = {"high", "critical"}
 _ATTACKER_PROFILE_MIN_STAGE_RANK = stage_rank("persistence")
+_SMALL_CASE_ROLLUP_MAX_ACTIVE_ALERTS = 1
+_SMALL_CASE_ROLLUP_MIN_RELATION_SCORE = 0.78
+_SMALL_CASE_ROLLUP_TARGET_MIN_ACTIVE_ALERTS = 3
+_COMPROMISED_HOST_MIN_SUPPORTING_ALERTS = 2
 
 
 def _now_iso() -> str:
@@ -649,6 +653,8 @@ def _backfill_high_signal_compromised_host_assessments(
                 continue
 
             supporting_alert_ids = list(dict.fromkeys(str(item["alert_id"]) for item in rows if item["alert_id"]))
+            if len(supporting_alert_ids) < _COMPROMISED_HOST_MIN_SUPPORTING_ALERTS:
+                continue
             first_seen_at = min((str(item["occurred_at"]) for item in rows if item["occurred_at"]), default=None)
             last_seen_at = max((str(item["occurred_at"]) for item in rows if item["occurred_at"]), default=None)
             confidence = max((float(item["link_confidence"] or 0.0) for item in rows), default=0.8)
@@ -1586,6 +1592,136 @@ def _reabsorb_orphan_standalone_cases(
     return absorbed_case_ids
 
 
+def _rollup_small_standalone_cases(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    clustered_case_ids: set[str],
+) -> list[str]:
+    rows = conn.execute(
+        """
+        select case_id, status, current_stage, overall_severity
+        from cases
+        where coalesce(merge_state, 'standalone') = 'standalone'
+          and coalesce(canonical_case_id, case_id) = case_id
+          and status in ('open', 'active', 'investigating', 'observing')
+        """
+    ).fetchall()
+    if not rows:
+        return []
+
+    rolled_up_case_ids: list[str] = []
+    active_link_counts: dict[str, int] = {}
+
+    def _active_link_count(case_id: str) -> int:
+        if case_id in active_link_counts:
+            return active_link_counts[case_id]
+        count = conn.execute(
+            """
+            select count(*)
+            from case_alert_links
+            where case_id = ?
+              and is_active = 1
+            """,
+            (case_id,),
+        ).fetchone()[0]
+        normalized = int(count or 0)
+        active_link_counts[case_id] = normalized
+        return normalized
+
+    for row in rows:
+        case_id = str(row["case_id"])
+        if case_id in clustered_case_ids:
+            continue
+        source_active_links_count = _active_link_count(case_id)
+        if source_active_links_count <= 0 or source_active_links_count > _SMALL_CASE_ROLLUP_MAX_ACTIVE_ALERTS:
+            continue
+        source_stage_rank = stage_rank(str(row["current_stage"] or ""))
+        source_severity_rank = _SEVERITY_ORDER.get(str(row["overall_severity"] or "").lower(), 0)
+
+        relation_rows = conn.execute(
+            """
+            select relation_id, left_case_id, right_case_id, score, status, last_reason, last_seen_at
+            from case_relations
+            where (left_case_id = ? or right_case_id = ?)
+              and status in ('candidate', 'confirmed')
+              and score >= ?
+            order by
+              case status when 'confirmed' then 1 else 0 end desc,
+              score desc,
+              last_seen_at desc,
+              relation_id asc
+            """,
+            (case_id, case_id, _SMALL_CASE_ROLLUP_MIN_RELATION_SCORE),
+        ).fetchall()
+        if not relation_rows:
+            continue
+
+        target_choice: dict[str, Any] | None = None
+        for relation in relation_rows:
+            target_case_id = _relation_counterparty(dict(relation), case_id)
+            if not target_case_id or target_case_id == case_id:
+                continue
+            target_case_row = conn.execute(
+                """
+                select merge_state, status, current_stage, overall_severity
+                from cases
+                where case_id = ?
+                """,
+                (target_case_id,),
+            ).fetchone()
+            if target_case_row is None:
+                continue
+            if str(target_case_row["merge_state"] or "").lower() == "merged":
+                continue
+            target_status = str(target_case_row["status"] or "").lower()
+            if target_status not in {"open", "active", "investigating", "observing"}:
+                continue
+            target_active_links_count = _active_link_count(target_case_id)
+            if target_active_links_count < _SMALL_CASE_ROLLUP_TARGET_MIN_ACTIVE_ALERTS:
+                continue
+            target_stage_rank = stage_rank(str(target_case_row["current_stage"] or ""))
+            if target_stage_rank < source_stage_rank:
+                continue
+            target_severity_rank = _SEVERITY_ORDER.get(str(target_case_row["overall_severity"] or "").lower(), 0)
+            if target_severity_rank < source_severity_rank:
+                continue
+
+            target_choice = {
+                "target_case_id": target_case_id,
+                "relation_id": str(relation["relation_id"] or ""),
+                "relation_score": float(relation["score"] or 0.0),
+                "relation_status": str(relation["status"] or ""),
+                "relation_reason": str(relation["last_reason"] or ""),
+                "target_active_links_count": target_active_links_count,
+            }
+            break
+
+        if target_choice is None:
+            continue
+        merged = _merge_case_into_target(
+            conn,
+            run_id=run_id,
+            case_id=case_id,
+            target_case_id=target_choice["target_case_id"],
+            reason="auto_case_convergence_small_case_rollup",
+            detail_json={
+                "small_case_id": case_id,
+                "target_case_id": target_choice["target_case_id"],
+                "source_active_links_count": source_active_links_count,
+                "target_active_links_count": target_choice["target_active_links_count"],
+                "relation_id": target_choice["relation_id"],
+                "relation_score": target_choice["relation_score"],
+                "relation_status": target_choice["relation_status"],
+                "relation_reason": target_choice["relation_reason"],
+            },
+        )
+        if merged:
+            rolled_up_case_ids.append(case_id)
+
+    return rolled_up_case_ids
+
+
 def _json_list(raw: Any) -> list[str]:
     if not raw:
         return []
@@ -2042,6 +2178,11 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         run_id=run_id,
         clustered_case_ids=clustered_case_ids,
     )
+    small_case_rolled_up_case_ids = _rollup_small_standalone_cases(
+        conn,
+        run_id=run_id,
+        clustered_case_ids=clustered_case_ids,
+    )
     orphan_absorbed_case_ids = _reabsorb_orphan_standalone_cases(
         conn,
         run_id=run_id,
@@ -2064,6 +2205,7 @@ def run_case_convergence_for_run(conn: sqlite3.Connection, run_id: str) -> dict[
         "confirmed_relations_count": len(confirmed_relations_after),
         "merge_events_count": len(merge_events),
         "detached_cases_count": len(detached_case_ids),
+        "small_case_rolled_up_count": len(small_case_rolled_up_case_ids),
         "orphan_absorbed_cases_count": len(orphan_absorbed_case_ids),
         "rolled_up_entity_assessments_count": rolled_up_entity_assessments_count,
         "suppressed_global_entity_currents_count": suppressed_global_entity_currents_count,

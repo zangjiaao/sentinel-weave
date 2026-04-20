@@ -15,6 +15,7 @@ from security_analyst_agent.config import (
     DEFAULT_OPENAI_USER_AGENT,
     DEFAULT_OPENAI_WIRE_API,
 )
+from security_analyst_agent.entity_identity import looks_like_ipv4, normalize_entity_identity
 from security_analyst_agent.mcp_server import CORE_TOOL_NAMES, TOOL_DESCRIPTIONS, TOOL_REQUEST_MODELS
 from security_analyst_agent.repositories.audit import insert_agent_output_log
 from security_analyst_agent.stages import stage_rank
@@ -1181,7 +1182,7 @@ def _normalize_verdict(value: str, default: str = "unknown") -> str:
 
 
 def _looks_like_ip(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value))
+    return looks_like_ipv4(value)
 
 
 def _normalize_entity_type(raw_type: str, *, entity_key: str) -> str:
@@ -1282,7 +1283,7 @@ def _normalize_case_link_alert_batch_payload(payload: dict[str, Any]) -> dict[st
 def _normalize_assessment_upsert_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for item in _ensure_dict_items(payload):
-        entity_key = _first_non_empty(
+        raw_entity_key = _first_non_empty(
             item.get("entity_key"),
             item.get("entity_id"),
             item.get("indicator"),
@@ -1290,9 +1291,15 @@ def _normalize_assessment_upsert_batch_payload(payload: dict[str, Any]) -> dict[
             item.get("asset_id"),
             item.get("case_actor_id"),
         )
+        if not raw_entity_key:
+            continue
+        inferred_entity_type = _normalize_entity_type(
+            _first_non_empty(item.get("entity_type"), item.get("type")),
+            entity_key=raw_entity_key,
+        )
+        entity_type, entity_key = normalize_entity_identity(inferred_entity_type, raw_entity_key)
         if not entity_key:
             continue
-        entity_type = _normalize_entity_type(_first_non_empty(item.get("entity_type"), item.get("type")), entity_key=entity_key)
         verdict = _normalize_verdict(_first_non_empty(item.get("verdict"), item.get("assessment"), "unknown"), default="unknown")
         normalized_item = {
             "entity_type": entity_type,

@@ -36,6 +36,7 @@ UV_CACHE_DIR=.uv-cache uv run uvicorn security_analyst_agent.web_api:app --reloa
 - `GET /api/intake/sources`
 - `GET /api/cases`
 - `GET /api/assets`
+- `POST /api/intake/uploads/{job_id}/apply-map`
 - `POST /api/notifications/preview`
 - `POST /api/reports/preview`
 
@@ -72,6 +73,19 @@ UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli alert.import-
 UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.cli alert.import-apply \
   --db-path ./spike.db \
   --payload '{"job_id":"job_xxx","dry_run":true}'
+```
+
+## Memory Spike 一步导入并触发巡检
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python -m security_analyst_agent.memory_spike \
+  apply-round \
+  --db-path ./spike.db \
+  --fixture-dir ./fixtures/spike_memory_realistic \
+  --round-id round_01_realistic \
+  --enqueue-events \
+  --trigger \
+  --trigger-dry-run
 ```
 
 ## Validate the Demo Chain

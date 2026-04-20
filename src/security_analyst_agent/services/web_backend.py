@@ -41,6 +41,202 @@ def _json_load(payload: str | None, default: Any) -> Any:
         return default
 
 
+def _is_high_signal_severity(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"high", "critical"}
+
+
+def _normalize_stage(value: str | None) -> str:
+    stage = str(value or "").strip().lower()
+    if stage == "reconnaissance":
+        return "recon"
+    return stage or "unknown"
+
+
+def _build_case_attack_alert_rows(conn: Any, *, case_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select
+          alerts.alert_id,
+          alerts.occurred_at,
+          alerts.title,
+          lower(alerts.attack_stage) as attack_stage,
+          lower(alerts.severity) as severity,
+          coalesce(alerts.src_ip, '') as src_ip,
+          coalesce(alerts.asset_id, '') as asset_id,
+          coalesce(alerts.dst_ip, '') as dst_ip,
+          case_alert_links.confidence as link_confidence
+        from case_alert_links
+        join alerts on alerts.alert_id = case_alert_links.alert_id
+        where case_alert_links.case_id = ?
+          and case_alert_links.is_active = 1
+        order by alerts.occurred_at desc, case_alert_links.linked_at desc, alerts.alert_id asc
+        limit ?
+        """,
+        (case_id, max(1, limit)),
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        asset_id = str(row["asset_id"] or "").strip() or None
+        dst_ip = str(row["dst_ip"] or "").strip() or None
+        target = asset_id or dst_ip or "unknown_target"
+        items.append(
+            {
+                "alert_id": row["alert_id"],
+                "occurred_at": row["occurred_at"],
+                "src_ip": str(row["src_ip"] or "").strip() or "unknown_attacker",
+                "attack_type": _normalize_stage(row["attack_stage"]),
+                "attack_description": str(row["title"] or ""),
+                "severity": str(row["severity"] or "").strip().lower() or "unknown",
+                "asset_id": asset_id,
+                "dst_ip": dst_ip,
+                "target": target,
+                "link_confidence": float(row["link_confidence"] or 0.0),
+            }
+        )
+    return items
+
+
+def _build_attacker_target_map(attack_alert_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_attacker: dict[str, dict[str, Any]] = {}
+    for row in attack_alert_rows:
+        attacker_key = row["src_ip"]
+        bucket = by_attacker.setdefault(
+            attacker_key,
+            {
+                "attacker": attacker_key,
+                "alert_count": 0,
+                "high_signal_count": 0,
+                "first_seen_at": None,
+                "last_seen_at": None,
+                "stages": set(),
+                "targets": {},
+            },
+        )
+        occurred_at = row.get("occurred_at")
+        bucket["alert_count"] += 1
+        if _is_high_signal_severity(row.get("severity")):
+            bucket["high_signal_count"] += 1
+        bucket["stages"].add(_normalize_stage(row.get("attack_type")))
+        if occurred_at:
+            if bucket["first_seen_at"] is None or str(occurred_at) < str(bucket["first_seen_at"]):
+                bucket["first_seen_at"] = occurred_at
+            if bucket["last_seen_at"] is None or str(occurred_at) > str(bucket["last_seen_at"]):
+                bucket["last_seen_at"] = occurred_at
+        target_key = f"{row.get('asset_id') or ''}|{row.get('dst_ip') or ''}"
+        target_bucket = bucket["targets"].setdefault(
+            target_key,
+            {
+                "asset_id": row.get("asset_id"),
+                "dst_ip": row.get("dst_ip"),
+                "target": row.get("target"),
+                "alert_count": 0,
+                "high_signal_count": 0,
+            },
+        )
+        target_bucket["alert_count"] += 1
+        if _is_high_signal_severity(row.get("severity")):
+            target_bucket["high_signal_count"] += 1
+
+    result: list[dict[str, Any]] = []
+    for bucket in by_attacker.values():
+        targets = list(bucket["targets"].values())
+        targets.sort(
+            key=lambda item: (
+                int(item.get("high_signal_count") or 0),
+                int(item.get("alert_count") or 0),
+                str(item.get("target") or ""),
+            ),
+            reverse=True,
+        )
+        result.append(
+            {
+                "attacker": bucket["attacker"],
+                "alert_count": int(bucket["alert_count"]),
+                "high_signal_count": int(bucket["high_signal_count"]),
+                "stage_count": len(bucket["stages"]),
+                "stages": sorted(bucket["stages"]),
+                "first_seen_at": bucket["first_seen_at"],
+                "last_seen_at": bucket["last_seen_at"],
+                "targets": targets,
+            }
+        )
+
+    result.sort(
+        key=lambda item: (
+            int(item.get("high_signal_count") or 0),
+            int(item.get("alert_count") or 0),
+            str(item.get("last_seen_at") or ""),
+            str(item.get("attacker") or ""),
+        ),
+        reverse=True,
+    )
+    return result
+
+
+def _build_attack_behavior_analysis(
+    *,
+    attack_alert_rows: list[dict[str, Any]],
+    attacker_target_map: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not attack_alert_rows:
+        return {
+            "summary": "当前案件暂无可用于行为分析的告警记录。",
+            "highlights": [],
+            "stage_progression": [],
+        }
+
+    total_alerts = len(attack_alert_rows)
+    attackers = {str(item.get("src_ip") or "") for item in attack_alert_rows if item.get("src_ip")}
+    targets = {str(item.get("target") or "") for item in attack_alert_rows if item.get("target")}
+    stage_stats: dict[str, dict[str, Any]] = {}
+    for row in attack_alert_rows:
+        stage = _normalize_stage(row.get("attack_type"))
+        stat = stage_stats.setdefault(
+            stage,
+            {"stage": stage, "alert_count": 0, "first_seen_at": None, "last_seen_at": None},
+        )
+        stat["alert_count"] += 1
+        occurred_at = row.get("occurred_at")
+        if occurred_at:
+            if stat["first_seen_at"] is None or str(occurred_at) < str(stat["first_seen_at"]):
+                stat["first_seen_at"] = occurred_at
+            if stat["last_seen_at"] is None or str(occurred_at) > str(stat["last_seen_at"]):
+                stat["last_seen_at"] = occurred_at
+    stage_order = {
+        "recon": 1,
+        "exploit": 2,
+        "persistence": 3,
+        "command_execution": 4,
+        "lateral_prep": 5,
+        "reactivation": 6,
+        "unknown": 99,
+    }
+    stage_progression = sorted(
+        stage_stats.values(),
+        key=lambda item: (
+            stage_order.get(str(item.get("stage")), 99),
+            str(item.get("first_seen_at") or ""),
+        ),
+    )
+
+    top_attacker = attacker_target_map[0] if attacker_target_map else None
+    high_signal_total = len([item for item in attack_alert_rows if _is_high_signal_severity(item.get("severity"))])
+    highlights = [
+        f"共关联 {total_alerts} 条攻击告警，涉及 {len(attackers)} 个攻击源与 {len(targets)} 个目标系统。",
+        f"高危信号（high/critical）共 {high_signal_total} 条。",
+    ]
+    if top_attacker:
+        highlights.append(
+            f"最活跃攻击源 {top_attacker['attacker']}，关联 {top_attacker['alert_count']} 条告警，目标系统 {len(top_attacker['targets'])} 个。"
+        )
+
+    return {
+        "summary": "；".join(highlights),
+        "highlights": highlights,
+        "stage_progression": stage_progression,
+    }
+
+
 def import_csv_job(
     *,
     db_path: Path,
@@ -125,6 +321,36 @@ def apply_job(
         include_unmapped=include_unmapped,
         raw_event_ids=raw_event_ids,
     )
+
+
+def apply_job_with_trigger(
+    *,
+    db_path: Path,
+    job_id: str,
+    limit: int = 500,
+    include_unmapped: bool = False,
+    raw_event_ids: list[str] | None = None,
+    trigger_after_apply: bool = True,
+    trigger_dry_run: bool = False,
+) -> dict[str, Any]:
+    apply_result = apply_job(
+        db_path=db_path,
+        job_id=job_id,
+        limit=limit,
+        include_unmapped=include_unmapped,
+        raw_event_ids=raw_event_ids,
+    )
+    trigger_result: dict[str, Any] | None = None
+    if trigger_after_apply:
+        trigger_result = trigger_patrol(
+            db_path=db_path,
+            job_id=job_id,
+            dry_run=trigger_dry_run,
+        )
+    return {
+        **apply_result,
+        "trigger_result": trigger_result,
+    }
 
 
 def list_job_problem_rows(*, db_path: Path, job_id: str, limit: int = 100) -> dict[str, Any]:
@@ -460,47 +686,117 @@ def get_case_detail(*, db_path: Path, case_id: str) -> dict[str, Any]:
         link_decisions = conn.execute(
             """
             select
-              decision_id,
-              occurred_at,
-              run_id,
-              alert_id,
-              case_id,
-              link_confidence,
-              reason_summary,
-              positive_factors_json,
-              negative_factors_json,
-              uncertainties_json,
-              supporting_evidence_ids_json,
-              analysis_cutoff_at
+              link_decisions.decision_id,
+              link_decisions.occurred_at,
+              link_decisions.run_id,
+              link_decisions.alert_id,
+              link_decisions.case_id,
+              link_decisions.link_confidence,
+              link_decisions.reason_summary,
+              link_decisions.positive_factors_json,
+              link_decisions.negative_factors_json,
+              link_decisions.uncertainties_json,
+              link_decisions.supporting_evidence_ids_json,
+              link_decisions.analysis_cutoff_at,
+              alerts.attack_stage as alert_stage,
+              alerts.title as alert_title,
+              alerts.occurred_at as alert_occurred_at
             from link_decisions
-            where case_id = ?
-            order by occurred_at desc
+            left join alerts on alerts.alert_id = link_decisions.alert_id
+            where link_decisions.case_id = ?
+            order by link_decisions.occurred_at desc
             limit 50
             """,
             (effective_case_id,),
         ).fetchall()
+        target_rows = conn.execute(
+            """
+            select
+              coalesce(alerts.asset_id, '') as asset_id,
+              coalesce(alerts.dst_ip, '') as dst_ip,
+              count(*) as alert_count,
+              sum(case when lower(alerts.severity) in ('high', 'critical') then 1 else 0 end) as high_signal_count,
+              count(distinct lower(alerts.attack_stage)) as stage_count,
+              max(alerts.occurred_at) as last_seen_at
+            from case_alert_links
+            join alerts on alerts.alert_id = case_alert_links.alert_id
+            where case_alert_links.case_id = ?
+              and case_alert_links.is_active = 1
+            group by coalesce(alerts.asset_id, ''), coalesce(alerts.dst_ip, '')
+            order by high_signal_count desc, alert_count desc, last_seen_at desc
+            limit 20
+            """,
+            (effective_case_id,),
+        ).fetchall()
+        assessment_items = [
+            {
+                **dict(item),
+                "supporting_alert_ids": _json_load(item["supporting_alert_ids_json"], []),
+                "supporting_evidence_ids": _json_load(item["supporting_evidence_ids_json"], []),
+            }
+            for item in assessments
+        ]
+        link_explanations = [
+            {
+                **dict(item),
+                "positive_factors": _json_load(item["positive_factors_json"], []),
+                "negative_factors": _json_load(item["negative_factors_json"], []),
+                "uncertainties": _json_load(item["uncertainties_json"], []),
+                "supporting_evidence_ids": _json_load(item["supporting_evidence_ids_json"], []),
+            }
+            for item in link_decisions
+        ]
+        attack_alert_timeline = _build_case_attack_alert_rows(conn, case_id=effective_case_id, limit=1000)
+        attacker_target_map = _build_attacker_target_map(attack_alert_timeline)
+        attack_behavior_analysis = _build_attack_behavior_analysis(
+            attack_alert_rows=attack_alert_timeline,
+            attacker_target_map=attacker_target_map,
+        )
+        targets = [
+            {
+                "asset_id": str(item["asset_id"] or "").strip() or None,
+                "dst_ip": str(item["dst_ip"] or "").strip() or None,
+                "alert_count": int(item["alert_count"] or 0),
+                "high_signal_count": int(item["high_signal_count"] or 0),
+                "stage_count": int(item["stage_count"] or 0),
+                "last_seen_at": item["last_seen_at"],
+            }
+            for item in target_rows
+            if str(item["asset_id"] or "").strip() or str(item["dst_ip"] or "").strip()
+        ]
+        confidence_values = [
+            float(item["link_confidence"])
+            for item in link_explanations
+            if item.get("link_confidence") is not None
+        ]
+        high_confidence_count = len([value for value in confidence_values if value >= 0.8])
+        medium_confidence_count = len([value for value in confidence_values if 0.6 <= value < 0.8])
+        low_confidence_count = len([value for value in confidence_values if value < 0.6])
+        total_uncertainty_count = sum(len(item.get("uncertainties", [])) for item in link_explanations)
+        latest_assessment = assessment_items[0] if assessment_items else None
         return {
             "case": case,
             "timeline": timeline,
             "actors": actors,
-            "assessments": [
-                {
-                    **dict(item),
-                    "supporting_alert_ids": _json_load(item["supporting_alert_ids_json"], []),
-                    "supporting_evidence_ids": _json_load(item["supporting_evidence_ids_json"], []),
-                }
-                for item in assessments
-            ],
-            "link_explanations": [
-                {
-                    **dict(item),
-                    "positive_factors": _json_load(item["positive_factors_json"], []),
-                    "negative_factors": _json_load(item["negative_factors_json"], []),
-                    "uncertainties": _json_load(item["uncertainties_json"], []),
-                    "supporting_evidence_ids": _json_load(item["supporting_evidence_ids_json"], []),
-                }
-                for item in link_decisions
-            ],
+            "attacker_target_map": attacker_target_map,
+            "attack_alert_timeline": attack_alert_timeline,
+            "attack_behavior_analysis": attack_behavior_analysis,
+            "targets": targets,
+            "assessments": assessment_items,
+            "link_explanations": link_explanations,
+            "agent_judgement": {
+                "latest_assessment": latest_assessment,
+                "link_confidence_summary": {
+                    "total": len(confidence_values),
+                    "high_confidence_count": high_confidence_count,
+                    "medium_confidence_count": medium_confidence_count,
+                    "low_confidence_count": low_confidence_count,
+                    "avg_confidence": round(sum(confidence_values) / len(confidence_values), 4)
+                    if confidence_values
+                    else None,
+                },
+                "total_uncertainty_count": total_uncertainty_count,
+            },
             "canonical_case_id": effective_case_id,
             "requested_case_id": case_id,
         }

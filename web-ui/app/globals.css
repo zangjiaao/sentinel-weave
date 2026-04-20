@@ -36,6 +36,67 @@ body {
   margin-bottom: 12px;
 }
 
+.subcard {
+  border: 1px solid #eef2f7;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  background: #fafcff;
+}
+
+.stage-card {
+  border: 1px solid #e5eaf3;
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 12px;
+  background: #ffffff;
+}
+
+.evidence-block {
+  margin-top: 8px;
+  border-left: 3px solid #dbeafe;
+  padding-left: 10px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  margin-top: 8px;
+}
+
+.timeline-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.timeline-table th,
+.timeline-table td {
+  text-align: left;
+  padding: 10px;
+  border-bottom: 1px solid #eef2f7;
+  vertical-align: top;
+}
+
+.timeline-table thead th {
+  background: #f8fafc;
+  color: #374151;
+  font-weight: 600;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .title {
   margin: 0 0 10px;
   font-size: 20px;
@@ -46,4 +107,3 @@ body {
   color: #4b5563;
   font-size: 14px;
 }
-

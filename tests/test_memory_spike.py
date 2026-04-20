@@ -202,6 +202,106 @@ def test_memory_spike_module_supports_fixture_dir_override(tmp_path) -> None:
     assert body["applied"] is True
 
 
+def test_memory_spike_apply_round_can_enqueue_ingest_events(tmp_path) -> None:
+    db_path = tmp_path / "memory-spike.db"
+    fixture_dir = PROJECT_ROOT / "fixtures" / "spike_memory"
+
+    bootstrap = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "security_analyst_agent.memory_spike",
+            "bootstrap",
+            "--db-path",
+            str(db_path),
+            "--fixture-dir",
+            str(fixture_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bootstrap.returncode == 0
+
+    apply_round = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "security_analyst_agent.memory_spike",
+            "apply-round",
+            "--db-path",
+            str(db_path),
+            "--fixture-dir",
+            str(fixture_dir),
+            "--round-id",
+            "round_01_recon",
+            "--enqueue-events",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert apply_round.returncode == 0
+    body = json.loads(apply_round.stdout)
+    assert body["applied"] is True
+    assert body["enqueued_events"] == 4
+
+    conn = connect_db(db_path)
+    pending_count = conn.execute(
+        "select count(*) from alert_ingest_events where trigger_state = 'pending'"
+    ).fetchone()[0]
+    conn.close()
+    assert pending_count == 4
+
+
+def test_memory_spike_apply_round_can_enqueue_and_trigger_patrol_dry_run(tmp_path) -> None:
+    db_path = tmp_path / "memory-spike-trigger.db"
+    fixture_dir = PROJECT_ROOT / "fixtures" / "spike_memory"
+
+    bootstrap = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "security_analyst_agent.memory_spike",
+            "bootstrap",
+            "--db-path",
+            str(db_path),
+            "--fixture-dir",
+            str(fixture_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bootstrap.returncode == 0
+
+    apply_round = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "security_analyst_agent.memory_spike",
+            "apply-round",
+            "--db-path",
+            str(db_path),
+            "--fixture-dir",
+            str(fixture_dir),
+            "--round-id",
+            "round_01_recon",
+            "--enqueue-events",
+            "--trigger",
+            "--trigger-dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert apply_round.returncode == 0
+    body = json.loads(apply_round.stdout)
+    assert body["enqueued_events"] == 4
+    assert body["trigger_result"]["status"] == "dry_run_success"
+    assert body["trigger_result"]["processed_events"] == 4
+
+
 def test_round1_explain_link_does_not_pull_future_evidence_with_cutoff(tmp_path) -> None:
     db_path = tmp_path / "memory-spike.db"
     bootstrap_memory_spike_database(db_path)

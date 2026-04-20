@@ -36,6 +36,28 @@ def test_normalize_assessment_upsert_batch_payload_with_alias_fields() -> None:
     assert item["supporting_alert_ids"] == ["alt_demo_001"]
 
 
+def test_normalize_assessment_upsert_batch_payload_normalizes_ip_prefix_entity_key() -> None:
+    payload = {
+        "items": [
+            {
+                "entity_type": "ip",
+                "entity_key": "ip:198.51.100.23",
+                "risk_level": "high",
+                "assessment_confidence": 0.88,
+                "verdict": "attacker",
+                "reason_summary": "prefixed ip key",
+                "supporting_alert_ids": ["alt_demo_001"],
+            }
+        ]
+    }
+
+    normalized = _normalize_payload_for_tool("assessment.upsert-batch", payload)
+    item = normalized["items"][0]
+    assert item["entity_type"] == "ip"
+    assert item["entity_key"] == "198.51.100.23"
+    assert item["entity_label"] == "198.51.100.23"
+
+
 def test_normalize_actor_case_link_batch_fills_required_fields() -> None:
     payload = {
         "items": [

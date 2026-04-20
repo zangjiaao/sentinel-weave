@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from security_analyst_agent.bootstrap import bootstrap_spike_database, materialize_spike_runtime_demo
 from security_analyst_agent.db import connect_db
+from security_analyst_agent.raw_mapping import upsert_alert_normalization_maps
 from security_analyst_agent.services.web_backend import import_csv_job
 from security_analyst_agent.web_api import create_app
 
@@ -116,6 +117,32 @@ def test_web_api_intake_routes(tmp_path) -> None:
         [{"time": "2026-04-20 10:00:00", "src": "198.51.100.20", "signal": "scan"}],
     )
     imported = import_csv_job(db_path=db_path, csv_path=csv_path, occurred_at_column="time", job_id="job_api_001")
+    upsert_alert_normalization_maps(
+        db_path=db_path,
+        maps=[
+            {
+                "map_id": "map_api_apply_001",
+                "priority": 100,
+                "enabled": True,
+                "match": {
+                    "source_prefix": "import_job:",
+                    "payload.row.signal": "scan",
+                },
+                "mapping": {
+                    "field_map": {
+                        "occurred_at": "payload.row.time",
+                        "src_ip": "payload.row.src",
+                    },
+                    "defaults": {
+                        "title": "api apply mapped",
+                        "status": "new",
+                        "severity": "low",
+                        "attack_stage": "recon",
+                    },
+                },
+            }
+        ],
+    )
 
     client = TestClient(create_app(db_path=db_path))
     assert client.get("/healthz").status_code == 200
@@ -135,6 +162,14 @@ def test_web_api_intake_routes(tmp_path) -> None:
     upload_get_resp = client.get(f"/api/intake/uploads/{imported['job']['job_id']}")
     assert upload_get_resp.status_code == 200
     assert upload_get_resp.json()["job"]["job_id"] == imported["job"]["job_id"]
+
+    apply_resp = client.post(
+        f"/api/intake/uploads/{imported['job']['job_id']}/apply-map",
+        json={"trigger_after_apply": True, "trigger_dry_run": True},
+    )
+    assert apply_resp.status_code == 200
+    assert apply_resp.json()["trigger_result"]["status"] == "dry_run_success"
+    assert apply_resp.json()["trigger_result"]["processed_events"] == 1
 
     parser_list_resp = client.get("/api/intake/parsers")
     assert parser_list_resp.status_code == 200
@@ -159,6 +194,11 @@ def test_web_api_case_asset_notification_report_routes(tmp_path) -> None:
     case_resp = client.get(f"/api/cases/{case_id}")
     assert case_resp.status_code == 200
     assert case_resp.json()["case"]["case_id"] == case_id
+    assert "targets" in case_resp.json()
+    assert "agent_judgement" in case_resp.json()
+    assert "attacker_target_map" in case_resp.json()
+    assert "attack_alert_timeline" in case_resp.json()
+    assert "attack_behavior_analysis" in case_resp.json()
 
     timeline_resp = client.get(f"/api/cases/{case_id}/timeline", params={"include_evidence": "true"})
     assert timeline_resp.status_code == 200
@@ -194,4 +234,3 @@ def test_web_api_case_asset_notification_report_routes(tmp_path) -> None:
     report_get_resp = client.get(f"/api/reports/{report_id}")
     assert report_get_resp.status_code == 200
     assert report_get_resp.json()["report"]["report_id"] == report_id
-
