@@ -67,6 +67,28 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
         {caseItem.case_id} · severity={caseItem.overall_severity} · stage={caseItem.current_stage} · status={caseItem.status}
       </p>
 
+      <div className="card">
+        <h2>攻击行为分析</h2>
+        {behavior.summary ? <p className="meta">{behavior.summary}</p> : <p className="meta">暂无行为分析结果</p>}
+        {(behavior.highlights || []).map((item: string) => (
+          <p key={item} className="meta">
+            - {item}
+          </p>
+        ))}
+        <div className="subcard">
+          <p className="meta">
+            <strong>阶段推进分析</strong>
+          </p>
+          {stageProgression.length === 0 ? <p className="meta">暂无阶段推进信息</p> : null}
+          {stageProgression.map((item: any) => (
+            <p key={`${item.stage}-${item.first_seen_at || ""}`} className="meta">
+              {item.stage} · alerts={item.alert_count} · first_seen={formatTime(item.first_seen_at)} · last_seen=
+              {formatTime(item.last_seen_at)}
+            </p>
+          ))}
+        </div>
+      </div>
+
       <div className="detail-grid">
         <div className="card">
           <h2>攻击者</h2>
@@ -87,8 +109,8 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
         </div>
 
         <div className="card">
-          <h2>被攻击系统</h2>
-          {targetSummaries.length === 0 ? <p className="meta">暂无被攻击系统信息</p> : null}
+          <h2>目标资产</h2>
+          {targetSummaries.length === 0 ? <p className="meta">暂无目标资产信息</p> : null}
           {targetSummaries.map((target) => (
             <div key={target.key} className="subcard">
               <p className="meta">
@@ -131,28 +153,6 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
             </table>
           </div>
         ) : null}
-      </div>
-
-      <div className="card">
-        <h2>攻击行为分析</h2>
-        {behavior.summary ? <p className="meta">{behavior.summary}</p> : <p className="meta">暂无行为分析结果</p>}
-        {(behavior.highlights || []).map((item: string) => (
-          <p key={item} className="meta">
-            - {item}
-          </p>
-        ))}
-        <div className="subcard">
-          <p className="meta">
-            <strong>阶段推进分析</strong>
-          </p>
-          {stageProgression.length === 0 ? <p className="meta">暂无阶段推进信息</p> : null}
-          {stageProgression.map((item: any) => (
-            <p key={`${item.stage}-${item.first_seen_at || ""}`} className="meta">
-              {item.stage} · alerts={item.alert_count} · first_seen={formatTime(item.first_seen_at)} · last_seen=
-              {formatTime(item.last_seen_at)}
-            </p>
-          ))}
-        </div>
       </div>
     </section>
   );
