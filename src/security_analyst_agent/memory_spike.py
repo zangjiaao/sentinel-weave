@@ -214,18 +214,20 @@ def main() -> None:
 
     bootstrap_parser = subparsers.add_parser("bootstrap")
     bootstrap_parser.add_argument("--db-path", type=Path, default=DEFAULT_MEMORY_SPIKE_DB_PATH)
+    bootstrap_parser.add_argument("--fixture-dir", type=Path, default=SPIKE_MEMORY_DIR)
 
     apply_parser = subparsers.add_parser("apply-round")
     apply_parser.add_argument("--db-path", type=Path, default=DEFAULT_MEMORY_SPIKE_DB_PATH)
+    apply_parser.add_argument("--fixture-dir", type=Path, default=SPIKE_MEMORY_DIR)
     apply_parser.add_argument("--round-id", required=True)
 
     args = parser.parse_args()
     if args.command == "bootstrap":
-        bootstrap_memory_spike_database(args.db_path)
+        bootstrap_memory_spike_database(args.db_path, fixture_dir=args.fixture_dir)
         print(f"bootstrapped memory spike: {args.db_path}")
         return
 
-    body = apply_memory_spike_round(args.db_path, args.round_id)
+    body = apply_memory_spike_round(args.db_path, args.round_id, fixture_dir=args.fixture_dir)
     print(json.dumps(body, ensure_ascii=False))
 
 

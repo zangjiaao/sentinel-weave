@@ -157,6 +157,51 @@ def test_memory_spike_module_supports_bootstrap_and_apply_round(tmp_path) -> Non
     assert body["applied"] is True
 
 
+def test_memory_spike_module_supports_fixture_dir_override(tmp_path) -> None:
+    db_path = tmp_path / "memory-spike-realistic.db"
+    fixture_dir = PROJECT_ROOT / "fixtures" / "spike_memory_realistic"
+
+    bootstrap = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "security_analyst_agent.memory_spike",
+            "bootstrap",
+            "--db-path",
+            str(db_path),
+            "--fixture-dir",
+            str(fixture_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bootstrap.returncode == 0
+    assert "bootstrapped memory spike" in bootstrap.stdout
+
+    apply_round = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "security_analyst_agent.memory_spike",
+            "apply-round",
+            "--db-path",
+            str(db_path),
+            "--fixture-dir",
+            str(fixture_dir),
+            "--round-id",
+            "round_01_realistic",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert apply_round.returncode == 0
+    body = json.loads(apply_round.stdout)
+    assert body["round_id"] == "round_01_realistic"
+    assert body["applied"] is True
+
+
 def test_round1_explain_link_does_not_pull_future_evidence_with_cutoff(tmp_path) -> None:
     db_path = tmp_path / "memory-spike.db"
     bootstrap_memory_spike_database(db_path)
