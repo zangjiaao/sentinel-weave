@@ -14,6 +14,11 @@ def test_cli_shows_help() -> None:
     assert "alert.map-upsert" in result.stdout
     assert "alert.map-apply" in result.stdout
     assert "alert.unmapped-list" in result.stdout
+    assert "alert.import-csv" in result.stdout
+    assert "alert.import-jobs" in result.stdout
+    assert "alert.import-sample" in result.stdout
+    assert "alert.import-apply" in result.stdout
+    assert "alert.import-problems" in result.stdout
     assert "audit.agent-outputs" in result.stdout
 
 

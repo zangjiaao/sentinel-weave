@@ -9,8 +9,13 @@ from security_analyst_agent.ingest import ingest_alert_bundle
 from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
 from security_analyst_agent.raw_mapping import (
     apply_alert_normalization_maps,
+    apply_import_job_mapping,
+    import_csv_alert_file,
     ingest_raw_alert_bundle,
+    list_import_job_problem_rows,
+    list_import_jobs,
     list_unmapped_alert_events,
+    sample_import_job,
     sample_raw_alert_groups,
     upsert_alert_normalization_maps,
 )
@@ -453,6 +458,127 @@ def alert_unmapped_list_command(
         db_path=db_path,
         limit=int(body.get("limit", 100)),
         unresolved_only=bool(body.get("unresolved_only", True)),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.import-csv")
+def alert_import_csv_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.import-csv")
+    csv_path_value = body.get("csv_path")
+    if not csv_path_value:
+        error = ToolResponse(
+            ok=False,
+            summary="alert.import-csv 缺少 csv_path",
+            data={"command": "alert.import-csv"},
+            warnings=["csv_path_required"],
+        )
+        typer.echo(json.dumps(error.model_dump(mode="json", by_alias=True), ensure_ascii=False))
+        raise typer.Exit(code=2)
+    result = import_csv_alert_file(
+        db_path=db_path,
+        csv_path=Path(str(csv_path_value)),
+        file_name=body.get("file_name"),
+        vendor=body.get("vendor"),
+        product=body.get("product"),
+        log_type=body.get("log_type"),
+        occurred_at_column=body.get("occurred_at_column"),
+        rule_id_column=body.get("rule_id_column"),
+        job_id=body.get("job_id"),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.import-jobs")
+def alert_import_jobs_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.import-jobs")
+    result = list_import_jobs(
+        db_path=db_path,
+        limit=int(body.get("limit", 20)),
+        statuses=body.get("statuses"),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.import-sample")
+def alert_import_sample_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.import-sample")
+    job_id = body.get("job_id")
+    if not job_id:
+        error = ToolResponse(
+            ok=False,
+            summary="alert.import-sample 缺少 job_id",
+            data={"command": "alert.import-sample"},
+            warnings=["job_id_required"],
+        )
+        typer.echo(json.dumps(error.model_dump(mode="json", by_alias=True), ensure_ascii=False))
+        raise typer.Exit(code=2)
+    result = sample_import_job(
+        db_path=db_path,
+        job_id=str(job_id),
+        limit_groups=int(body.get("limit_groups", 20)),
+        samples_per_group=int(body.get("samples_per_group", 3)),
+        statuses=body.get("statuses"),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.import-apply")
+def alert_import_apply_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.import-apply")
+    job_id = body.get("job_id")
+    if not job_id:
+        error = ToolResponse(
+            ok=False,
+            summary="alert.import-apply 缺少 job_id",
+            data={"command": "alert.import-apply"},
+            warnings=["job_id_required"],
+        )
+        typer.echo(json.dumps(error.model_dump(mode="json", by_alias=True), ensure_ascii=False))
+        raise typer.Exit(code=2)
+    result = apply_import_job_mapping(
+        db_path=db_path,
+        job_id=str(job_id),
+        limit=int(body.get("limit", 500)),
+        dry_run=bool(body.get("dry_run", False)),
+        include_unmapped=bool(body.get("include_unmapped", False)),
+        raw_event_ids=body.get("raw_event_ids"),
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("alert.import-problems")
+def alert_import_problems_command(
+    db_path: Path = typer.Option(..., "--db-path"),
+    payload: str = typer.Option("{}", "--payload"),
+) -> None:
+    body = _parse_payload(payload, "alert.import-problems")
+    job_id = body.get("job_id")
+    if not job_id:
+        error = ToolResponse(
+            ok=False,
+            summary="alert.import-problems 缺少 job_id",
+            data={"command": "alert.import-problems"},
+            warnings=["job_id_required"],
+        )
+        typer.echo(json.dumps(error.model_dump(mode="json", by_alias=True), ensure_ascii=False))
+        raise typer.Exit(code=2)
+    result = list_import_job_problem_rows(
+        db_path=db_path,
+        job_id=str(job_id),
+        limit=int(body.get("limit", 100)),
     )
     typer.echo(json.dumps(result, ensure_ascii=False))
 

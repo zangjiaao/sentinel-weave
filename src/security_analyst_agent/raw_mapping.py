@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import csv
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -261,11 +263,18 @@ def sample_raw_alert_groups(
     limit_groups: int = 20,
     samples_per_group: int = 3,
     statuses: list[str] | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     conn = connect_db(db_path)
     create_schema(conn)
     status_values = statuses or ["pending"]
     placeholders = ", ".join("?" for _ in status_values)
+    where_clauses = [f"map_status in ({placeholders})"]
+    params: list[Any] = [*status_values]
+    if source:
+        where_clauses.append("source = ?")
+        params.append(source)
+    where_sql = " and ".join(where_clauses)
     groups = conn.execute(
         f"""
         select
@@ -278,12 +287,12 @@ def sample_raw_alert_groups(
           min(ingested_at) as first_ingested_at,
           max(ingested_at) as last_ingested_at
         from raw_alert_events
-        where map_status in ({placeholders})
+        where {where_sql}
         group by source, coalesce(vendor, ''), coalesce(product, ''), coalesce(log_type, ''), coalesce(rule_id, '')
         order by event_count desc, last_ingested_at desc
         limit ?
         """,
-        (*status_values, max(1, limit_groups)),
+        (*params, max(1, limit_groups)),
     ).fetchall()
 
     result_groups: list[dict[str, Any]] = []
@@ -336,7 +345,7 @@ def sample_raw_alert_groups(
             }
         )
     conn.close()
-    return {"groups": result_groups, "status_scope": status_values}
+    return {"groups": result_groups, "status_scope": status_values, "source_scope": source}
 
 
 def _build_normalized_alert(
@@ -713,3 +722,439 @@ def list_unmapped_alert_events(
         )
     conn.close()
     return {"items": items}
+
+
+def _job_source(job_id: str) -> str:
+    normalized = str(job_id).strip()
+    if not normalized:
+        raise ValueError("job_id is required")
+    return f"import_job:{normalized}"
+
+
+def _pick_first_non_empty(mapping: dict[str, Any], candidates: list[str]) -> str | None:
+    for key in candidates:
+        value = _to_str(mapping.get(key))
+        if value:
+            return value
+    return None
+
+
+def _refresh_import_job_metrics(conn: sqlite3.Connection, job_id: str) -> dict[str, Any]:
+    source = _job_source(job_id)
+    row = conn.execute(
+        """
+        select
+          count(*) as total_rows,
+          sum(case when map_status = 'mapped' then 1 else 0 end) as mapped_rows,
+          sum(case when map_status = 'unmapped' then 1 else 0 end) as unmapped_rows,
+          sum(case when map_status = 'pending' then 1 else 0 end) as pending_rows,
+          sum(case when map_status = 'error' then 1 else 0 end) as error_rows
+        from raw_alert_events
+        where source = ?
+        """,
+        (source,),
+    ).fetchone()
+    total_rows = int(row["total_rows"] or 0)
+    mapped_rows = int(row["mapped_rows"] or 0)
+    unmapped_rows = int(row["unmapped_rows"] or 0)
+    pending_rows = int(row["pending_rows"] or 0)
+    error_rows = int(row["error_rows"] or 0)
+
+    if total_rows == 0:
+        status = "empty"
+    elif mapped_rows == total_rows:
+        status = "completed"
+    elif mapped_rows > 0:
+        status = "partial"
+    elif unmapped_rows > 0 or error_rows > 0:
+        status = "needs_review"
+    else:
+        status = "uploaded"
+
+    now = _now_iso()
+    conn.execute(
+        """
+        update import_jobs
+        set status = ?,
+            total_rows = ?,
+            mapped_rows = ?,
+            unmapped_rows = ?,
+            pending_rows = ?,
+            error_rows = ?,
+            updated_at = ?
+        where job_id = ?
+        """,
+        (status, total_rows, mapped_rows, unmapped_rows, pending_rows, error_rows, now, job_id),
+    )
+    return {
+        "job_id": job_id,
+        "status": status,
+        "total_rows": total_rows,
+        "mapped_rows": mapped_rows,
+        "unmapped_rows": unmapped_rows,
+        "pending_rows": pending_rows,
+        "error_rows": error_rows,
+    }
+
+
+def _get_import_job_row(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        select
+          job_id,
+          source,
+          file_name,
+          file_hash,
+          status,
+          total_rows,
+          mapped_rows,
+          unmapped_rows,
+          pending_rows,
+          error_rows,
+          last_map_id,
+          created_at,
+          updated_at,
+          notes_json
+        from import_jobs
+        where job_id = ?
+        """,
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"import job not found: {job_id}")
+    return row
+
+
+def _serialize_import_job(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "job_id": row["job_id"],
+        "source": row["source"],
+        "file_name": row["file_name"],
+        "file_hash": row["file_hash"],
+        "status": row["status"],
+        "total_rows": int(row["total_rows"]),
+        "mapped_rows": int(row["mapped_rows"]),
+        "unmapped_rows": int(row["unmapped_rows"]),
+        "pending_rows": int(row["pending_rows"]),
+        "error_rows": int(row["error_rows"]),
+        "last_map_id": row["last_map_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "notes": _safe_json_loads(row["notes_json"], {}),
+    }
+
+
+def import_csv_alert_file(
+    db_path: Path,
+    *,
+    csv_path: Path,
+    file_name: str | None = None,
+    vendor: str | None = None,
+    product: str | None = None,
+    log_type: str | None = None,
+    occurred_at_column: str | None = None,
+    rule_id_column: str | None = None,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    csv_real_path = Path(csv_path)
+    if not csv_real_path.exists():
+        raise ValueError(f"csv file not found: {csv_real_path}")
+
+    active_job_id = _to_str(job_id) or f"job_{uuid4().hex[:12]}"
+    source = _job_source(active_job_id)
+    now = _now_iso()
+
+    file_bytes = csv_real_path.read_bytes()
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    with csv_real_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        field_names = list(reader.fieldnames or [])
+        if not field_names:
+            raise ValueError("csv has no header")
+        events: list[dict[str, Any]] = []
+        for idx, row in enumerate(reader, start=1):
+            raw_event_id = f"{active_job_id}_{idx:08d}"
+            normalized_row = {str(k).strip(): v for k, v in row.items() if k is not None}
+            event_vendor = vendor or _pick_first_non_empty(
+                normalized_row,
+                ["vendor", "Vendor", "厂商", "设备厂商", "设备厂商名称"],
+            )
+            event_product = product or _pick_first_non_empty(
+                normalized_row,
+                ["product", "Product", "产品", "设备类型", "蜜罐名称"],
+            )
+            event_log_type = log_type or _pick_first_non_empty(
+                normalized_row,
+                ["log_type", "日志类型", "事件类型"],
+            )
+
+            event_occurred_at = _to_str(normalized_row.get(occurred_at_column or "")) if occurred_at_column else None
+            if event_occurred_at is None:
+                event_occurred_at = _pick_first_non_empty(
+                    normalized_row,
+                    ["occurred_at", "event_time", "timestamp", "攻击时间", "时间", "发生时间"],
+                )
+
+            event_rule_id = _to_str(normalized_row.get(rule_id_column or "")) if rule_id_column else None
+            if event_rule_id is None:
+                event_rule_id = _pick_first_non_empty(
+                    normalized_row,
+                    ["rule_id", "规则ID", "rule", "规则名", "威胁情报"],
+                )
+
+            events.append(
+                {
+                    "raw_event_id": raw_event_id,
+                    "source": source,
+                    "vendor": event_vendor or "unknown_vendor",
+                    "product": event_product or "unknown_product",
+                    "log_type": event_log_type or "csv_row",
+                    "rule_id": event_rule_id,
+                    "occurred_at": event_occurred_at,
+                    "payload": {
+                        "row": normalized_row,
+                        "csv_metadata": {
+                            "job_id": active_job_id,
+                            "row_number": idx,
+                            "file_name": file_name or csv_real_path.name,
+                        },
+                    },
+                }
+            )
+
+    ingest_result = ingest_raw_alert_bundle(db_path=db_path, events=events, source=source)
+
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        conn.execute(
+            """
+            insert into import_jobs (
+              job_id, source, file_name, file_hash, status, total_rows, mapped_rows, unmapped_rows,
+              pending_rows, error_rows, last_map_id, created_at, updated_at, notes_json
+            ) values (?, ?, ?, ?, 'uploaded', ?, 0, 0, ?, 0, null, ?, ?, ?)
+            on conflict(job_id) do update set
+              source = excluded.source,
+              file_name = excluded.file_name,
+              file_hash = excluded.file_hash,
+              status = excluded.status,
+              total_rows = excluded.total_rows,
+              mapped_rows = excluded.mapped_rows,
+              unmapped_rows = excluded.unmapped_rows,
+              pending_rows = excluded.pending_rows,
+              error_rows = excluded.error_rows,
+              updated_at = excluded.updated_at,
+              notes_json = excluded.notes_json
+            """,
+            (
+                active_job_id,
+                source,
+                file_name or csv_real_path.name,
+                file_hash,
+                len(events),
+                len(events),
+                now,
+                now,
+                _safe_json_dumps(
+                    {
+                        "field_names": field_names,
+                        "csv_path": str(csv_real_path),
+                    }
+                ),
+            ),
+        )
+        metrics = _refresh_import_job_metrics(conn, active_job_id)
+        conn.commit()
+        row = _get_import_job_row(conn, active_job_id)
+        job = _serialize_import_job(row)
+    finally:
+        conn.close()
+
+    return {
+        "job": job,
+        "ingest_result": ingest_result,
+        "metrics": metrics,
+    }
+
+
+def list_import_jobs(
+    db_path: Path,
+    *,
+    limit: int = 20,
+    statuses: list[str] | None = None,
+) -> dict[str, Any]:
+    conn = connect_db(db_path)
+    create_schema(conn)
+    params: list[Any] = []
+    where_sql = ""
+    if statuses:
+        normalized = [str(item).strip().lower() for item in statuses if str(item).strip()]
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            where_sql = f"where lower(status) in ({placeholders})"
+            params.extend(normalized)
+    rows = conn.execute(
+        f"""
+        select
+          job_id,
+          source,
+          file_name,
+          file_hash,
+          status,
+          total_rows,
+          mapped_rows,
+          unmapped_rows,
+          pending_rows,
+          error_rows,
+          last_map_id,
+          created_at,
+          updated_at,
+          notes_json
+        from import_jobs
+        {where_sql}
+        order by updated_at desc, created_at desc
+        limit ?
+        """,
+        (*params, max(1, limit)),
+    ).fetchall()
+    items = [_serialize_import_job(row) for row in rows]
+    conn.close()
+    return {"items": items}
+
+
+def sample_import_job(
+    db_path: Path,
+    *,
+    job_id: str,
+    limit_groups: int = 20,
+    samples_per_group: int = 3,
+    statuses: list[str] | None = None,
+) -> dict[str, Any]:
+    source = _job_source(job_id)
+    sampled = sample_raw_alert_groups(
+        db_path=db_path,
+        limit_groups=limit_groups,
+        samples_per_group=samples_per_group,
+        statuses=statuses or ["pending", "unmapped", "error"],
+        source=source,
+    )
+    conn = connect_db(db_path)
+    try:
+        row = _get_import_job_row(conn, job_id)
+        job = _serialize_import_job(row)
+    finally:
+        conn.close()
+    return {"job": job, **sampled}
+
+
+def apply_import_job_mapping(
+    db_path: Path,
+    *,
+    job_id: str,
+    limit: int = 500,
+    dry_run: bool = False,
+    include_unmapped: bool = False,
+    raw_event_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    source = _job_source(job_id)
+    apply_result = apply_alert_normalization_maps(
+        db_path=db_path,
+        limit=limit,
+        source=source,
+        raw_event_ids=raw_event_ids,
+        include_unmapped=include_unmapped,
+        dry_run=dry_run,
+    )
+
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        _get_import_job_row(conn, job_id)
+        if not dry_run:
+            map_row = conn.execute(
+                """
+                select map_id
+                from raw_alert_events
+                where source = ? and map_id is not null
+                order by mapped_at desc
+                limit 1
+                """,
+                (source,),
+            ).fetchone()
+            conn.execute(
+                """
+                update import_jobs
+                set last_map_id = coalesce(?, last_map_id), updated_at = ?
+                where job_id = ?
+                """,
+                ((map_row["map_id"] if map_row else None), _now_iso(), job_id),
+            )
+            metrics = _refresh_import_job_metrics(conn, job_id)
+            conn.commit()
+        else:
+            metrics = {}
+        row = _get_import_job_row(conn, job_id)
+        job = _serialize_import_job(row)
+    finally:
+        conn.close()
+
+    return {"job": job, "apply_result": apply_result, "metrics": metrics}
+
+
+def list_import_job_problem_rows(
+    db_path: Path,
+    *,
+    job_id: str,
+    limit: int = 100,
+) -> dict[str, Any]:
+    source = _job_source(job_id)
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        row = _get_import_job_row(conn, job_id)
+        job = _serialize_import_job(row)
+        rows = conn.execute(
+            """
+            select
+              raw_alert_events.raw_event_id,
+              raw_alert_events.map_status,
+              raw_alert_events.map_id,
+              raw_alert_events.map_reason,
+              raw_alert_events.occurred_at,
+              raw_alert_events.payload_json,
+              raw_alert_events.mapped_at,
+              unmapped_alert_events.reason as unmapped_reason,
+              unmapped_alert_events.details_json as unmapped_details_json,
+              unmapped_alert_events.hit_count as unmapped_hit_count,
+              unmapped_alert_events.resolved as unmapped_resolved
+            from raw_alert_events
+            left join unmapped_alert_events
+              on unmapped_alert_events.raw_event_id = raw_alert_events.raw_event_id
+            where raw_alert_events.source = ?
+              and raw_alert_events.map_status in ('unmapped', 'error')
+            order by raw_alert_events.ingested_at asc, raw_alert_events.raw_event_id asc
+            limit ?
+            """,
+            (source, max(1, limit)),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for item in rows:
+            items.append(
+                {
+                    "raw_event_id": item["raw_event_id"],
+                    "map_status": item["map_status"],
+                    "map_id": item["map_id"],
+                    "map_reason": item["map_reason"],
+                    "occurred_at": item["occurred_at"],
+                    "payload": _safe_json_loads(item["payload_json"], {}),
+                    "mapped_at": item["mapped_at"],
+                    "unmapped_reason": item["unmapped_reason"],
+                    "unmapped_details": _safe_json_loads(item["unmapped_details_json"], {}),
+                    "unmapped_hit_count": int(item["unmapped_hit_count"] or 0),
+                    "unmapped_resolved": bool(item["unmapped_resolved"] or 0),
+                }
+            )
+    finally:
+        conn.close()
+    return {"job": job, "items": items}

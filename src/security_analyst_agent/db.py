@@ -273,6 +273,22 @@ def create_schema(conn: sqlite3.Connection) -> None:
           normalized_alert_id text,
           mapped_at text
         );
+        create table if not exists import_jobs (
+          job_id text primary key,
+          source text not null unique,
+          file_name text not null,
+          file_hash text,
+          status text not null,
+          total_rows integer not null,
+          mapped_rows integer not null,
+          unmapped_rows integer not null,
+          pending_rows integer not null,
+          error_rows integer not null,
+          last_map_id text,
+          created_at text not null,
+          updated_at text not null,
+          notes_json text not null
+        );
         create table if not exists alert_normalization_maps (
           map_id text primary key,
           priority integer not null,
@@ -723,6 +739,12 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """
         create index if not exists idx_alert_normalization_maps_enabled_priority
         on alert_normalization_maps(enabled, priority desc, updated_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_import_jobs_status_updated
+        on import_jobs(status, updated_at desc)
         """
     )
     conn.execute(
