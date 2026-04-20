@@ -72,6 +72,14 @@ def _ensure_patrol_runs_shape(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_alert_ingest_events_shape(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("pragma table_info(alert_ingest_events)").fetchall()}
+    if not columns:
+        return
+    if "processed_run_id" not in columns:
+        conn.execute("alter table alert_ingest_events add column processed_run_id text")
+
+
 def _ensure_cases_convergence_shape(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("pragma table_info(cases)").fetchall()}
     if not columns:
@@ -317,6 +325,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
           source text not null,
           ingested_at text not null,
           processed_at text,
+          processed_run_id text,
           trigger_state text not null
         );
         create table if not exists patrol_runs (
@@ -672,6 +681,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
     _ensure_alerts_shape(conn)
     _ensure_case_alert_links_shape(conn)
     _ensure_patrol_runs_shape(conn)
+    _ensure_alert_ingest_events_shape(conn)
     _ensure_cases_convergence_shape(conn)
     _ensure_evidence_shape(conn)
     _ensure_verify_spike_round_runs_shape(conn)

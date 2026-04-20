@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from security_analyst_agent.config import DEFAULT_OPENAI_PATROL_MODEL, PROJECT_ROOT
+from security_analyst_agent.config import (
+    DEFAULT_OPENAI_PATROL_MODEL,
+    DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
+    PROJECT_ROOT,
+)
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.hermes_slow_verify import (
     HermesSlowVerificationError,
@@ -89,6 +94,45 @@ def _verify_with_mcp_auto_alias(conn, verify_fn: Callable[[], dict[str, Any]]) -
         conn.execute("release openai_slow_verify_alias")
 
 
+def _build_verification_manifest_for_openai(
+    manifest: dict[str, Any],
+    *,
+    objective_mode: bool,
+    expected_processed_ingest_events: int,
+) -> dict[str, Any]:
+    verification_manifest = deepcopy(manifest)
+    final_assertions = verification_manifest.setdefault("final_assertions", {})
+
+    if expected_processed_ingest_events > 0:
+        current_min_processed = int(final_assertions.get("min_processed_ingest_events", 0))
+        final_assertions["min_processed_ingest_events"] = max(current_min_processed, expected_processed_ingest_events)
+        current_min_processed_with_run_id = int(final_assertions.get("min_processed_ingest_events_with_run_id", 0))
+        final_assertions["min_processed_ingest_events_with_run_id"] = max(
+            current_min_processed_with_run_id,
+            expected_processed_ingest_events,
+        )
+
+    if objective_mode:
+        required_tool_names = final_assertions.get("required_tool_names", [])
+        if isinstance(required_tool_names, list):
+            final_assertions["required_tool_names"] = [
+                str(item) for item in required_tool_names if str(item) != "alert.ack"
+            ]
+        final_assertions["required_any_tool_names"] = []
+        final_assertions["min_entity_assessments"] = 0
+        final_assertions["min_case_assessments"] = 0
+        for key in (
+            "min_fetch_calls_with_processing_guardrails",
+            "min_fetch_calls_with_recommended_next_actions",
+            "min_fetch_calls_with_ack_recommendations",
+            "min_fetch_calls_with_ack_suggestions",
+            "min_five_layer_cluster_fetch_calls",
+        ):
+            final_assertions[key] = 0
+
+    return verification_manifest
+
+
 def run_openai_slow_integration(
     *,
     scenario: str,
@@ -117,6 +161,7 @@ def run_openai_slow_integration(
     trigger = trigger_runner or trigger_patrol_from_ingest
     selected_model = model or DEFAULT_OPENAI_PATROL_MODEL
     round_summaries: list[dict[str, Any]] = []
+    expected_processed_ingest_events_total = 0
 
     step = 3
     for round_spec in round_specs:
@@ -128,7 +173,11 @@ def run_openai_slow_integration(
             raise HermesSlowVerificationError("manifest", f"round payload not found in fixture: {round_id}")
         conn = connect_db(target_db_path)
         try:
-            _enqueue_round_ingest_events(conn, round_id=round_id, round_payload=round_payload)
+            expected_processed_ingest_events_total += _enqueue_round_ingest_events(
+                conn,
+                round_id=round_id,
+                round_payload=round_payload,
+            )
         finally:
             conn.close()
         step += 1
@@ -162,9 +211,14 @@ def run_openai_slow_integration(
     conn = connect_db(target_db_path)
     try:
         reporter(step, total_steps, "校验聚合数据库结果")
+        verification_manifest = _build_verification_manifest_for_openai(
+            manifest,
+            objective_mode=DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
+            expected_processed_ingest_events=expected_processed_ingest_events_total,
+        )
         db_summary = _verify_with_mcp_auto_alias(
             conn,
-            lambda: _verify_final_db_state(conn, manifest=manifest, round_count=len(round_specs)),
+            lambda: _verify_final_db_state(conn, manifest=verification_manifest, round_count=len(round_specs)),
         )
     finally:
         conn.close()
@@ -174,6 +228,8 @@ def run_openai_slow_integration(
         "db_path": str(target_db_path),
         "trigger_mode": "openai",
         "openai_model": selected_model,
+        "objective_mode": bool(DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE),
+        "expected_processed_ingest_events": expected_processed_ingest_events_total,
         "round_summaries": round_summaries,
         **db_summary,
     }

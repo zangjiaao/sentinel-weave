@@ -705,6 +705,41 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
             "final_db_assertions",
             f"expected at least {min_alert_decisions} alert decisions, got {alert_decisions_count}",
         )
+    processed_ingest_events_count = conn.execute(
+        """
+        select count(*)
+        from alert_ingest_events
+        where trigger_state = 'processed'
+          and processed_at is not null
+        """
+    ).fetchone()[0]
+    min_processed_ingest_events = int(final_assertions.get("min_processed_ingest_events", 0))
+    if processed_ingest_events_count < min_processed_ingest_events:
+        raise HermesSlowVerificationError(
+            "final_db_assertions",
+            "expected at least "
+            f"{min_processed_ingest_events} processed ingest events, got {processed_ingest_events_count}",
+        )
+    processed_ingest_events_with_run_id_count = conn.execute(
+        """
+        select count(*)
+        from alert_ingest_events
+        where trigger_state = 'processed'
+          and processed_at is not null
+          and processed_run_id is not null
+          and trim(processed_run_id) <> ''
+        """
+    ).fetchone()[0]
+    min_processed_ingest_events_with_run_id = int(
+        final_assertions.get("min_processed_ingest_events_with_run_id", 0)
+    )
+    if processed_ingest_events_with_run_id_count < min_processed_ingest_events_with_run_id:
+        raise HermesSlowVerificationError(
+            "final_db_assertions",
+            "expected at least "
+            f"{min_processed_ingest_events_with_run_id} processed ingest events with run_id, got "
+            f"{processed_ingest_events_with_run_id_count}",
+        )
 
     case_assessments_count = conn.execute("select count(*) from case_assessments").fetchone()[0]
     min_case_assessments = int(final_assertions.get("min_case_assessments", 0))
@@ -974,6 +1009,8 @@ def _verify_final_db_state(conn, *, manifest: dict[str, Any], round_count: int) 
         "case_assessments_count": case_assessments_count,
         "entity_assessments_count": entity_assessments_count,
         "alert_decisions_count": alert_decisions_count,
+        "processed_ingest_events_count": processed_ingest_events_count,
+        "processed_ingest_events_with_run_id_count": processed_ingest_events_with_run_id_count,
         "converged_case_clusters_count": converged_case_clusters_count,
         "single_chain_case_candidates_count": single_chain_case_candidates_count,
     }

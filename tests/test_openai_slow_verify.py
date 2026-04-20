@@ -5,7 +5,11 @@ from pathlib import Path
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.hermes_slow_verify import load_integration_manifest, resolve_round_specs
-from security_analyst_agent.openai_slow_verify import _verify_with_mcp_auto_alias, run_openai_slow_integration
+from security_analyst_agent.openai_slow_verify import (
+    _build_verification_manifest_for_openai,
+    _verify_with_mcp_auto_alias,
+    run_openai_slow_integration,
+)
 
 
 def test_verify_with_mcp_auto_alias_restores_trigger_source(tmp_path: Path) -> None:
@@ -134,3 +138,38 @@ def test_load_realistic_manifest_and_round_specs() -> None:
     specs = resolve_round_specs(manifest)
     assert len(specs) == 5
     assert specs[0]["round_id"] == "round_01_realistic"
+
+
+def test_build_verification_manifest_for_openai_relaxes_ack_and_strategy_assertions_in_objective_mode() -> None:
+    manifest = {
+        "scenario": "demo",
+        "round_defaults": {},
+        "rounds": [{"round_id": "round_01"}],
+        "final_assertions": {
+            "required_tool_names": ["alert.fetch", "alert.ack"],
+            "required_any_tool_names": [["assessment.upsert-batch", "case.link-alert-batch"]],
+            "min_entity_assessments": 1,
+            "min_case_assessments": 1,
+            "min_fetch_calls_with_processing_guardrails": 1,
+            "min_fetch_calls_with_recommended_next_actions": 1,
+            "min_fetch_calls_with_ack_recommendations": 1,
+            "min_five_layer_cluster_fetch_calls": 1,
+        },
+    }
+    updated = _build_verification_manifest_for_openai(
+        manifest,
+        objective_mode=True,
+        expected_processed_ingest_events=12,
+    )
+    final_assertions = updated["final_assertions"]
+
+    assert final_assertions["required_tool_names"] == ["alert.fetch"]
+    assert final_assertions["required_any_tool_names"] == []
+    assert final_assertions["min_fetch_calls_with_processing_guardrails"] == 0
+    assert final_assertions["min_fetch_calls_with_recommended_next_actions"] == 0
+    assert final_assertions["min_fetch_calls_with_ack_recommendations"] == 0
+    assert final_assertions["min_five_layer_cluster_fetch_calls"] == 0
+    assert final_assertions["min_entity_assessments"] == 0
+    assert final_assertions["min_case_assessments"] == 0
+    assert final_assertions["min_processed_ingest_events"] == 12
+    assert final_assertions["min_processed_ingest_events_with_run_id"] == 12

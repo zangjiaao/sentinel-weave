@@ -790,10 +790,10 @@ def trigger_patrol_from_ingest(
     conn.execute(
         f"""
         update alert_ingest_events
-        set trigger_state = ?, processed_at = ?
+        set trigger_state = ?, processed_at = ?, processed_run_id = ?
         where event_id in ({', '.join('?' for _ in event_ids)})
         """,
-        (final_event_state, finished_at, *event_ids),
+        (final_event_state, finished_at, run_id, *event_ids),
     )
     conn.execute(
         """

@@ -118,9 +118,19 @@ def test_trigger_patrol_processes_pending_events_with_single_run(tmp_path) -> No
         "select started_at, analysis_cutoff_at from patrol_runs where run_id = ?",
         (result["run_id"],),
     ).fetchone()
+    processed_rows = conn.execute(
+        """
+        select processed_run_id
+        from alert_ingest_events
+        where trigger_state = 'processed'
+        order by event_id asc
+        """
+    ).fetchall()
     assert pending_count == 0
     assert run_status["status"] == "success"
     assert run_times["analysis_cutoff_at"] == run_times["started_at"]
+    assert processed_rows
+    assert all(str(row["processed_run_id"] or "") == str(result["run_id"]) for row in processed_rows)
     state_rows = conn.execute("select state_key, state_value_json from patrol_state").fetchall()
     state_values = {row["state_key"]: json.loads(row["state_value_json"]) for row in state_rows}
     assert "hermes_patrol_session" in state_values
