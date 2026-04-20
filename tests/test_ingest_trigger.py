@@ -4,6 +4,7 @@ import subprocess
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.ingest import ingest_alert_bundle
+import security_analyst_agent.openai_patrol_runner as runner_module
 from security_analyst_agent.openai_patrol_runner import OpenAIPatrolResult
 from security_analyst_agent.patrol_trigger import trigger_patrol_from_ingest
 
@@ -861,9 +862,10 @@ def test_trigger_patrol_openai_mode_normalizes_malformed_actor_batch_payload(tmp
     assert rows[1]["result_ok"] == 1
 
 
-def test_trigger_patrol_openai_mode_persists_and_reuses_fetch_cursor(tmp_path) -> None:
+def test_trigger_patrol_openai_mode_persists_fetch_cursor_but_resets_cross_run_offset(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
     ingest_alert_bundle(
         db_path,
         [_build_alert("alt_ingest_openai_cursor_001"), _build_alert("alt_ingest_openai_cursor_002")],
@@ -948,7 +950,8 @@ def test_trigger_patrol_openai_mode_persists_and_reuses_fetch_cursor(tmp_path) -
         ).fetchone()["payload_json"]
     )
     conn.close()
-    assert second_fetch_payload.get("cursor") == resume_cursor
+    assert second_fetch_payload.get("cursor") != resume_cursor
+    assert "cursor" not in second_fetch_payload
 
 
 def test_trigger_patrol_openai_mode_applies_large_queue_tool_budget(tmp_path, monkeypatch) -> None:

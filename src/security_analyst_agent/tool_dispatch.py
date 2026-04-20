@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -79,8 +80,11 @@ _ENTITY_ASSESSMENT_AUTO_MIN_STAGE_COUNT = 2
 _ENTITY_ASSESSMENT_AUTO_MIN_MAX_STAGE_RANK = stage_rank("persistence")
 _FETCH_BACKFILL_MIN_MANUAL_LINK_COUNT = 2
 _FETCH_BACKFILL_MIN_STAGE_RANK = stage_rank("exploit")
-_FETCH_BACKFILL_MAX_PER_CASE = 8
-_FETCH_BACKFILL_MAX_TOTAL = 24
+_FETCH_BACKFILL_MAX_PER_CASE = 12
+_FETCH_BACKFILL_MAX_TOTAL = 48
+_FETCH_BACKFILL_MAX_RELATED_SRC_IPS = 2
+_FETCH_BACKFILL_MIN_RELATED_SRC_ALERT_COUNT = 2
+_IP_IN_TEXT_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "alert.fetch": alert_fetch,
@@ -1021,6 +1025,14 @@ def _auto_backfill_links_for_hotspot_cases_on_fetch(
     if not case_ids:
         return []
 
+    def _ipv4_prefix24(ip: str) -> str:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return ""
+        if not all(part.isdigit() for part in parts):
+            return ""
+        return ".".join(parts[:3]) + "."
+
     linked_items: list[dict[str, Any]] = []
     linked_at = _now_iso()
     for case_id in case_ids:
@@ -1049,6 +1061,7 @@ def _auto_backfill_links_for_hotspot_cases_on_fetch(
         ).fetchone()[0]
         if int(manual_anchor_count or 0) < _FETCH_BACKFILL_MIN_MANUAL_LINK_COUNT:
             continue
+
         dominant_src_row = conn.execute(
             """
             select alerts.src_ip as src_ip, count(*) as cnt
@@ -1065,55 +1078,216 @@ def _auto_backfill_links_for_hotspot_cases_on_fetch(
         ).fetchone()
         if dominant_src_row is None:
             continue
-        src_ip = str(dominant_src_row["src_ip"] or "").strip()
-        if not src_ip:
+        dominant_src_ip = str(dominant_src_row["src_ip"] or "").strip()
+        if not dominant_src_ip:
+            continue
+        dominant_prefix = _ipv4_prefix24(dominant_src_ip)
+
+        asset_rows = conn.execute(
+            """
+            select distinct coalesce(alerts.asset_id, '') as asset_id
+            from case_alert_links
+            join alerts on alerts.alert_id = case_alert_links.alert_id
+            where case_alert_links.case_id = ?
+              and case_alert_links.is_active = 1
+              and lower(alerts.severity) in ('high', 'critical')
+              and lower(alerts.attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+              and coalesce(alerts.asset_id, '') != ''
+            """,
+            (case_id,),
+        ).fetchall()
+        case_assets = [str(row["asset_id"]) for row in asset_rows if row["asset_id"]]
+        if not case_assets:
             continue
 
-        candidates = conn.execute(
-            """
-            select alert_id, lower(attack_stage) as attack_stage, lower(severity) as severity
-            from alerts
-            where src_ip = ?
-              and status in ('new', 'open')
-              and lower(severity) in ('high', 'critical')
-              and lower(attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
-              and alert_id not in (
-                select alert_id
-                from case_alert_links
-                where is_active = 1
-              )
-            order by occurred_at asc, alert_id asc
-            limit 36
-            """,
-            (src_ip,),
-        ).fetchall()
+        related_src_candidates_rows: list[sqlite3.Row] = []
+        if dominant_prefix:
+            related_src_candidates_rows = conn.execute(
+                f"""
+                select
+                  alerts.src_ip as src_ip,
+                  count(*) as alert_count,
+                  sum(case when lower(alerts.severity) = 'critical' then 1 else 0 end) as critical_count,
+                  max(alerts.occurred_at) as last_occurred_at
+                from alerts
+                where alerts.status in ('new', 'open')
+                  and lower(alerts.severity) in ('high', 'critical')
+                  and lower(alerts.attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+                  and coalesce(alerts.src_ip, '') like ?
+                  and coalesce(alerts.asset_id, '') in ({", ".join("?" for _ in case_assets)})
+                  and alerts.alert_id not in (
+                    select alert_id
+                    from case_alert_links
+                    where is_active = 1
+                  )
+                group by alerts.src_ip
+                order by critical_count desc, alert_count desc, last_occurred_at desc, src_ip asc
+                """,
+                (f"{dominant_prefix}%", *case_assets),
+            ).fetchall()
+
+        src_ips_to_backfill = [dominant_src_ip]
+        for row in related_src_candidates_rows:
+            src_ip = str(row["src_ip"] or "").strip()
+            if not src_ip or src_ip == dominant_src_ip:
+                continue
+            alert_count = int(row["alert_count"] or 0)
+            if alert_count < _FETCH_BACKFILL_MIN_RELATED_SRC_ALERT_COUNT:
+                continue
+            src_ips_to_backfill.append(src_ip)
+            if len(src_ips_to_backfill) >= 1 + _FETCH_BACKFILL_MAX_RELATED_SRC_IPS:
+                break
+
         case_backfilled_count = 0
-        for row in candidates:
+        for src_ip in src_ips_to_backfill:
             if len(linked_items) >= _FETCH_BACKFILL_MAX_TOTAL:
                 break
             if case_backfilled_count >= _FETCH_BACKFILL_MAX_PER_CASE:
                 break
-            alert_id = str(row["alert_id"] or "").strip()
-            if not alert_id:
-                continue
-            link_alert_to_case(
-                conn,
-                case_id,
-                alert_id,
-                0.84,
-                "auto:fetch_hotspot_case_signature_backfill",
-                linked_at,
-            )
-            linked_items.append(
-                {
-                    "case_id": case_id,
-                    "alert_id": alert_id,
-                    "src_ip": src_ip,
-                    "reason": "auto:fetch_hotspot_case_signature_backfill",
-                }
-            )
-            case_backfilled_count += 1
+            candidates = conn.execute(
+                f"""
+                select
+                  alert_id,
+                  lower(attack_stage) as attack_stage,
+                  lower(severity) as severity,
+                  occurred_at
+                from alerts
+                where src_ip = ?
+                  and status in ('new', 'open')
+                  and lower(severity) in ('high', 'critical')
+                  and lower(attack_stage) in ('exploit', 'persistence', 'command_execution', 'reactivation', 'lateral_prep')
+                  and coalesce(asset_id, '') in ({", ".join("?" for _ in case_assets)})
+                  and alert_id not in (
+                    select alert_id
+                    from case_alert_links
+                    where is_active = 1
+                  )
+                order by
+                  case lower(severity)
+                    when 'low' then 1
+                    when 'medium' then 2
+                    when 'high' then 3
+                    when 'critical' then 4
+                    else 0
+                  end desc,
+                  occurred_at desc,
+                  alert_id asc
+                limit 48
+                """,
+                (src_ip, *case_assets),
+            ).fetchall()
+            for row in candidates:
+                if len(linked_items) >= _FETCH_BACKFILL_MAX_TOTAL:
+                    break
+                if case_backfilled_count >= _FETCH_BACKFILL_MAX_PER_CASE:
+                    break
+                alert_id = str(row["alert_id"] or "").strip()
+                if not alert_id:
+                    continue
+                link_alert_to_case(
+                    conn,
+                    case_id,
+                    alert_id,
+                    0.84,
+                    "auto:fetch_hotspot_case_signature_backfill",
+                    linked_at,
+                )
+                linked_items.append(
+                    {
+                        "case_id": case_id,
+                        "alert_id": alert_id,
+                        "src_ip": src_ip,
+                        "reason": "auto:fetch_hotspot_case_signature_backfill",
+                    }
+                )
+                case_backfilled_count += 1
+
     return linked_items
+
+
+def _extract_ipv4_from_text(text: str) -> str | None:
+    matched = _IP_IN_TEXT_PATTERN.search(text)
+    if matched is None:
+        return None
+    return matched.group(0)
+
+
+def _auto_close_empty_recon_shadow_cases(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+) -> list[dict[str, Any]]:
+    if source != "mcp":
+        return []
+
+    candidate_rows = conn.execute(
+        """
+        select case_id, title, status, current_stage
+        from cases
+        where lower(current_stage) = 'recon'
+          and lower(status) in ('active', 'open', 'watch')
+          and coalesce(merge_state, 'standalone') <> 'merged'
+          and not exists (
+            select 1
+            from case_alert_links
+            where case_alert_links.case_id = cases.case_id
+              and case_alert_links.is_active = 1
+          )
+        order by case_id asc
+        """
+    ).fetchall()
+    if not candidate_rows:
+        return []
+
+    closed_items: list[dict[str, Any]] = []
+    for row in candidate_rows:
+        case_id = str(row["case_id"] or "").strip()
+        if not case_id:
+            continue
+        title = str(row["title"] or "")
+        inferred_src_ip = _extract_ipv4_from_text(title)
+        if not inferred_src_ip:
+            continue
+
+        has_successor_case = conn.execute(
+            """
+            select 1
+            from cases
+            where case_id <> ?
+              and lower(status) in ('active', 'open')
+              and lower(current_stage) <> 'recon'
+              and exists (
+                select 1
+                from case_alert_links
+                join alerts on alerts.alert_id = case_alert_links.alert_id
+                where case_alert_links.case_id = cases.case_id
+                  and case_alert_links.is_active = 1
+                  and alerts.src_ip = ?
+              )
+            limit 1
+            """,
+            (case_id, inferred_src_ip),
+        ).fetchone()
+        if has_successor_case is None:
+            continue
+
+        conn.execute(
+            """
+            update cases
+            set status = 'closed'
+            where case_id = ?
+            """,
+            (case_id,),
+        )
+        closed_items.append(
+            {
+                "case_id": case_id,
+                "src_ip": inferred_src_ip,
+                "reason": "auto:close_recon_shadow_case_after_high_stage_successor",
+            }
+        )
+
+    return closed_items
 
 
 def _extract_alert_ids_from_fetch_result(result: dict[str, Any]) -> list[str]:
@@ -1621,6 +1795,29 @@ def dispatch_tool(conn: sqlite3.Connection, tool_name: str, payload: dict, sourc
                     data_map = dict(data) if isinstance(data, dict) else {}
                     data_map["auto_attacker_assessments"] = auto_entity_assessments
                     result["data"] = data_map
+            auto_closed_shadow_cases = _auto_close_empty_recon_shadow_cases(
+                conn,
+                source=source,
+            )
+            if auto_closed_shadow_cases:
+                result = dict(result)
+                warnings = result.get("warnings")
+                warning_list = list(warnings) if isinstance(warnings, list) else []
+                warning_list.append("auto_closed_orphan_recon_cases")
+                result["warnings"] = list(dict.fromkeys(warning_list))
+
+                refs = result.get("refs")
+                refs_map = dict(refs) if isinstance(refs, dict) else {}
+                existing_case_ids = refs_map.get("case_ids")
+                refs_case_ids = list(existing_case_ids) if isinstance(existing_case_ids, list) else []
+                refs_case_ids.extend(str(item.get("case_id") or "") for item in auto_closed_shadow_cases)
+                refs_map["case_ids"] = list(dict.fromkeys(item for item in refs_case_ids if item))
+                result["refs"] = refs_map
+
+                data = result.get("data")
+                data_map = dict(data) if isinstance(data, dict) else {}
+                data_map["auto_closed_shadow_cases"] = auto_closed_shadow_cases
+                result["data"] = data_map
         if tool_name == "case.link-alert-batch":
             auto_expanded_links = _auto_expand_high_signal_case_links(
                 conn,

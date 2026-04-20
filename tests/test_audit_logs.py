@@ -1349,6 +1349,173 @@ def test_mcp_alert_fetch_backfills_hotspot_case_signature_links(tmp_path) -> Non
     conn.close()
 
 
+def test_mcp_alert_fetch_backfills_related_src_ips_for_same_case_signature(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_auto_hotspot_198_51_100_24",
+            "title": "auto hotspot 198.51.100.24",
+            "status": "open",
+            "overall_severity": "high",
+            "current_stage": "command_execution",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_hotspot_related_anchor_001",
+        case_id="case_auto_hotspot_198_51_100_24",
+        occurred_at="2026-04-19T12:00:00+08:00",
+        stage="exploit",
+        src_ip="198.51.100.24",
+        severity="critical",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_hotspot_related_anchor_002",
+        case_id="case_auto_hotspot_198_51_100_24",
+        occurred_at="2026-04-19T12:01:00+08:00",
+        stage="command_execution",
+        src_ip="198.51.100.24",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_admin_portal",
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_hotspot_related_backfill_001",
+            "2026-04-19T12:03:00+08:00",
+            "hotspot related backfill 1",
+            "open",
+            "critical",
+            "persistence",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_hotspot_related_backfill_002",
+            "2026-04-19T12:04:00+08:00",
+            "hotspot related backfill 2",
+            "open",
+            "high",
+            "command_execution",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_admin_portal",
+        ),
+    )
+    conn.execute(
+        """
+        insert into alerts (
+          alert_id, occurred_at, title, status, severity, attack_stage, src_ip, dst_ip, asset_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "alt_hotspot_related_backfill_003",
+            "2026-04-19T12:05:00+08:00",
+            "hotspot related backfill 3",
+            "open",
+            "high",
+            "exploit",
+            "198.51.100.23",
+            "203.0.113.10",
+            "asset_api_prod",
+        ),
+    )
+    conn.commit()
+
+    result = dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    assert result["ok"] is True
+    assert "auto_fetch_hotspot_case_backfill_applied" in result["warnings"]
+
+    linked_count = conn.execute(
+        """
+        select count(*)
+        from case_alert_links
+        where case_id = ?
+          and alert_id = ?
+          and is_active = 1
+        """,
+        ("case_auto_hotspot_198_51_100_24", "alt_hotspot_related_backfill_001"),
+    ).fetchone()[0]
+    assert linked_count == 1
+    conn.close()
+
+
+def test_mcp_alert_fetch_auto_closes_empty_recon_shadow_case(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_recon_multi_1985110023_20260413",
+            "title": "recon watch 198.51.100.23",
+            "status": "active",
+            "overall_severity": "medium",
+            "current_stage": "recon",
+        },
+        source="cli",
+    )
+    dispatch_tool(
+        conn,
+        "case.upsert",
+        {
+            "case_id": "case_198_51_100_23_20260414_exploit",
+            "title": "198.51.100.23 exploit chain",
+            "status": "active",
+            "overall_severity": "high",
+            "current_stage": "exploit",
+        },
+        source="cli",
+    )
+    _insert_open_alert_for_case(
+        conn,
+        alert_id="alt_shadow_successor_001",
+        case_id="case_198_51_100_23_20260414_exploit",
+        occurred_at="2026-04-14T12:00:00+08:00",
+        stage="exploit",
+        src_ip="198.51.100.23",
+        severity="high",
+        confidence=0.9,
+        asset_id="asset_api_prod",
+    )
+    conn.commit()
+
+    result = dispatch_tool(conn, "alert.fetch", {"status": ["new", "open"], "limit": 20}, source="mcp")
+    assert result["ok"] is True
+    assert "auto_closed_orphan_recon_cases" in result["warnings"]
+
+    recon_status = conn.execute(
+        "select status from cases where case_id = ?",
+        ("case_recon_multi_1985110023_20260413",),
+    ).fetchone()["status"]
+    assert recon_status == "closed"
+    conn.close()
+
+
 def test_mcp_auto_run_closes_after_alert_ack_when_queue_drained(tmp_path) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)

@@ -294,6 +294,14 @@ def _upsert_patrol_state_value(conn: sqlite3.Connection, state_key: str, state_v
     )
 
 
+def _sanitize_cross_run_fetch_resume_payload(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    normalized = dict(payload)
+    normalized.pop("cursor", None)
+    return normalized if normalized else None
+
+
 def _extract_session_id(result: subprocess.CompletedProcess[str]) -> str | None:
     text = f"{result.stdout or ''}\n{result.stderr or ''}"
     matched = _SESSION_ID_PATTERN.search(text)
@@ -597,8 +605,7 @@ def trigger_patrol_from_ingest(
                     default=0,
                 )
                 previous_fetch_resume_payload = openai_session_state.get("fetch_resume_payload")
-                if not isinstance(previous_fetch_resume_payload, dict):
-                    previous_fetch_resume_payload = None
+                previous_fetch_resume_payload = _sanitize_cross_run_fetch_resume_payload(previous_fetch_resume_payload)
                 rollover_reasons: list[str] = []
                 if has_existing_response:
                     if (

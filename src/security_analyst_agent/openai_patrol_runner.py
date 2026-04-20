@@ -5,15 +5,25 @@ import sqlite3
 from dataclasses import dataclass
 from hashlib import sha1
 import re
+import time
 from typing import Any, Callable
 
-from security_analyst_agent.config import DEFAULT_OPENAI_BASE_URL
+from security_analyst_agent.config import (
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_ENABLE_CHAT_FALLBACK,
+    DEFAULT_OPENAI_REASONING_EFFORT,
+    DEFAULT_OPENAI_USER_AGENT,
+    DEFAULT_OPENAI_WIRE_API,
+)
 from security_analyst_agent.mcp_server import CORE_TOOL_NAMES, TOOL_DESCRIPTIONS, TOOL_REQUEST_MODELS
 from security_analyst_agent.repositories.audit import insert_agent_output_log
 from security_analyst_agent.stages import stage_rank
 from security_analyst_agent.tool_dispatch import dispatch_tool
 
 OpenAIClientFactory = Callable[[], Any]
+_RETRYABLE_PROVIDER_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_PROVIDER_CREATE_RETRIES = 2
+_PROVIDER_RETRY_BASE_DELAY_SECONDS = 0.8
 
 
 @dataclass
@@ -36,9 +46,12 @@ def _default_openai_client_factory() -> Any:
         from openai import OpenAI
     except ImportError as exc:
         raise RuntimeError("openai package is required for trigger_mode=openai") from exc
+    client_kwargs: dict[str, Any] = {}
     if DEFAULT_OPENAI_BASE_URL:
-        return OpenAI(base_url=DEFAULT_OPENAI_BASE_URL)
-    return OpenAI()
+        client_kwargs["base_url"] = DEFAULT_OPENAI_BASE_URL
+    if DEFAULT_OPENAI_USER_AGENT:
+        client_kwargs["default_headers"] = {"User-Agent": DEFAULT_OPENAI_USER_AGENT}
+    return OpenAI(**client_kwargs)
 
 
 def _schema_for_tool(tool_name: str) -> dict[str, Any]:
@@ -124,17 +137,102 @@ def _extract_output_text(response: Any) -> str:
     return ""
 
 
-def _extract_output_item_count(response: Any) -> int:
+def _extract_output_items(response: Any) -> list[Any]:
     output = _read_attr_or_key(response, "output", [])
     if isinstance(output, list):
-        return len(output)
-    return 0
+        return output
+    if isinstance(output, tuple):
+        return list(output)
+    return []
+
+
+def _extract_output_item_count(response: Any) -> int:
+    return len(_extract_output_items(response))
+
+
+def _truncate_text(value: Any, *, max_len: int = 240) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}…"
+
+
+def _extract_output_item_types(response: Any, *, max_items: int = 12) -> list[str]:
+    output = _extract_output_items(response)
+    item_types: list[str] = []
+    for item in output[:max_items]:
+        item_type = _read_attr_or_key(item, "type")
+        if isinstance(item_type, str) and item_type.strip():
+            item_types.append(item_type.strip())
+        else:
+            item_types.append("<unknown>")
+    return item_types
+
+
+def _extract_response_diagnostics(response: Any) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    response_status = _truncate_text(_read_attr_or_key(response, "status"), max_len=64)
+    if response_status:
+        diagnostics["response_status"] = response_status
+
+    output_raw = _read_attr_or_key(response, "output", None)
+    if output_raw is not None:
+        diagnostics["output_container_type"] = type(output_raw).__name__
+    diagnostics["output_item_types"] = _extract_output_item_types(response)
+
+    incomplete_details = _read_attr_or_key(response, "incomplete_details", None)
+    incomplete_reason = _truncate_text(_read_attr_or_key(incomplete_details, "reason"), max_len=80)
+    if incomplete_reason:
+        diagnostics["incomplete_reason"] = incomplete_reason
+
+    error_obj = _read_attr_or_key(response, "error", None)
+    error_code = _truncate_text(_read_attr_or_key(error_obj, "code"), max_len=80)
+    error_message = _truncate_text(_read_attr_or_key(error_obj, "message"), max_len=240)
+    if error_code:
+        diagnostics["provider_error_code"] = error_code
+    if error_message:
+        diagnostics["provider_error_message"] = error_message
+
+    output = _extract_output_items(response)
+    refusal_item_count = 0
+    for item in output:
+        item_type = _read_attr_or_key(item, "type")
+        if item_type == "refusal":
+            refusal_item_count += 1
+            continue
+        refusal_payload = _read_attr_or_key(item, "refusal", None)
+        if refusal_payload not in (None, "", [], {}):
+            refusal_item_count += 1
+    if refusal_item_count > 0:
+        diagnostics["refusal_item_count"] = refusal_item_count
+
+    choices = _read_attr_or_key(response, "choices", None)
+    if isinstance(choices, (list, tuple)):
+        choices_list = list(choices)
+        diagnostics["choices_count"] = len(choices_list)
+        finish_reasons: list[str] = []
+        choices_tool_call_count = 0
+        for choice in choices_list[:5]:
+            reason = _truncate_text(_read_attr_or_key(choice, "finish_reason"), max_len=48)
+            if reason:
+                finish_reasons.append(reason)
+            message = _read_attr_or_key(choice, "message", None)
+            tool_calls = _read_attr_or_key(message, "tool_calls", None)
+            if isinstance(tool_calls, (list, tuple)):
+                choices_tool_call_count += len(tool_calls)
+        if finish_reasons:
+            diagnostics["choices_finish_reasons"] = finish_reasons
+        if choices_tool_call_count > 0:
+            diagnostics["choices_tool_call_count"] = choices_tool_call_count
+    return diagnostics
 
 
 def _extract_tool_calls(response: Any) -> list[dict[str, str]]:
-    output = _read_attr_or_key(response, "output", [])
-    if not isinstance(output, list):
-        return []
+    output = _extract_output_items(response)
     calls: list[dict[str, str]] = []
     for item in output:
         item_type = _read_attr_or_key(item, "type")
@@ -167,15 +265,378 @@ def _invoke_response_create(client: Any, request: dict[str, Any]) -> Any:
     return create(**request)
 
 
+def _extract_error_status_code(exc: Exception) -> int | None:
+    for attr in ("status_code", "http_status", "status"):
+        value = _read_attr_or_key(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    response = _read_attr_or_key(exc, "response", None)
+    if response is not None:
+        value = _read_attr_or_key(response, "status_code", None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+
+    text = str(exc)
+    match = re.search(r"\b([45]\d{2})\b", text)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _is_retryable_provider_error(exc: Exception) -> bool:
+    status_code = _extract_error_status_code(exc)
+    if status_code in _RETRYABLE_PROVIDER_STATUS_CODES:
+        return True
+
+    lowered = str(exc).lower()
+    retry_markers = (
+        "bad gateway",
+        "gateway timeout",
+        "service temporarily unavailable",
+        "upstream request failed",
+        "connection error",
+        "timed out",
+        "timeout",
+    )
+    if any(marker in lowered for marker in retry_markers):
+        return True
+
+    if ("<!doctype html" in lowered or "<html" in lowered) and "cloudflare" in lowered:
+        return True
+    return False
+
+
+def _provider_retry_delay_seconds(retry_index: int) -> float:
+    return _PROVIDER_RETRY_BASE_DELAY_SECONDS * (2**max(0, retry_index))
+
+
+def _invoke_response_create_with_retries(client: Any, request: dict[str, Any]) -> Any:
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_PROVIDER_CREATE_RETRIES + 1):
+        try:
+            return _invoke_response_create(client, request)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_provider_error(exc):
+                raise
+            if attempt >= _MAX_PROVIDER_CREATE_RETRIES:
+                break
+            delay_seconds = _provider_retry_delay_seconds(attempt)
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+    if last_exc is None:
+        raise RuntimeError("openai responses.create failed without exception details")
+    raise RuntimeError(
+        "openai responses.create transient failure exhausted retries "
+        f"(retries={_MAX_PROVIDER_CREATE_RETRIES}, last_error={last_exc})"
+    ) from last_exc
+
+
 def _invoke_response_create_with_tool_choice_fallback(client: Any, request: dict[str, Any]) -> Any:
     try:
-        return _invoke_response_create(client, request)
+        return _invoke_response_create_with_retries(client, request)
     except Exception:
         if "tool_choice" not in request:
             raise
         fallback_request = dict(request)
         fallback_request.pop("tool_choice", None)
-        return _invoke_response_create(client, fallback_request)
+        return _invoke_response_create_with_retries(client, fallback_request)
+
+
+def _invoke_chat_completion_create(client: Any, request: dict[str, Any]) -> Any:
+    chat = _read_attr_or_key(client, "chat")
+    if chat is None:
+        raise RuntimeError("openai client missing chat API")
+    completions = _read_attr_or_key(chat, "completions")
+    if completions is None:
+        raise RuntimeError("openai client missing chat.completions API")
+    create = _read_attr_or_key(completions, "create")
+    if not callable(create):
+        raise RuntimeError("openai client missing chat.completions.create")
+    return create(**request)
+
+
+def _is_function_output_item(value: Any) -> bool:
+    return _read_attr_or_key(value, "type") == "function_call_output"
+
+
+def _is_function_output_input(input_payload: Any) -> bool:
+    if not isinstance(input_payload, list) or not input_payload:
+        return False
+    return all(_is_function_output_item(item) for item in input_payload)
+
+
+def _summarize_function_outputs_for_chat(input_payload: list[Any]) -> str:
+    lines = [
+        "Tool results from previous step:",
+    ]
+    for item in input_payload[:12]:
+        call_id = _read_attr_or_key(item, "call_id") or "[unknown_call]"
+        output = _read_attr_or_key(item, "output", "")
+        output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+        normalized_output = output_text.strip().replace("\n", " ")
+        if len(normalized_output) > 260:
+            normalized_output = f"{normalized_output[:260]}…"
+        lines.append(f"- {call_id}: {normalized_output}")
+    lines.append("Based on these results, continue by calling backend tools when needed.")
+    return "\n".join(lines)
+
+
+def _responses_tool_to_chat_tool(tool_spec: dict[str, Any]) -> dict[str, Any]:
+    if tool_spec.get("type") != "function":
+        return dict(tool_spec)
+    return {
+        "type": "function",
+        "function": {
+            "name": tool_spec.get("name", ""),
+            "description": tool_spec.get("description", ""),
+            "parameters": tool_spec.get("parameters", {"type": "object", "properties": {}}),
+        },
+    }
+
+
+def _extract_chat_message_content_text(message: Any) -> str:
+    content = _read_attr_or_key(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+                continue
+            text = _read_attr_or_key(block, "text")
+            if isinstance(text, str):
+                parts.append(text)
+                continue
+            nested_text = _read_attr_or_key(_read_attr_or_key(block, "text", None), "value", None)
+            if isinstance(nested_text, str):
+                parts.append(nested_text)
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def _normalize_chat_completion_response(response: Any) -> dict[str, Any]:
+    choices = _read_attr_or_key(response, "choices", [])
+    first_choice = choices[0] if isinstance(choices, list) and choices else None
+    message = _read_attr_or_key(first_choice, "message", None)
+    message_content = _extract_chat_message_content_text(message).strip()
+    raw_tool_calls = _read_attr_or_key(message, "tool_calls", [])
+    output_items: list[dict[str, Any]] = []
+    if isinstance(raw_tool_calls, list):
+        for tool_call in raw_tool_calls:
+            function = _read_attr_or_key(tool_call, "function", None)
+            name = _read_attr_or_key(function, "name", "")
+            call_id = _read_attr_or_key(tool_call, "id") or _read_attr_or_key(tool_call, "call_id")
+            arguments = _read_attr_or_key(function, "arguments", "{}")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(call_id, str) or not call_id.strip():
+                continue
+            if isinstance(arguments, dict):
+                arguments_text = json.dumps(arguments, ensure_ascii=False)
+            elif isinstance(arguments, str):
+                arguments_text = arguments
+            else:
+                arguments_text = "{}"
+            output_items.append(
+                {
+                    "type": "function_call",
+                    "name": name,
+                    "call_id": call_id,
+                    "arguments": arguments_text,
+                }
+            )
+    if not output_items:
+        output_items.append({"type": "message", "role": "assistant"})
+    usage = _read_attr_or_key(response, "usage", None)
+    input_tokens = _to_int(_read_attr_or_key(usage, "prompt_tokens", _read_attr_or_key(usage, "input_tokens", 0)), 0)
+    output_tokens = _to_int(
+        _read_attr_or_key(usage, "completion_tokens", _read_attr_or_key(usage, "output_tokens", 0)),
+        0,
+    )
+    return {
+        "id": _read_attr_or_key(response, "id"),
+        "status": _read_attr_or_key(response, "status", "completed"),
+        "output_text": message_content,
+        "output": output_items,
+        "usage": {
+            "input_tokens": max(0, input_tokens),
+            "output_tokens": max(0, output_tokens),
+            "input_tokens_details": {"cached_tokens": 0},
+        },
+    }
+
+
+def _is_structured_responses_payload(response: Any) -> bool:
+    if isinstance(response, str):
+        return False
+    output = _read_attr_or_key(response, "output", None)
+    if isinstance(output, list):
+        return True
+    if _read_attr_or_key(response, "status", None) is not None:
+        return True
+    if _read_attr_or_key(response, "id", None) is not None:
+        return True
+    return False
+
+
+def _should_fallback_to_chat_from_exception(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    markers = (
+        "no tool call found for function call output with call_id",
+        "invalid url (post /responses)",
+        "unsupported wire_api",
+        "unsupported wire api",
+        "responses api not supported",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+class _OpenAIWireAdapter:
+    def __init__(
+        self,
+        *,
+        client: Any,
+        initial_wire_api: str,
+        enable_chat_fallback: bool,
+    ) -> None:
+        normalized_wire = (initial_wire_api or "").strip().lower()
+        self._client = client
+        self._wire_api = (
+            "chat_completions"
+            if normalized_wire in {"chat", "chat_completions", "completions", "chat.completions"}
+            else "responses"
+        )
+        self._enable_chat_fallback = bool(enable_chat_fallback)
+        self._fallback_used = False
+        self._chat_messages: list[dict[str, Any]] = []
+        self._chat_call_name_by_id: dict[str, str] = {}
+        self._chat_system_initialized = False
+
+    @property
+    def wire_api(self) -> str:
+        return self._wire_api
+
+    @property
+    def fallback_used(self) -> bool:
+        return self._fallback_used
+
+    def create(self, request: dict[str, Any]) -> Any:
+        if self._wire_api == "chat_completions":
+            return self._create_chat_completion_response(request)
+        try:
+            response = _invoke_response_create_with_tool_choice_fallback(self._client, request)
+            if _is_structured_responses_payload(response):
+                return response
+            if not self._enable_chat_fallback:
+                return response
+            self._fallback_used = True
+            self._wire_api = "chat_completions"
+            return self._create_chat_completion_response(request)
+        except Exception as exc:
+            if not self._enable_chat_fallback or not _should_fallback_to_chat_from_exception(exc):
+                raise
+            self._fallback_used = True
+            self._wire_api = "chat_completions"
+            return self._create_chat_completion_response(request)
+
+    def _create_chat_completion_response(self, request: dict[str, Any]) -> dict[str, Any]:
+        start_message_count = len(self._chat_messages)
+        start_call_mapping = dict(self._chat_call_name_by_id)
+        start_system_flag = self._chat_system_initialized
+        try:
+            instructions = request.get("instructions")
+            if isinstance(instructions, str) and instructions.strip() and not self._chat_system_initialized:
+                self._chat_messages.append({"role": "system", "content": instructions})
+                self._chat_system_initialized = True
+
+            input_payload = request.get("input")
+            if isinstance(input_payload, str) and input_payload.strip():
+                self._chat_messages.append({"role": "user", "content": input_payload})
+            elif _is_function_output_input(input_payload):
+                assert isinstance(input_payload, list)
+                if any(message.get("tool_calls") for message in self._chat_messages if isinstance(message, dict)):
+                    for item in input_payload:
+                        call_id = str(_read_attr_or_key(item, "call_id") or "").strip()
+                        if not call_id:
+                            continue
+                        output = _read_attr_or_key(item, "output", "")
+                        output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+                        tool_message: dict[str, Any] = {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output_text,
+                        }
+                        tool_name = self._chat_call_name_by_id.get(call_id)
+                        if tool_name:
+                            tool_message["name"] = tool_name
+                        self._chat_messages.append(tool_message)
+                else:
+                    self._chat_messages.append({"role": "user", "content": _summarize_function_outputs_for_chat(input_payload)})
+            elif input_payload not in (None, ""):
+                serialized_input = input_payload if isinstance(input_payload, str) else json.dumps(input_payload, ensure_ascii=False)
+                self._chat_messages.append({"role": "user", "content": serialized_input})
+
+            chat_tools = [_responses_tool_to_chat_tool(tool) for tool in request.get("tools", [])]
+            chat_request: dict[str, Any] = {
+                "model": request.get("model"),
+                "messages": list(self._chat_messages),
+            }
+            if chat_tools:
+                chat_request["tools"] = chat_tools
+            if "tool_choice" in request:
+                chat_request["tool_choice"] = request["tool_choice"]
+
+            chat_response = _invoke_chat_completion_create(self._client, chat_request)
+            normalized_response = _normalize_chat_completion_response(chat_response)
+            output_items = normalized_response.get("output")
+            if isinstance(output_items, list):
+                tool_calls_for_history: list[dict[str, Any]] = []
+                for item in output_items:
+                    if _read_attr_or_key(item, "type") != "function_call":
+                        continue
+                    call_id = str(_read_attr_or_key(item, "call_id") or "").strip()
+                    name = str(_read_attr_or_key(item, "name") or "").strip()
+                    arguments = _read_attr_or_key(item, "arguments", "{}")
+                    if isinstance(arguments, dict):
+                        arguments_text = json.dumps(arguments, ensure_ascii=False)
+                    elif isinstance(arguments, str):
+                        arguments_text = arguments
+                    else:
+                        arguments_text = "{}"
+                    if call_id and name:
+                        self._chat_call_name_by_id[call_id] = name
+                    if call_id and name:
+                        tool_calls_for_history.append(
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": arguments_text},
+                            }
+                        )
+                assistant_content = normalized_response.get("output_text", "")
+                assistant_message: dict[str, Any] = {"role": "assistant"}
+                if tool_calls_for_history:
+                    assistant_message["tool_calls"] = tool_calls_for_history
+                    if assistant_content:
+                        assistant_message["content"] = assistant_content
+                else:
+                    assistant_message["content"] = assistant_content or "[SILENT]"
+                self._chat_messages.append(assistant_message)
+            return normalized_response
+        except Exception:
+            del self._chat_messages[start_message_count:]
+            self._chat_call_name_by_id = start_call_mapping
+            self._chat_system_initialized = start_system_flag
+            raise
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -295,6 +756,11 @@ _WRITE_TOOL_DISCOVERY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     ),
 }
 _MAX_CONSECUTIVE_BLOCKED_TOOL_TURNS = 5
+_MAX_TEXT_ONLY_NO_TOOL_RETRIES = 1
+_NO_TOOL_CALL_RECOVERY_QUERY = (
+    "Your previous response did not call backend tools. "
+    "For this patrol pass, call backend tools directly (start with alert.fetch) before any narrative output."
+)
 
 
 def _tool_payload_signature(tool_name: str, payload: dict[str, Any]) -> str:
@@ -958,6 +1424,18 @@ def _normalize_alert_fetch_payload(payload: dict[str, Any], *, objective_mode: b
     return normalized
 
 
+def _sanitize_first_fetch_payload_override(
+    payload: dict[str, Any] | None,
+    *,
+    objective_mode: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    normalized = _normalize_alert_fetch_payload(dict(payload), objective_mode=objective_mode)
+    normalized.pop("cursor", None)
+    return normalized
+
+
 def _normalize_payload_for_tool(
     tool_name: str,
     payload: dict[str, Any],
@@ -1159,6 +1637,11 @@ def run_openai_patrol(
 
     tools, openai_name_map = _build_openai_tools(tool_profile)
     client = (client_factory or _default_openai_client_factory)()
+    wire_adapter = _OpenAIWireAdapter(
+        client=client,
+        initial_wire_api=DEFAULT_OPENAI_WIRE_API,
+        enable_chat_fallback=DEFAULT_OPENAI_ENABLE_CHAT_FALLBACK,
+    )
 
     next_input: Any = query
     resume_response_id = previous_response_id
@@ -1176,13 +1659,14 @@ def run_openai_patrol(
     has_seen_initial_alert_fetch = False
     completed_discovery_tools: set[str] = set()
     empty_provider_response_retries = 0
+    text_only_no_tool_retries = 0
     consecutive_blocked_tool_turns = 0
     has_successful_ack_call = False
     enforce_initial_required_tool_choice = True
     latest_suspect_candidates: list[dict[str, Any]] = []
     autofilled_case_upsert_once = False
     fetch_override_payload = (
-        _normalize_alert_fetch_payload(dict(first_fetch_payload_override), objective_mode=objective_mode)
+        _sanitize_first_fetch_payload_override(first_fetch_payload_override, objective_mode=objective_mode)
         if isinstance(first_fetch_payload_override, dict)
         else None
     )
@@ -1195,13 +1679,15 @@ def run_openai_patrol(
             "input": next_input,
             "tools": tools,
         }
+        if DEFAULT_OPENAI_REASONING_EFFORT:
+            request["reasoning"] = {"effort": DEFAULT_OPENAI_REASONING_EFFORT}
         if tool_call_count <= 0 and enforce_initial_required_tool_choice:
             request["tool_choice"] = "required"
         if include_instructions:
             request["instructions"] = instructions
         if isinstance(resume_response_id, str) and resume_response_id.strip():
             request["previous_response_id"] = resume_response_id
-        response = _invoke_response_create_with_tool_choice_fallback(client, request)
+        response = wire_adapter.create(request)
         include_instructions = False
         usage_snapshot = _extract_usage_snapshot(response)
         usage_input_tokens += usage_snapshot["input_tokens"]
@@ -1215,6 +1701,7 @@ def run_openai_patrol(
         response_text = _extract_output_text(response).strip()
         output_item_count = _extract_output_item_count(response)
         tool_calls = _extract_tool_calls(response)
+        response_diagnostics = _extract_response_diagnostics(response)
         insert_agent_output_log(
             conn,
             source="openai",
@@ -1228,6 +1715,9 @@ def run_openai_patrol(
             meta={
                 "output_item_count": output_item_count,
                 "tool_call_names": [call["name"] for call in tool_calls],
+                "wire_api": wire_adapter.wire_api,
+                "wire_fallback_used": bool(wire_adapter.fallback_used),
+                **response_diagnostics,
             },
         )
         if not tool_calls:
@@ -1250,10 +1740,37 @@ def run_openai_patrol(
                 resume_response_id = None
                 next_input = query
                 continue
+            if (
+                tool_call_count <= 0
+                and not is_empty_provider_response
+                and response_text.strip()
+                and response_text.strip() != "[SILENT]"
+                and text_only_no_tool_retries < _MAX_TEXT_ONLY_NO_TOOL_RETRIES
+                and turn_count < max_turns
+            ):
+                text_only_no_tool_retries += 1
+                enforce_initial_required_tool_choice = True
+                include_instructions = True
+                resume_response_id = None
+                next_input = _NO_TOOL_CALL_RECOVERY_QUERY
+                continue
             if tool_call_count <= 0:
+                response_status = response_diagnostics.get("response_status", "[UNKNOWN]")
+                incomplete_reason = response_diagnostics.get("incomplete_reason", "[NONE]")
+                provider_error_code = response_diagnostics.get("provider_error_code", "[NONE]")
+                output_item_types = response_diagnostics.get("output_item_types", [])
                 detail = (
                     "openai responses returned no backend tool calls for this patrol run "
-                    f"(final_text={response_text or '[EMPTY]'}, empty_provider_responses={empty_provider_response_retries})"
+                    f"(final_text={response_text or '[EMPTY]'}, "
+                    f"wire_api={wire_adapter.wire_api}, "
+                    f"wire_fallback_used={1 if wire_adapter.fallback_used else 0}, "
+                    f"response_status={response_status}, "
+                    f"incomplete_reason={incomplete_reason}, "
+                    f"provider_error_code={provider_error_code}, "
+                    f"output_items={output_item_count}, "
+                    f"output_item_types={output_item_types}, "
+                    f"empty_provider_responses={empty_provider_response_retries}, "
+                    f"text_no_tool_retries={text_only_no_tool_retries})"
                 )
                 return OpenAIPatrolResult(
                     status="failed",
@@ -1269,7 +1786,9 @@ def run_openai_patrol(
                     fetch_resume_payload=next_fetch_resume_payload,
                 )
             detail = (
-                f"openai responses completed (tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'})"
+                "openai responses completed "
+                f"(tool_calls={tool_call_count}, final_text={response_text or '[EMPTY]'}, "
+                f"wire_api={wire_adapter.wire_api}, wire_fallback_used={1 if wire_adapter.fallback_used else 0})"
             )
             if not objective_mode and not has_successful_ack_call and (
                 (max_tool_calls is None or tool_call_count < max_tool_calls)
@@ -1543,7 +2062,8 @@ def run_openai_patrol(
         if consecutive_blocked_tool_turns >= _MAX_CONSECUTIVE_BLOCKED_TOOL_TURNS and tool_call_count > 0:
             detail = (
                 "openai responses stopped_after_blocked_tool_loop="
-                f"{consecutive_blocked_tool_turns} (tool_calls={tool_call_count})"
+                f"{consecutive_blocked_tool_turns} (tool_calls={tool_call_count}, "
+                f"wire_api={wire_adapter.wire_api}, wire_fallback_used={1 if wire_adapter.fallback_used else 0})"
             )
             if not objective_mode and not has_successful_ack_call and (
                 (max_tool_calls is None or tool_call_count < max_tool_calls)
@@ -1572,7 +2092,8 @@ def run_openai_patrol(
 
     detail = (
         f"openai responses exceeded max_turns={max_turns} "
-        f"(tool_calls={tool_call_count}, last_text={response_text or '[EMPTY]'})"
+        f"(tool_calls={tool_call_count}, last_text={response_text or '[EMPTY]'}, "
+        f"wire_api={wire_adapter.wire_api}, wire_fallback_used={1 if wire_adapter.fallback_used else 0})"
     )
     return OpenAIPatrolResult(
         status="failed",

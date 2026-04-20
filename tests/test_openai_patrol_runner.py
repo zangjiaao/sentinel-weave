@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
+import pytest
 from security_analyst_agent.bootstrap import bootstrap_spike_database
 from security_analyst_agent.db import connect_db
+import security_analyst_agent.openai_patrol_runner as runner_module
 from security_analyst_agent.openai_patrol_runner import run_openai_patrol
 from security_analyst_agent.openai_patrol_runner import _normalize_payload_for_tool
 
@@ -102,6 +105,68 @@ def test_normalize_alert_fetch_payload_disables_strategy_hints_in_objective_mode
     assert normalized["include_strategy_hints"] is False
 
 
+def test_run_openai_patrol_drops_cross_run_fetch_cursor_from_first_override(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_cursor_override_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_cursor_override_001",
+                        "arguments": '{"status":["new","open"],"mode":"clusters","limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_cursor_override_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=4,
+        first_fetch_payload_override={
+            "status": ["new", "open"],
+            "mode": "clusters",
+            "limit": 5,
+            "cursor": "120",
+        },
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    first_fetch_payload = json.loads(
+        conn.execute(
+            """
+            select payload_json
+            from agent_tool_calls
+            where tool_name = 'alert.fetch'
+            order by occurred_at asc, rowid asc
+            limit 1
+            """
+        ).fetchone()["payload_json"]
+    )
+    conn.close()
+
+    assert result.status == "success"
+    assert "cursor" not in first_fetch_payload
+    assert first_fetch_payload["mode"] == "clusters"
+
+
 @dataclass
 class _UsageDetailsObject:
     cached_tokens: int
@@ -122,12 +187,35 @@ class _FakeOpenAIResponses:
     def create(self, **kwargs):
         self.calls.append(kwargs)
         index = len(self.calls) - 1
-        return self._rounds[index]
+        current = self._rounds[index]
+        if isinstance(current, Exception):
+            raise current
+        return current
 
 
 class _FakeOpenAIClient:
-    def __init__(self, rounds: list[dict]) -> None:
+    def __init__(self, rounds: list[dict | Exception], chat_rounds: list[dict | Exception] | None = None) -> None:
         self.responses = _FakeOpenAIResponses(rounds)
+        self.chat = _FakeOpenAIChat(chat_rounds or [])
+
+
+class _FakeOpenAIChatCompletions:
+    def __init__(self, rounds: list[dict | Exception]) -> None:
+        self._rounds = rounds
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        index = len(self.calls) - 1
+        current = self._rounds[index]
+        if isinstance(current, Exception):
+            raise current
+        return current
+
+
+class _FakeOpenAIChat:
+    def __init__(self, rounds: list[dict | Exception]) -> None:
+        self.completions = _FakeOpenAIChatCompletions(rounds)
 
 
 def test_run_openai_patrol_keeps_tools_on_every_turn_and_collects_usage(tmp_path) -> None:
@@ -207,6 +295,318 @@ def test_run_openai_patrol_keeps_tools_on_every_turn_and_collects_usage(tmp_path
     assert output_rows[1]["response_id"] == "resp_runner_002"
     assert output_rows[1]["has_tool_calls"] == 0
     assert output_rows[1]["output_text"] == "[SILENT]"
+
+
+def test_run_openai_patrol_retries_once_when_first_response_is_text_without_tools(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_text_no_tool_001",
+                "output_text": "## Patrol Action Summary\n- planning only",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+            {
+                "id": "resp_text_no_tool_002",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_text_no_tool_fetch",
+                        "arguments": '{"status":["new","open"],"limit":5}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_text_no_tool_003",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5-mini",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    output_rows = conn.execute(
+        """
+        select turn_index, has_tool_calls, output_text
+        from agent_outputs
+        order by occurred_at asc, rowid asc
+        """
+    ).fetchall()
+    conn.close()
+
+    assert result.status == "success"
+    assert result.turns == 3
+    assert result.tool_calls == 1
+    assert len(fake_client.responses.calls) == 3
+    assert "previous_response_id" not in fake_client.responses.calls[1]
+    assert fake_client.responses.calls[1]["tool_choice"] == "required"
+    assert len(output_rows) == 3
+    assert output_rows[0]["has_tool_calls"] == 0
+    assert output_rows[1]["has_tool_calls"] == 1
+
+
+def test_run_openai_patrol_logs_diagnostics_when_provider_returns_empty_output_without_tools(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_no_tool_empty_001",
+                "status": "completed",
+                "usage": _UsageObject(
+                    input_tokens=8850,
+                    output_tokens=80,
+                    input_tokens_details=_UsageDetailsObject(cached_tokens=0),
+                ),
+                "output": [],
+            }
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5.3",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=1,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    output_row = conn.execute(
+        """
+        select meta_json
+        from agent_outputs
+        order by occurred_at asc, rowid asc
+        limit 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert result.status == "failed"
+    assert "response_status=completed" in result.detail
+    assert "output_items=0" in result.detail
+    assert output_row is not None
+    meta = json.loads(output_row["meta_json"])
+    assert meta["output_item_count"] == 0
+    assert meta["output_item_types"] == []
+    assert meta["response_status"] == "completed"
+    assert meta["tool_call_names"] == []
+
+
+def test_run_openai_patrol_accepts_tuple_output_items_for_tool_calls(tmp_path) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_tuple_output_001",
+                "output": (
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_tuple_output_fetch",
+                        "arguments": '{"status":["new","open"],"limit":3}',
+                    },
+                ),
+            },
+            {
+                "id": "resp_tuple_output_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5.3",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=3,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert alert_fetch_calls == 1
+
+
+def test_run_openai_patrol_retries_transient_provider_error_then_succeeds(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    monkeypatch.setattr(runner_module, "_provider_retry_delay_seconds", lambda _retry_index: 0.0)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            RuntimeError("Error code: 503 - {'error': {'message': 'Service temporarily unavailable'}}"),
+            {
+                "id": "resp_retry_success_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_retry_success_fetch",
+                        "arguments": '{"status":["new","open"],"limit":3}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_retry_success_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5.4",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert alert_fetch_calls == 1
+    assert len(fake_client.responses.calls) == 3
+
+
+def test_run_openai_patrol_fails_fast_on_non_retryable_provider_error(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    monkeypatch.setattr(runner_module, "_provider_retry_delay_seconds", lambda _retry_index: 0.0)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            RuntimeError("Error code: 400 - {'error': {'message': 'invalid_request_error'}}"),
+            RuntimeError("Error code: 400 - {'error': {'message': 'invalid_request_error'}}"),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="invalid_request_error"):
+        run_openai_patrol(
+            conn,
+            model="gpt-5.4",
+            instructions="run patrol",
+            query="start",
+            previous_response_id=None,
+            max_turns=3,
+            client_factory=lambda: fake_client,
+            tool_profile="compact",
+        )
+    conn.close()
+
+    assert len(fake_client.responses.calls) == 2
+
+
+def test_run_openai_patrol_falls_back_to_chat_completions_on_responses_call_id_error(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    conn = connect_db(db_path)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_ENABLE_CHAT_FALLBACK", True)
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_fallback_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_fallback_fetch_001",
+                        "arguments": '{"status":["new","open"],"limit":3}',
+                    }
+                ],
+            },
+            RuntimeError(
+                "Error code: 400 - {'error': {'message': 'No tool call found for function call output with call_id call_fallback_fetch_001.'}}"
+            ),
+        ],
+        chat_rounds=[
+            {
+                "id": "chat_resp_fallback_001",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "[SILENT]",
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 6},
+            }
+        ],
+    )
+
+    result = run_openai_patrol(
+        conn,
+        model="gpt-5.4",
+        instructions="run patrol",
+        query="start",
+        previous_response_id=None,
+        max_turns=5,
+        client_factory=lambda: fake_client,
+        tool_profile="compact",
+    )
+
+    output_rows = conn.execute(
+        """
+        select meta_json
+        from agent_outputs
+        order by occurred_at asc, rowid asc
+        """
+    ).fetchall()
+    alert_fetch_calls = conn.execute(
+        "select count(*) from agent_tool_calls where tool_name = 'alert.fetch'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result.status == "success"
+    assert result.tool_calls == 1
+    assert "wire_fallback_used=1" in result.detail
+    assert len(fake_client.responses.calls) == 2
+    assert len(fake_client.chat.completions.calls) == 1
+    assert alert_fetch_calls == 1
+    assert any('"wire_api": "chat_completions"' in row["meta_json"] for row in output_rows)
 
 
 def test_run_openai_patrol_blocks_repeated_invalid_tool_payload_in_same_run(tmp_path) -> None:
