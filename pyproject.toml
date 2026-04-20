@@ -3,6 +3,7 @@ name = "security-analyst-agent"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.115,<1",
   "mcp>=1.27.0",
   "openai>=1.40.0",
   "pydantic>=2.7,<3",
@@ -11,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "httpx>=0.27,<1",
   "pytest>=8.0,<9",
   "ruff>=0.4,<0.5",
 ]

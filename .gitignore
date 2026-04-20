@@ -8,3 +8,5 @@ __pycache__/
 spike.db
 hermes-slow-verify.db
 .env
+web-ui/node_modules/
+web-ui/.next/

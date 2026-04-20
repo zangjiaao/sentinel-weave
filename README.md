@@ -25,6 +25,28 @@ OPENAI_PATROL_MODEL=gpt-5.4
 HERMES_PATROL_TRIGGER_MODE=openai
 ```
 
+## Web API (FastAPI)
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run uvicorn security_analyst_agent.web_api:app --reload --port 18080
+```
+
+示例接口：
+
+- `GET /api/intake/sources`
+- `GET /api/cases`
+- `GET /api/assets`
+- `POST /api/notifications/preview`
+- `POST /api/reports/preview`
+
+## Web UI（MVP 页面壳）
+
+```bash
+cd web-ui
+npm install
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:18080 npm run dev
+```
+
 ## Example
 
 ```bash

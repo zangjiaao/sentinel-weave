@@ -761,13 +761,19 @@ def _refresh_import_job_metrics(conn: sqlite3.Connection, job_id: str) -> dict[s
     error_rows = int(row["error_rows"] or 0)
 
     if total_rows == 0:
-        status = "empty"
+        status = "failed"
     elif mapped_rows == total_rows:
         status = "completed"
+    elif pending_rows == total_rows and mapped_rows == 0 and unmapped_rows == 0 and error_rows == 0:
+        status = "uploaded"
+    elif mapped_rows > 0 and pending_rows > 0 and unmapped_rows == 0 and error_rows == 0:
+        status = "processing"
     elif mapped_rows > 0:
-        status = "partial"
-    elif unmapped_rows > 0 or error_rows > 0:
         status = "needs_review"
+    elif unmapped_rows > 0 or error_rows > 0:
+        status = "waiting_mapping"
+    elif pending_rows > 0:
+        status = "queued"
     else:
         status = "uploaded"
 

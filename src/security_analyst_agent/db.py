@@ -244,6 +244,15 @@ def create_schema(conn: sqlite3.Connection) -> None:
           public_ip text,
           domain text
         );
+        create table if not exists asset_identities (
+          identity_id text primary key,
+          asset_id text not null,
+          identity_type text not null,
+          identity_value text not null,
+          is_primary integer not null,
+          confidence real not null,
+          created_at text not null
+        );
         create table if not exists alerts (
           alert_id text primary key,
           occurred_at text not null,
@@ -288,6 +297,57 @@ def create_schema(conn: sqlite3.Connection) -> None:
           created_at text not null,
           updated_at text not null,
           notes_json text not null
+        );
+        create table if not exists data_sources (
+          source_id text primary key,
+          source_name text not null,
+          source_mode text not null,
+          device_type text,
+          vendor text,
+          product text,
+          enabled integer not null,
+          schedule text,
+          status text not null,
+          parser_profile_id text,
+          created_at text not null,
+          updated_at text not null
+        );
+        create table if not exists source_runs (
+          source_run_id text primary key,
+          source_id text not null,
+          trigger_type text not null,
+          status text not null,
+          started_at text not null,
+          ended_at text,
+          raw_event_count integer not null,
+          normalized_count integer not null,
+          failed_count integer not null,
+          parser_profile_version_id text,
+          result_summary text not null,
+          error_summary text
+        );
+        create table if not exists parser_profiles (
+          parser_profile_id text primary key,
+          profile_name text not null,
+          device_type text,
+          vendor text,
+          product text,
+          input_format text,
+          status text not null,
+          created_at text not null,
+          updated_at text not null
+        );
+        create table if not exists parser_profile_versions (
+          parser_profile_version_id text primary key,
+          parser_profile_id text not null,
+          version_no integer not null,
+          field_mapping_json text not null,
+          normalization_rules_json text not null,
+          validation_status text not null,
+          status text not null,
+          change_summary text not null,
+          created_at text not null,
+          effective_from text
         );
         create table if not exists alert_normalization_maps (
           map_id text primary key,
@@ -669,6 +729,15 @@ def create_schema(conn: sqlite3.Connection) -> None:
           reason text not null,
           detail_json text not null
         );
+        create table if not exists report_drafts (
+          report_id text primary key,
+          case_id text not null,
+          title text not null,
+          content_md text not null,
+          status text not null,
+          created_at text not null,
+          updated_at text not null
+        );
         create table if not exists spike_round_runs (
           round_id text primary key,
           applied_at text not null
@@ -749,6 +818,36 @@ def create_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        create index if not exists idx_data_sources_status_mode
+        on data_sources(status, source_mode, updated_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_source_runs_source_started
+        on source_runs(source_id, started_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_source_runs_status_started
+        on source_runs(status, started_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_parser_profiles_status
+        on parser_profiles(status, updated_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_parser_profile_versions_profile_version
+        on parser_profile_versions(parser_profile_id, version_no desc)
+        """
+    )
+    conn.execute(
+        """
         create index if not exists idx_unmapped_alert_events_resolved_seen
         on unmapped_alert_events(resolved, last_seen_at desc)
         """
@@ -757,6 +856,24 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """
         create index if not exists idx_agent_outputs_run_time
         on agent_outputs(run_id, occurred_at desc)
+        """
+    )
+    conn.execute(
+        """
+        create unique index if not exists idx_asset_identities_unique
+        on asset_identities(asset_id, identity_type, identity_value)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_asset_identities_asset
+        on asset_identities(asset_id, is_primary desc)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_report_drafts_case_updated
+        on report_drafts(case_id, updated_at desc)
         """
     )
     _ensure_alerts_shape(conn)

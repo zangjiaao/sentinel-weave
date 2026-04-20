@@ -106,7 +106,7 @@ def test_import_apply_and_retry_problem_rows(tmp_path) -> None:
     )
 
     first_apply = apply_import_job_mapping(db_path=db_path, job_id=job_id, limit=100)
-    assert first_apply["job"]["status"] == "partial"
+    assert first_apply["job"]["status"] == "needs_review"
     assert first_apply["job"]["mapped_rows"] == 1
     assert first_apply["job"]["unmapped_rows"] == 1
 

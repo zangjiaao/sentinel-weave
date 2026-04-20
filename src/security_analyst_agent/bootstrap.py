@@ -42,6 +42,16 @@ def _reset_tables(conn: sqlite3.Connection) -> None:
         delete from verify_spike_round_runs;
         delete from spike_round_runs;
         delete from intel_cache;
+        delete from report_drafts;
+        delete from source_runs;
+        delete from data_sources;
+        delete from parser_profile_versions;
+        delete from parser_profiles;
+        delete from asset_identities;
+        delete from import_jobs;
+        delete from raw_alert_events;
+        delete from unmapped_alert_events;
+        delete from alert_normalization_maps;
         delete from evidence;
         delete from timeline_events;
         delete from alerts;
