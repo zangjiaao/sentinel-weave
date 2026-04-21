@@ -142,3 +142,97 @@ body {
   color: #4b5563;
   font-size: 14px;
 }
+
+.alerts-layout {
+  display: grid;
+  gap: 12px;
+}
+
+.alerts-top {
+  display: grid;
+  gap: 10px;
+}
+
+.alerts-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.alerts-tab {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  color: #374151;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.alerts-tab.active {
+  border-color: #3b82f6;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.alerts-form {
+  display: grid;
+  gap: 10px;
+}
+
+.alerts-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.alerts-form-grid input {
+  width: 100%;
+}
+
+.alerts-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.alerts-actions button {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 7px 12px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.alerts-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.alerts-bottom {
+  display: grid;
+  gap: 10px;
+}
+
+.alerts-error {
+  color: #b91c1c;
+}
+
+.alerts-success {
+  color: #166534;
+}
+
+.alerts-pre {
+  margin: 8px 0 0;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  overflow-x: auto;
+}
+
+@media (max-width: 900px) {
+  .alerts-form-grid {
+    grid-template-columns: 1fr;
+  }
+}

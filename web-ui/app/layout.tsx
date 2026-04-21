@@ -7,7 +7,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <main className="container">
           <nav className="nav">
-            <Link href="/intake">接入中心</Link>
+            <Link href="/alerts">告警</Link>
             <Link href="/cases">案件</Link>
             <Link href="/assets">资产</Link>
             <Link href="/notifications">通知</Link>
@@ -19,4 +19,3 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
-
