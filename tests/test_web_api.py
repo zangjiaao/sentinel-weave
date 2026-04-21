@@ -159,6 +159,29 @@ def test_web_api_intake_routes(tmp_path) -> None:
     assert upload_list_resp.status_code == 200
     assert upload_list_resp.json()["items"][0]["job_id"] == imported["job"]["job_id"]
 
+    upload_file_resp = client.post(
+        "/api/intake/uploads/import",
+        data={
+            "vendor": "demo_vendor",
+            "product": "demo_product",
+            "log_type": "demo_log",
+            "occurred_at_column": "time",
+            "apply_after_import": "false",
+        },
+        files={
+            "file": (
+                "uploaded.csv",
+                "time,src,signal\n2026-04-20 11:00:00,198.51.100.50,scan\n",
+                "text/csv",
+            )
+        },
+    )
+    assert upload_file_resp.status_code == 200
+    upload_file_json = upload_file_resp.json()
+    assert upload_file_json["import_result"]["job"]["total_rows"] == 1
+    assert upload_file_json["map_bootstrap"]["map_id"].startswith("map_auto_")
+    assert upload_file_json["apply_result"] is None
+
     upload_get_resp = client.get(f"/api/intake/uploads/{imported['job']['job_id']}")
     assert upload_get_resp.status_code == 200
     assert upload_get_resp.json()["job"]["job_id"] == imported["job"]["job_id"]
@@ -170,6 +193,22 @@ def test_web_api_intake_routes(tmp_path) -> None:
     assert apply_resp.status_code == 200
     assert apply_resp.json()["trigger_result"]["status"] == "dry_run_success"
     assert apply_resp.json()["trigger_result"]["processed_events"] == 1
+    assert "asset_resolved_count" in apply_resp.json()["apply_result"]
+    assert "asset_auto_created_count" in apply_resp.json()["apply_result"]
+    assert "asset_unresolved_count" in apply_resp.json()["apply_result"]
+
+    trigger_analysis_resp = client.post(
+        f"/api/intake/uploads/{imported['job']['job_id']}/trigger-analysis",
+        json={"dry_run": True},
+    )
+    assert trigger_analysis_resp.status_code == 200
+    assert "status" in trigger_analysis_resp.json()
+
+    analysis_resp = client.get(f"/api/intake/uploads/{imported['job']['job_id']}/analysis")
+    assert analysis_resp.status_code == 200
+    assert "run" in analysis_resp.json()
+    assert "cost" in analysis_resp.json()
+    assert "steps" in analysis_resp.json()
 
     parser_list_resp = client.get("/api/intake/parsers")
     assert parser_list_resp.status_code == 200
@@ -234,3 +273,30 @@ def test_web_api_case_asset_notification_report_routes(tmp_path) -> None:
     report_get_resp = client.get(f"/api/reports/{report_id}")
     assert report_get_resp.status_code == 200
     assert report_get_resp.json()["report"]["report_id"] == report_id
+
+
+def test_web_api_upload_import_auto_map_avoids_waiting_mapping(tmp_path) -> None:
+    db_path = tmp_path / "web-api-upload-auto-map.db"
+    bootstrap_spike_database(db_path)
+    client = TestClient(create_app(db_path=db_path))
+
+    upload_resp = client.post(
+        "/api/intake/uploads/import",
+        data={
+            "apply_after_import": "true",
+            "trigger_after_apply": "false",
+            "limit": "200",
+        },
+        files={
+            "file": (
+                "attacklist-mini.csv",
+                "攻击时间,攻击IP,威胁情报,蜜罐名称\n2026-04-20 11:00:00,198.51.100.51,扫描,kibana\n2026-04-20 11:01:00,198.51.100.52,漏洞利用,nginx\n",
+                "text/csv",
+            )
+        },
+    )
+    assert upload_resp.status_code == 200
+    payload = upload_resp.json()
+    assert payload["map_bootstrap"]["map_id"].startswith("map_auto_")
+    assert payload["apply_result"]["job"]["status"] in {"completed", "processing", "needs_review"}
+    assert payload["apply_result"]["job"]["pending_rows"] == 0

@@ -1,6 +1,7 @@
 import csv
 from pathlib import Path
 
+import security_analyst_agent.services.web_backend as web_backend_module
 from security_analyst_agent.bootstrap import bootstrap_spike_database, materialize_spike_runtime_demo
 from security_analyst_agent.db import connect_db
 from security_analyst_agent.services.web_backend import (
@@ -98,6 +99,9 @@ def test_web_backend_import_preview_apply_cycle(tmp_path) -> None:
     applied = apply_job(db_path=db_path, job_id=job_id, limit=50)
     assert applied["job"]["mapped_rows"] == 1
     assert applied["job"]["unmapped_rows"] == 1
+    assert "asset_resolved_count" in applied["apply_result"]
+    assert "asset_auto_created_count" in applied["apply_result"]
+    assert "asset_unresolved_count" in applied["apply_result"]
 
     problems = list_job_problem_rows(db_path=db_path, job_id=job_id, limit=10)
     assert len(problems["items"]) == 1
@@ -109,6 +113,21 @@ def test_web_backend_trigger_patrol_openai_mode(tmp_path) -> None:
 
     conn = connect_db(db_path)
     try:
+        conn.execute(
+            """
+            insert into raw_alert_events (
+              raw_event_id, source, payload_json, ingested_at, map_status, normalized_alert_id
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "raw_web_trigger_001",
+                "import_job:web-trigger-job",
+                '{"row":{"signal":"demo"}}',
+                "2026-04-20T10:00:00+08:00",
+                "mapped",
+                "alt_day1_scan_01",
+            ),
+        )
         conn.execute(
             """
             insert into alert_ingest_events (event_id, alert_id, source, ingested_at, trigger_state)
@@ -173,6 +192,112 @@ def test_web_backend_apply_job_with_trigger_dry_run(tmp_path) -> None:
     assert result["apply_result"]["mapped"] == 1
     assert result["trigger_result"]["status"] == "dry_run_success"
     assert result["trigger_result"]["processed_events"] == 1
+
+
+def test_web_backend_job_analysis_status_returns_run_costs(tmp_path) -> None:
+    db_path = tmp_path / "web-job-analysis.db"
+    csv_path = tmp_path / "alerts.csv"
+    _write_csv(
+        csv_path,
+        [{"event_time": "2026-04-20 09:00:00", "src_ip": "198.51.100.210", "signal": "x"}],
+    )
+
+    imported = import_csv_job(
+        db_path=db_path,
+        csv_path=csv_path,
+        occurred_at_column="event_time",
+        job_id="job_analysis_001",
+    )
+    upsert_mapping_rules(
+        db_path=db_path,
+        maps=[
+            {
+                "map_id": "map_job_analysis_001",
+                "priority": 100,
+                "enabled": True,
+                "match": {"source_prefix": "import_job:", "payload.row.signal": "x"},
+                "mapping": {
+                    "field_map": {
+                        "occurred_at": "payload.row.event_time",
+                        "src_ip": "payload.row.src_ip",
+                    },
+                    "defaults": {
+                        "title": "job analysis mapped",
+                        "status": "new",
+                        "severity": "high",
+                        "attack_stage": "exploit",
+                    },
+                },
+            }
+        ],
+    )
+    apply_result = apply_job(
+        db_path=db_path,
+        job_id=str(imported["job"]["job_id"]),
+        limit=50,
+    )
+    assert apply_result["apply_result"]["mapped"] == 1
+    alert_id = str(apply_result["apply_result"]["created_alert_ids"][0])
+    run_id = "run_job_analysis_001"
+
+    conn = connect_db(db_path)
+    try:
+        conn.execute(
+            """
+            update alert_ingest_events
+            set trigger_state = 'processed',
+                processed_run_id = ?,
+                processed_at = '2026-04-20T09:10:00+00:00'
+            where alert_id = ?
+            """,
+            (run_id, alert_id),
+        )
+        conn.execute(
+            """
+            insert into patrol_runs (run_id, trigger_source, status, summary, started_at, finished_at, analysis_cutoff_at)
+            values (?, 'ingest_event', 'success', 'ok', '2026-04-20T09:09:00+00:00', '2026-04-20T09:10:00+00:00', '2026-04-20T09:10:00+00:00')
+            """,
+            (run_id,),
+        )
+        conn.execute(
+            """
+            insert into patrol_run_costs (
+              run_id, trigger_source, trigger_mode, model, status, started_at, finished_at,
+              duration_ms, turns, tool_calls, usage_input_tokens, usage_output_tokens,
+              usage_cached_input_tokens, usage_total_tokens, recorded_at
+            ) values (?, 'ingest_event', 'openai', 'demo-model', 'success',
+              '2026-04-20T09:09:00+00:00', '2026-04-20T09:10:00+00:00',
+              60000, 4, 3, 1200, 300, 100, 1600, '2026-04-20T09:10:01+00:00')
+            """,
+            (run_id,),
+        )
+        conn.execute(
+            """
+            insert into agent_tool_calls (
+              call_id, occurred_at, run_id, source, tool_name, payload_json,
+              result_ok, result_summary, result_json, latency_ms
+            ) values (?, ?, ?, 'openai', 'alert.fetch', '{}', 1, 'ok', '{}', 80)
+            """,
+            ("call_job_analysis_001", "2026-04-20T09:09:10+00:00", run_id),
+        )
+        conn.execute(
+            """
+            insert into agent_tool_calls (
+              call_id, occurred_at, run_id, source, tool_name, payload_json,
+              result_ok, result_summary, result_json, latency_ms
+            ) values (?, ?, ?, 'openai', 'case.upsert-batch', '{}', 1, 'ok', '{}', 90)
+            """,
+            ("call_job_analysis_002", "2026-04-20T09:09:30+00:00", run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = web_backend_module.get_job_analysis_status(db_path=db_path, job_id="job_analysis_001")
+    assert result["job_id"] == "job_analysis_001"
+    assert result["run"]["run_id"] == run_id
+    assert result["cost"]["usage_total_tokens"] == 1600
+    assert result["steps"][0]["tool_name"] in {"alert.fetch", "case.upsert-batch"}
 
 
 def test_web_backend_read_models_for_mvp_modules(tmp_path) -> None:

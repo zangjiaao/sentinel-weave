@@ -41,6 +41,168 @@ def _json_load(payload: str | None, default: Any) -> Any:
         return default
 
 
+def _to_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _pick_first_existing_column(field_names: list[str], candidates: list[str]) -> str | None:
+    if not field_names:
+        return None
+    normalized_map = {str(item).strip().lower(): str(item) for item in field_names if str(item).strip()}
+    for candidate in candidates:
+        key = str(candidate).strip().lower()
+        matched = normalized_map.get(key)
+        if matched:
+            return matched
+    return None
+
+
+def ensure_default_mapping_for_job(*, db_path: Path, job_id: str) -> dict[str, Any]:
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        job_row = conn.execute(
+            """
+            select source, notes_json
+            from import_jobs
+            where job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if job_row is None:
+            raise ValueError(f"import job not found: {job_id}")
+
+        source = str(job_row["source"])
+        notes = _json_load(job_row["notes_json"], {})
+        field_names = notes.get("field_names") if isinstance(notes, dict) else None
+        parsed_field_names = [str(item) for item in field_names] if isinstance(field_names, list) else []
+
+        if not parsed_field_names:
+            sample_row = conn.execute(
+                """
+                select payload_json
+                from raw_alert_events
+                where source = ?
+                order by ingested_at asc, raw_event_id asc
+                limit 1
+                """,
+                (source,),
+            ).fetchone()
+            if sample_row is not None:
+                payload = _json_load(sample_row["payload_json"], {})
+                row_obj = payload.get("row") if isinstance(payload, dict) else None
+                if isinstance(row_obj, dict):
+                    parsed_field_names = [str(key) for key in row_obj.keys()]
+
+        occurred_at_column = _pick_first_existing_column(
+            parsed_field_names,
+            ["occurred_at", "event_time", "timestamp", "攻击时间", "时间", "发生时间"],
+        )
+        src_ip_column = _pick_first_existing_column(
+            parsed_field_names,
+            ["src_ip", "src", "source_ip", "攻击IP", "源IP", "remote_addr"],
+        )
+        dst_ip_column = _pick_first_existing_column(
+            parsed_field_names,
+            ["dst_ip", "dst", "destination_ip", "目标IP", "目的IP", "target_ip", "host"],
+        )
+        title_column = _pick_first_existing_column(
+            parsed_field_names,
+            ["title", "alert_title", "告警标题", "攻击类型", "威胁情报", "蜜罐名称"],
+        )
+        severity_column = _pick_first_existing_column(
+            parsed_field_names,
+            ["severity", "risk_level", "level", "风险等级", "告警等级", "级别", "威胁情报"],
+        )
+        attack_stage_column = _pick_first_existing_column(
+            parsed_field_names,
+            ["attack_stage", "stage", "攻击阶段", "威胁情报"],
+        )
+
+        field_map: dict[str, str] = {}
+        if occurred_at_column:
+            field_map["occurred_at"] = f"payload.row.{occurred_at_column}"
+        if src_ip_column:
+            field_map["src_ip"] = f"payload.row.{src_ip_column}"
+        if dst_ip_column:
+            field_map["dst_ip"] = f"payload.row.{dst_ip_column}"
+        if title_column:
+            field_map["title"] = f"payload.row.{title_column}"
+        if severity_column:
+            field_map["severity"] = f"payload.row.{severity_column}"
+        if attack_stage_column:
+            field_map["attack_stage"] = f"payload.row.{attack_stage_column}"
+
+        auto_map_id = f"map_auto_{job_id}"
+        mapping_payload: dict[str, Any] = {
+            "field_map": field_map,
+            "defaults": {
+                "title": "imported csv alert",
+                "status": "new",
+                "severity": "medium",
+                "attack_stage": "recon",
+            },
+            "value_maps": {
+                "severity": {
+                    "严重": "critical",
+                    "高": "high",
+                    "中": "medium",
+                    "低": "low",
+                    "漏洞利用": "high",
+                    "webshell": "critical",
+                    "命令执行": "critical",
+                    "cve": "high",
+                    "critical": "critical",
+                    "high": "high",
+                    "medium": "medium",
+                    "low": "low",
+                },
+                "attack_stage": {
+                    "扫描": "recon",
+                    "探测": "recon",
+                    "漏洞利用": "exploit",
+                    "webshell": "persistence",
+                    "cve": "exploit",
+                    "横向移动": "lateral_prep",
+                    "命令执行": "command_execution",
+                    "持久化": "persistence",
+                    "recon": "recon",
+                    "exploit": "exploit",
+                    "persistence": "persistence",
+                    "command_execution": "command_execution",
+                    "lateral_prep": "lateral_prep",
+                },
+            },
+            "confidence": 0.55,
+            "reason": "auto_generated_upload_map",
+            "title_template": "{蜜罐名称} {威胁情报}",
+        }
+    finally:
+        conn.close()
+
+    upsert_alert_normalization_maps(
+        db_path=db_path,
+        maps=[
+            {
+                "map_id": auto_map_id,
+                "priority": 30,
+                "enabled": True,
+                "match": {"source": source},
+                "mapping": mapping_payload,
+            }
+        ],
+    )
+    return {
+            "map_id": auto_map_id,
+            "source": source,
+            "field_map_keys": sorted(field_map.keys()),
+            "field_names": parsed_field_names,
+    }
+
+
 def _is_high_signal_severity(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"high", "critical"}
 
@@ -357,13 +519,205 @@ def list_job_problem_rows(*, db_path: Path, job_id: str, limit: int = 100) -> di
     return list_import_job_problem_rows(db_path=db_path, job_id=job_id, limit=limit)
 
 
+def _job_source_key(job_id: str) -> str:
+    normalized_job_id = _to_str(job_id)
+    if normalized_job_id is None:
+        raise ValueError("job_id is required")
+    return f"import_job:{normalized_job_id}"
+
+
+def _resolve_job_pending_event_ids(conn: Any, *, job_id: str) -> list[str]:
+    source = _job_source_key(job_id)
+    rows = conn.execute(
+        """
+        select distinct e.event_id
+        from alert_ingest_events e
+        join raw_alert_events r on r.normalized_alert_id = e.alert_id
+        where r.source = ?
+          and e.trigger_state in ('pending', 'failed')
+        order by e.ingested_at asc, e.rowid asc
+        """,
+        (source,),
+    ).fetchall()
+    return [str(row["event_id"]) for row in rows]
+
+
 def trigger_patrol(*, db_path: Path, job_id: str, dry_run: bool = False) -> dict[str, Any]:
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        event_ids = _resolve_job_pending_event_ids(conn, job_id=job_id)
+    finally:
+        conn.close()
     return trigger_patrol_from_ingest(
         db_path=db_path,
         job_id=job_id,
         dry_run=dry_run,
         trigger_mode="openai",
+        event_ids=event_ids,
     )
+
+
+def get_job_analysis_status(*, db_path: Path, job_id: str) -> dict[str, Any]:
+    source = _job_source_key(job_id)
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        _ = conn.execute(
+            """
+            select job_id
+            from import_jobs
+            where job_id = ?
+            limit 1
+            """,
+            (job_id,),
+        ).fetchone()
+        if _ is None:
+            raise ValueError(f"import job not found: {job_id}")
+
+        state_rows = conn.execute(
+            """
+            select e.trigger_state, count(*) as event_count
+            from alert_ingest_events e
+            join raw_alert_events r on r.normalized_alert_id = e.alert_id
+            where r.source = ?
+            group by e.trigger_state
+            """,
+            (source,),
+        ).fetchall()
+        event_state_counts = {str(row["trigger_state"]): int(row["event_count"]) for row in state_rows}
+
+        run_rows = conn.execute(
+            """
+            select distinct e.processed_run_id, max(e.processed_at) as latest_processed_at
+            from alert_ingest_events e
+            join raw_alert_events r on r.normalized_alert_id = e.alert_id
+            where r.source = ?
+              and e.processed_run_id is not null
+            group by e.processed_run_id
+            order by latest_processed_at desc, e.processed_run_id desc
+            """,
+            (source,),
+        ).fetchall()
+        run_ids = [str(row["processed_run_id"]) for row in run_rows if row["processed_run_id"]]
+
+        run: dict[str, Any] | None = None
+        cost: dict[str, Any] | None = None
+        steps: list[dict[str, Any]] = []
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            run_row = conn.execute(
+                f"""
+                select run_id, trigger_source, status, summary, started_at, finished_at
+                from patrol_runs
+                where run_id in ({placeholders})
+                order by started_at desc, run_id desc
+                limit 1
+                """,
+                tuple(run_ids),
+            ).fetchone()
+            if run_row is not None:
+                active_run_id = str(run_row["run_id"])
+                run = dict(run_row)
+                cost_row = conn.execute(
+                    """
+                    select
+                      run_id,
+                      trigger_source,
+                      trigger_mode,
+                      model,
+                      status,
+                      started_at,
+                      finished_at,
+                      duration_ms,
+                      turns,
+                      tool_calls,
+                      usage_input_tokens,
+                      usage_output_tokens,
+                      usage_cached_input_tokens,
+                      usage_total_tokens,
+                      recorded_at
+                    from patrol_run_costs
+                    where run_id = ?
+                    limit 1
+                    """,
+                    (active_run_id,),
+                ).fetchone()
+                if cost_row is not None:
+                    cost = dict(cost_row)
+                step_rows = conn.execute(
+                    """
+                    select tool_name, count(*) as call_count
+                    from agent_tool_calls
+                    where run_id = ?
+                    group by tool_name
+                    order by call_count desc, tool_name asc
+                    """,
+                    (active_run_id,),
+                ).fetchall()
+                steps = [
+                    {
+                        "tool_name": str(row["tool_name"]),
+                        "call_count": int(row["call_count"]),
+                    }
+                    for row in step_rows
+                ]
+
+        return {
+            "job_id": job_id,
+            "source": source,
+            "event_state_counts": event_state_counts,
+            "run": run,
+            "cost": cost,
+            "steps": steps,
+        }
+    finally:
+        conn.close()
+
+
+def apply_job_until_stable(
+    *,
+    db_path: Path,
+    job_id: str,
+    limit: int = 500,
+    include_unmapped: bool = True,
+    max_passes: int = 20,
+) -> dict[str, Any]:
+    last_result: dict[str, Any] = apply_job(
+        db_path=db_path,
+        job_id=job_id,
+        limit=limit,
+        include_unmapped=include_unmapped,
+    )
+    last_signature = (
+        int(last_result["job"]["mapped_rows"]),
+        int(last_result["job"]["unmapped_rows"]),
+        int(last_result["job"]["pending_rows"]),
+        int(last_result["job"]["error_rows"]),
+    )
+    if int(last_result["job"]["pending_rows"]) == 0:
+        return last_result
+
+    for _ in range(max(1, max_passes) - 1):
+        current = apply_job(
+            db_path=db_path,
+            job_id=job_id,
+            limit=limit,
+            include_unmapped=include_unmapped,
+        )
+        signature = (
+            int(current["job"]["mapped_rows"]),
+            int(current["job"]["unmapped_rows"]),
+            int(current["job"]["pending_rows"]),
+            int(current["job"]["error_rows"]),
+        )
+        last_result = current
+        if int(current["job"]["pending_rows"]) == 0:
+            break
+        if signature == last_signature:
+            break
+        last_signature = signature
+    return last_result
 
 
 def latest_patrol_summary(*, db_path: Path) -> dict[str, Any]:

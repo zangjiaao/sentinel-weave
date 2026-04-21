@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import shutil
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from security_analyst_agent.config import DEFAULT_DB_PATH
@@ -22,6 +24,10 @@ class ApplyMapRequest(BaseModel):
     raw_event_ids: list[str] | None = None
     trigger_after_apply: bool = True
     trigger_dry_run: bool = False
+
+
+class TriggerAnalysisRequest(BaseModel):
+    dry_run: bool = False
 
 
 class NotificationPreviewRequest(BaseModel):
@@ -105,6 +111,78 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise _translate_service_error(exc) from exc
 
+    @app.post("/api/intake/uploads/import")
+    async def import_intake_upload(
+        file: UploadFile = File(...),
+        vendor: str | None = Form(None),
+        product: str | None = Form(None),
+        log_type: str | None = Form(None),
+        occurred_at_column: str | None = Form(None),
+        rule_id_column: str | None = Form(None),
+        job_id: str | None = Form(None),
+        apply_after_import: bool = Form(True),
+        trigger_after_apply: bool = Form(True),
+        trigger_dry_run: bool = Form(False),
+        limit: int = Form(500),
+    ) -> dict:
+        if not (file.filename or "").strip():
+            raise HTTPException(status_code=400, detail="file is required")
+
+        suffix = Path(file.filename or "upload.csv").suffix or ".csv"
+        temp_path: Path | None = None
+        try:
+            with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+                temp_path = Path(handle.name)
+                shutil.copyfileobj(file.file, handle)
+
+            import_result = web_backend.import_csv_job(
+                db_path=_db_path(),
+                csv_path=temp_path,
+                file_name=file.filename,
+                vendor=vendor,
+                product=product,
+                log_type=log_type,
+                occurred_at_column=occurred_at_column,
+                rule_id_column=rule_id_column,
+                job_id=job_id,
+            )
+            map_bootstrap: dict | None = web_backend.ensure_default_mapping_for_job(
+                db_path=_db_path(),
+                job_id=str(import_result["job"]["job_id"]),
+            )
+            apply_result: dict | None = None
+            if apply_after_import:
+                apply_result = web_backend.apply_job_until_stable(
+                    db_path=_db_path(),
+                    job_id=str(import_result["job"]["job_id"]),
+                    limit=max(1, int(limit)),
+                    include_unmapped=True,
+                )
+                trigger_result: dict | None = None
+                if trigger_after_apply:
+                    trigger_result = web_backend.trigger_patrol(
+                        db_path=_db_path(),
+                        job_id=str(import_result["job"]["job_id"]),
+                        dry_run=trigger_dry_run,
+                    )
+                    apply_result = {
+                        **apply_result,
+                        "trigger_result": trigger_result,
+                    }
+            else:
+                apply_result = None
+            return {
+                "import_result": import_result,
+                "map_bootstrap": map_bootstrap,
+                "apply_result": apply_result,
+            }
+        except ValueError as exc:
+            raise _translate_service_error(exc) from exc
+        finally:
+            await file.close()
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
     @app.post("/api/intake/uploads/{job_id}/preview-map")
     def preview_intake_upload_mapping(job_id: str, body: PreviewMapRequest) -> dict:
         try:
@@ -129,6 +207,27 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
                 raw_event_ids=body.raw_event_ids,
                 trigger_after_apply=body.trigger_after_apply,
                 trigger_dry_run=body.trigger_dry_run,
+            )
+        except ValueError as exc:
+            raise _translate_service_error(exc) from exc
+
+    @app.post("/api/intake/uploads/{job_id}/trigger-analysis")
+    def trigger_intake_upload_analysis(job_id: str, body: TriggerAnalysisRequest) -> dict:
+        try:
+            return web_backend.trigger_patrol(
+                db_path=_db_path(),
+                job_id=job_id,
+                dry_run=body.dry_run,
+            )
+        except ValueError as exc:
+            raise _translate_service_error(exc) from exc
+
+    @app.get("/api/intake/uploads/{job_id}/analysis")
+    def get_intake_upload_analysis(job_id: str) -> dict:
+        try:
+            return web_backend.get_job_analysis_status(
+                db_path=_db_path(),
+                job_id=job_id,
             )
         except ValueError as exc:
             raise _translate_service_error(exc) from exc
