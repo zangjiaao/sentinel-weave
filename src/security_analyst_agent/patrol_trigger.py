@@ -345,6 +345,17 @@ def _is_no_backend_tool_failure(detail: str) -> bool:
     return "no backend tool calls" in detail.lower()
 
 
+def _is_resume_session_incompatible_failure(detail: str) -> bool:
+    normalized = detail.lower()
+    if "model not found" in normalized:
+        return True
+    if "not_found_error" in normalized:
+        return True
+    if "previous_response_id" in normalized and ("invalid" in normalized or "not found" in normalized):
+        return True
+    return False
+
+
 def _format_openai_usage_suffix(
     *,
     turns: int,
@@ -358,6 +369,34 @@ def _format_openai_usage_suffix(
         f"{turns}, tool_calls={tool_calls}, usage_in={usage_input_tokens}, "
         f"usage_out={usage_output_tokens}, usage_cached_in={usage_cached_input_tokens}"
     )
+
+
+def _mark_processed_alerts_open(
+    conn: sqlite3.Connection,
+    *,
+    event_ids: list[str],
+    chunk_size: int = 500,
+) -> int:
+    updated_total = 0
+    if not event_ids:
+        return updated_total
+    for start in range(0, len(event_ids), max(1, chunk_size)):
+        chunk = event_ids[start : start + max(1, chunk_size)]
+        placeholders = ", ".join("?" for _ in chunk)
+        updated_total += conn.execute(
+            f"""
+            update alerts
+            set status = 'open'
+            where status = 'new'
+              and alert_id in (
+                select distinct alert_ingest_events.alert_id
+                from alert_ingest_events
+                where alert_ingest_events.event_id in ({placeholders})
+              )
+            """,
+            tuple(chunk),
+        ).rowcount
+    return updated_total
 
 
 def _derive_openai_tool_budget(event_count: int) -> dict[str, int | bool]:
@@ -413,11 +452,29 @@ def trigger_patrol_from_ingest(
     write_memory_on_finish: bool | None = None,
     openai_model: str = DEFAULT_OPENAI_PATROL_MODEL,
     openai_client_factory: OpenAIClientFactory | None = None,
+    event_ids: list[str] | None = None,
 ) -> dict[str, object]:
     conn = connect_db(db_path)
     create_schema(conn)
     runner = command_runner or _default_runner
-    event_ids = _load_pending_event_ids(conn)
+    pending_event_ids = _load_pending_event_ids(conn)
+    if isinstance(event_ids, list):
+        pending_lookup = set(pending_event_ids)
+        selected_event_ids: list[str] = []
+        seen_event_ids: set[str] = set()
+        for raw_event_id in event_ids:
+            normalized_event_id = str(raw_event_id).strip()
+            if not normalized_event_id:
+                continue
+            if normalized_event_id not in pending_lookup:
+                continue
+            if normalized_event_id in seen_event_ids:
+                continue
+            seen_event_ids.add(normalized_event_id)
+            selected_event_ids.append(normalized_event_id)
+        event_ids = selected_event_ids
+    else:
+        event_ids = pending_event_ids
     if not event_ids:
         conn.close()
         return {
@@ -650,7 +707,30 @@ def trigger_patrol_from_ingest(
                     objective_mode=DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
                 )
                 retried_fresh_after_no_tool = False
+                retried_fresh_after_incompatible_session = False
                 if (
+                    openai_result.status != "success"
+                    and should_reuse_response
+                    and _is_resume_session_incompatible_failure(openai_result.detail)
+                ):
+                    retried_fresh_after_incompatible_session = True
+                    openai_result = run_openai_patrol(
+                        conn,
+                        model=openai_model,
+                        instructions=_build_openai_patrol_instructions(patrol_prompt_path),
+                        query=bootstrap_query,
+                        previous_response_id=None,
+                        max_turns=patrol_max_turns,
+                        max_tool_calls=int(budget["max_tool_calls"]),
+                        max_read_tool_calls=int(budget["max_read_tool_calls"]),
+                        max_write_tool_calls=int(budget["max_write_tool_calls"]),
+                        enforce_read_phase_gate=bool(budget["enforce_read_phase_gate"]),
+                        first_fetch_payload_override=previous_fetch_resume_payload,
+                        client_factory=openai_client_factory,
+                        tool_profile=DEFAULT_OPENAI_PATROL_TOOL_PROFILE,
+                        objective_mode=DEFAULT_OPENAI_PATROL_OBJECTIVE_MODE,
+                    )
+                elif (
                     openai_result.status != "success"
                     and DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL
                     and _is_no_backend_tool_failure(openai_result.detail)
@@ -693,6 +773,8 @@ def trigger_patrol_from_ingest(
                     detail_parts.append(f"session_rollover={'+'.join(rollover_reasons)}")
                 if retried_fresh_after_no_tool:
                     detail_parts.append("retried_fresh_after_no_tool=1")
+                if retried_fresh_after_incompatible_session:
+                    detail_parts.append("retried_fresh_after_incompatible_session=1")
                 detail_parts.append(
                     "tool_budget="
                     f"total:{budget['max_tool_calls']}/read:{budget['max_read_tool_calls']}/"
@@ -705,7 +787,11 @@ def trigger_patrol_from_ingest(
                     detail_parts.append("fetch_backlog=has_more")
                 detail = "; ".join(detail_parts)
                 if status == "success":
-                    if should_reuse_response and not retried_fresh_after_no_tool:
+                    if (
+                        should_reuse_response
+                        and not retried_fresh_after_no_tool
+                        and not retried_fresh_after_incompatible_session
+                    ):
                         next_run_count = previous_run_count + 1
                         next_cumulative_input_tokens = previous_input_tokens + openai_result.usage_input_tokens
                         next_cumulative_output_tokens = previous_output_tokens + openai_result.usage_output_tokens
@@ -738,6 +824,8 @@ def trigger_patrol_from_ingest(
                         next_state["last_rollover_reason"] = "+".join(rollover_reasons)
                     if retried_fresh_after_no_tool:
                         next_state["last_recovery"] = "fresh_retry_after_no_tool"
+                    if retried_fresh_after_incompatible_session:
+                        next_state["last_recovery"] = "fresh_retry_after_incompatible_session"
                     if openai_result.fetch_resume_payload:
                         next_state["fetch_resume_payload"] = openai_result.fetch_resume_payload
                         next_state["fetch_backlog_has_more"] = True
@@ -748,7 +836,10 @@ def trigger_patrol_from_ingest(
                         PATROL_OPENAI_SESSION_STATE_KEY,
                         next_state,
                     )
-                elif has_existing_response and _is_no_backend_tool_failure(openai_result.detail):
+                elif has_existing_response and (
+                    _is_no_backend_tool_failure(openai_result.detail)
+                    or _is_resume_session_incompatible_failure(openai_result.detail)
+                ):
                     _upsert_patrol_state_value(
                         conn,
                         PATROL_OPENAI_SESSION_STATE_KEY,
@@ -794,6 +885,11 @@ def trigger_patrol_from_ingest(
 
     finished_at = _now_iso()
     final_event_state = "processed" if status in {"success", "dry_run_success"} else "failed"
+    status_opened_count = 0
+    if status == "success":
+        status_opened_count = _mark_processed_alerts_open(conn, event_ids=event_ids)
+        if status_opened_count > 0:
+            detail = f"{detail}; opened_alerts={status_opened_count}"
     conn.execute(
         f"""
         update alert_ingest_events

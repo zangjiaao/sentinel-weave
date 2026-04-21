@@ -693,6 +693,7 @@ def test_trigger_patrol_openai_mode_retries_fresh_when_resume_returns_no_tool_ca
     conn.close()
 
     monkeypatch.setattr("security_analyst_agent.patrol_trigger.DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL", True)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
 
     fake_client = _FakeOpenAIClient(
         rounds=[
@@ -743,12 +744,83 @@ def test_trigger_patrol_openai_mode_retries_fresh_when_resume_returns_no_tool_ca
     assert "retried_fresh_after_no_tool=1" in str(run_row["summary"])
 
 
+def test_trigger_patrol_openai_mode_retries_fresh_when_resume_session_incompatible(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_retry_compat_001")], source="siem")
+
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        insert into patrol_state (state_key, state_value_json, updated_at)
+        values (?, ?, ?)
+        """,
+        (
+            "openai_patrol_session",
+            json.dumps({"response_id": "resp_existing_model_old_001", "run_count": 4}, ensure_ascii=False),
+            "2026-04-14T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    call_history: list[dict] = []
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
+
+    def fake_run_openai_patrol(_conn, **kwargs):
+        call_history.append(dict(kwargs))
+        if len(call_history) == 1:
+            return OpenAIPatrolResult(
+                status="failed",
+                detail="Error code: 404 - {'error': {'message': 'Model not found gpt-5.4', 'type': 'not_found_error'}}",
+                response_id=None,
+            )
+        return OpenAIPatrolResult(
+            status="success",
+            detail="ok",
+            response_id="resp_openai_fresh_retry_ok_001",
+            turns=2,
+            tool_calls=1,
+            usage_input_tokens=120,
+            usage_output_tokens=20,
+        )
+
+    monkeypatch.setattr("security_analyst_agent.patrol_trigger.run_openai_patrol", fake_run_openai_patrol)
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: _FakeOpenAIClient([]),
+    )
+    assert result["status"] == "success"
+    assert len(call_history) == 2
+    assert call_history[0]["previous_response_id"] == "resp_existing_model_old_001"
+    assert call_history[1]["previous_response_id"] is None
+
+    conn = connect_db(db_path)
+    run_row = conn.execute(
+        "select summary from patrol_runs where run_id = ?",
+        (result["run_id"],),
+    ).fetchone()
+    state_row = conn.execute(
+        "select state_value_json from patrol_state where state_key = 'openai_patrol_session'"
+    ).fetchone()
+    conn.close()
+    assert run_row is not None
+    assert "retried_fresh_after_incompatible_session=1" in str(run_row["summary"])
+    assert state_row is not None
+    state_value = json.loads(state_row["state_value_json"])
+    assert state_value["response_id"] == "resp_openai_fresh_retry_ok_001"
+    assert state_value["last_recovery"] == "fresh_retry_after_incompatible_session"
+
+
 def test_trigger_patrol_openai_mode_retries_once_when_fresh_attempt_returns_no_tool_calls(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
     ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_fresh_retry_001")], source="siem")
 
     monkeypatch.setattr("security_analyst_agent.patrol_trigger.DEFAULT_OPENAI_PATROL_RETRY_FRESH_ON_NO_TOOL", True)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
 
     fake_client = _FakeOpenAIClient(
         rounds=[
@@ -866,9 +938,12 @@ def test_trigger_patrol_openai_mode_persists_fetch_cursor_but_resets_cross_run_o
     db_path = tmp_path / "spike.db"
     bootstrap_spike_database(db_path)
     monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
+    alert_one = _build_alert("alt_ingest_openai_cursor_001")
+    alert_two = _build_alert("alt_ingest_openai_cursor_002")
+    alert_two["src_ip"] = "198.51.100.89"
     ingest_alert_bundle(
         db_path,
-        [_build_alert("alt_ingest_openai_cursor_001"), _build_alert("alt_ingest_openai_cursor_002")],
+        [alert_one, alert_two],
         source="siem",
     )
 
@@ -952,6 +1027,116 @@ def test_trigger_patrol_openai_mode_persists_fetch_cursor_but_resets_cross_run_o
     conn.close()
     assert second_fetch_payload.get("cursor") != resume_cursor
     assert "cursor" not in second_fetch_payload
+
+
+def test_trigger_patrol_openai_mode_marks_processed_new_alerts_open(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
+    ingest_alert_bundle(db_path, [_build_alert("alt_ingest_openai_open_001")], source="siem")
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_openai_open_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_openai_open_001",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_openai_open_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+    )
+    assert result["status"] == "success"
+
+    conn = connect_db(db_path)
+    alert_status = conn.execute(
+        "select status from alerts where alert_id = ?",
+        ("alt_ingest_openai_open_001",),
+    ).fetchone()["status"]
+    run_summary = conn.execute(
+        "select summary from patrol_runs where run_id = ?",
+        (result["run_id"],),
+    ).fetchone()["summary"]
+    conn.close()
+
+    assert alert_status == "open"
+    assert "opened_alerts=1" in str(run_summary)
+
+
+def test_trigger_patrol_processes_only_selected_event_ids(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "spike.db"
+    bootstrap_spike_database(db_path)
+    monkeypatch.setattr(runner_module, "DEFAULT_OPENAI_WIRE_API", "responses")
+    ingest_alert_bundle(db_path, [_build_alert("alt_scope_001"), _build_alert("alt_scope_002")], source="siem")
+
+    conn = connect_db(db_path)
+    event_rows = conn.execute(
+        """
+        select event_id
+        from alert_ingest_events
+        order by ingested_at asc, rowid asc
+        """
+    ).fetchall()
+    conn.close()
+    selected_event_id = str(event_rows[0]["event_id"])
+
+    fake_client = _FakeOpenAIClient(
+        rounds=[
+            {
+                "id": "resp_scope_001",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "alert_fetch",
+                        "call_id": "call_scope_001",
+                        "arguments": '{"status":["new","open"],"limit":20}',
+                    }
+                ],
+            },
+            {
+                "id": "resp_scope_002",
+                "output_text": "[SILENT]",
+                "output": [{"type": "message", "role": "assistant"}],
+            },
+        ]
+    )
+
+    result = trigger_patrol_from_ingest(
+        db_path,
+        trigger_mode="openai",
+        openai_client_factory=lambda: fake_client,
+        event_ids=[selected_event_id],
+    )
+    assert result["status"] == "success"
+    assert result["processed_events"] == 1
+
+    conn = connect_db(db_path)
+    states = conn.execute(
+        """
+        select event_id, trigger_state
+        from alert_ingest_events
+        order by ingested_at asc, rowid asc
+        """
+    ).fetchall()
+    conn.close()
+    assert str(states[0]["event_id"]) == selected_event_id
+    assert states[0]["trigger_state"] == "processed"
+    assert states[1]["trigger_state"] == "pending"
 
 
 def test_trigger_patrol_openai_mode_applies_large_queue_tool_budget(tmp_path, monkeypatch) -> None:
