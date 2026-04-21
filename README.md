@@ -37,6 +37,8 @@ UV_CACHE_DIR=.uv-cache uv run uvicorn security_analyst_agent.web_api:app --reloa
 - `GET /api/cases`
 - `GET /api/assets`
 - `POST /api/intake/uploads/{job_id}/apply-map`
+- `POST /api/intake/uploads/{job_id}/trigger-analysis`
+- `GET /api/intake/uploads/{job_id}/analysis`
 - `POST /api/notifications/preview`
 - `POST /api/reports/preview`
 
@@ -47,6 +49,9 @@ cd web-ui
 npm install
 NEXT_PUBLIC_API_BASE=http://127.0.0.1:18080 npm run dev
 ```
+
+当前主入口：`/alerts`（`/intake` 会重定向）。
+核心流程：上传任务 → 抽样映射预览 → 确认入库 → 任务级触发分析 → 查看进展/成本。
 
 ## Example
 
