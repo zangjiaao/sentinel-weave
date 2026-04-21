@@ -1,6 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Field, FieldContent, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type UploadJob = {
   job_id: string;
@@ -41,7 +50,6 @@ type AnalysisStatus = {
     finished_at?: string | null;
   } | null;
   cost?: {
-    trigger_mode?: string;
     model?: string | null;
     turns?: number | null;
     tool_calls?: number | null;
@@ -61,15 +69,10 @@ type ApplyPayload = {
     processed?: number;
     mapped?: number;
     unmapped?: number;
-    created_alert_ids?: string[];
     asset_resolved_count?: number;
     asset_auto_created_count?: number;
     asset_unresolved_count?: number;
   };
-  trigger_result?: {
-    status?: string;
-    run_id?: string | null;
-  } | null;
 };
 
 function asJob(value: unknown): UploadJob | null {
@@ -101,8 +104,21 @@ function formatNumber(value: unknown): string {
   return Number.isFinite(num) ? num.toLocaleString("zh-CN") : "0";
 }
 
+function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+  const normalized = status.toLowerCase();
+  if (normalized === "success" || normalized === "completed") {
+    return "secondary";
+  }
+  if (normalized === "failed" || normalized === "error") {
+    return "destructive";
+  }
+  if (normalized === "running" || normalized === "processing") {
+    return "default";
+  }
+  return "outline";
+}
+
 export default function AlertsWorkbench() {
-  const [activeTab, setActiveTab] = useState<"file" | "integration">("file");
   const [loadingUpload, setLoadingUpload] = useState(false);
   const [loadingSample, setLoadingSample] = useState(false);
   const [loadingApply, setLoadingApply] = useState(false);
@@ -117,13 +133,9 @@ export default function AlertsWorkbench() {
   const [sampleGroups, setSampleGroups] = useState<SampleGroup[]>([]);
   const [applyPayload, setApplyPayload] = useState<ApplyPayload | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus | null>(null);
-  const [analyzeResult, setAnalyzeResult] = useState<Record<string, unknown> | null>(null);
 
   const currentJobId = currentJob?.job_id || null;
-
-  const canConfirmMapping = useMemo(() => {
-    return Boolean(currentJobId);
-  }, [currentJobId]);
+  const canRunActions = useMemo(() => Boolean(currentJobId), [currentJobId]);
 
   async function loadSample(jobId: string) {
     setLoadingSample(true);
@@ -137,8 +149,6 @@ export default function AlertsWorkbench() {
       }
       const groups = Array.isArray(payload?.groups) ? payload.groups : [];
       setSampleGroups(groups as SampleGroup[]);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "抽样失败");
     } finally {
       setLoadingSample(false);
     }
@@ -168,10 +178,8 @@ export default function AlertsWorkbench() {
     setError(null);
     setSuccess(null);
     setApplyPayload(null);
-    setAnalyzeResult(null);
-    setAnalysisStatus(null);
     setSampleGroups([]);
-    setMapBootstrap(null);
+    setAnalysisStatus(null);
     try {
       const response = await fetch("/api/alerts/uploads/import", {
         method: "POST",
@@ -187,13 +195,11 @@ export default function AlertsWorkbench() {
       }
       setCurrentJob(job);
       setMapBootstrap((payload?.map_bootstrap as Record<string, unknown>) || null);
-      setSuccess(`上传成功：${job.job_id}（原始告警 ${formatNumber(job.total_rows)} 条）`);
       await loadSample(job.job_id);
       try {
         await loadAnalysis(job.job_id);
-      } catch {
-        setAnalysisStatus(null);
-      }
+      } catch {}
+      setSuccess(`上传成功，任务 ${job.job_id} 已创建。`);
       form.reset();
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "上传失败");
@@ -204,7 +210,6 @@ export default function AlertsWorkbench() {
 
   async function onConfirmMapping() {
     if (!currentJobId) {
-      setError("请先上传并生成任务。");
       return;
     }
     setLoadingApply(true);
@@ -226,14 +231,12 @@ export default function AlertsWorkbench() {
         throw new Error(String((payload as any)?.detail || `确认入库失败(${response.status})`));
       }
       setApplyPayload(payload);
-      const job = asJob(payload?.job);
-      if (job) {
-        setCurrentJob(job);
+      const updatedJob = asJob(payload?.job);
+      if (updatedJob) {
+        setCurrentJob(updatedJob);
       }
-      const mapped = Number(payload?.apply_result?.mapped || 0);
-      const unmapped = Number(payload?.apply_result?.unmapped || 0);
-      setSuccess(`映射入库完成：mapped=${mapped}，unmapped=${unmapped}`);
       await loadAnalysis(currentJobId);
+      setSuccess("映射确认成功，已完成入库。");
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "确认入库失败");
     } finally {
@@ -243,7 +246,6 @@ export default function AlertsWorkbench() {
 
   async function onAnalyze() {
     if (!currentJobId) {
-      setError("请先上传任务。");
       return;
     }
     setLoadingAnalyze(true);
@@ -259,9 +261,8 @@ export default function AlertsWorkbench() {
       if (!response.ok) {
         throw new Error(String(payload?.detail || `触发分析失败(${response.status})`));
       }
-      setAnalyzeResult(payload as Record<string, unknown>);
+      setSuccess("已触发当前任务分析，正在刷新进展。");
       setPolling(true);
-      setSuccess("已触发任务级分析，正在刷新进展…");
     } catch (analyzeError) {
       setError(analyzeError instanceof Error ? analyzeError.message : "触发分析失败");
     } finally {
@@ -295,167 +296,266 @@ export default function AlertsWorkbench() {
   }, [polling, currentJobId]);
 
   return (
-    <>
-      <div className="card alerts-top">
-        <div className="alerts-tabs">
-          <button
-            type="button"
-            className={`alerts-tab ${activeTab === "file" ? "active" : ""}`}
-            onClick={() => setActiveTab("file")}
-          >
-            文件上传
-          </button>
-          <button
-            type="button"
-            className={`alerts-tab ${activeTab === "integration" ? "active" : ""}`}
-            onClick={() => setActiveTab("integration")}
-          >
-            数据对接（预留）
-          </button>
+    <div className="flex flex-col gap-4">
+      <section className="flex flex-col gap-4 rounded-xl border bg-background p-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-semibold">输入配置</h2>
+          {currentJob ? <Badge variant={statusVariant(currentJob.status)}>{currentJob.status}</Badge> : null}
         </div>
-
-        {activeTab === "file" ? (
-          <form onSubmit={onUpload} className="alerts-form">
-            <input type="file" name="file" accept=".csv,text/csv" required />
-            <div className="alerts-form-grid">
-              <input name="vendor" placeholder="vendor（可选）" />
-              <input name="product" placeholder="product（可选）" />
-              <input name="log_type" placeholder="log_type（可选）" />
-              <input name="occurred_at_column" placeholder="时间列名（可选）" />
-              <input name="rule_id_column" placeholder="规则列名（可选）" />
-              <input name="job_id" placeholder="job_id（可选）" />
-            </div>
-            <div className="alerts-actions">
-              <button type="submit" disabled={loadingUpload}>
-                {loadingUpload ? "上传中..." : "上传并抽样映射"}
-              </button>
-              <button type="button" disabled={!canConfirmMapping || loadingApply} onClick={onConfirmMapping}>
-                {loadingApply ? "入库中..." : "确认映射并入库"}
-              </button>
-              <button type="button" disabled={!canConfirmMapping || loadingAnalyze} onClick={onAnalyze}>
-                {loadingAnalyze ? "触发中..." : "分析当前任务"}
-              </button>
-            </div>
-          </form>
-        ) : (
-          <p className="meta">数据对接入口预留中，MVP 阶段优先文件上传闭环。</p>
-        )}
-
-        {error ? <p className="meta alerts-error">{error}</p> : null}
-        {success ? <p className="meta alerts-success">{success}</p> : null}
-      </div>
-
-      <div className="alerts-bottom">
-        <div className="card">
-          <h2>当前任务</h2>
-          {!currentJob ? <p className="meta">暂无任务，请先上传文件。</p> : null}
-          {currentJob ? (
-            <>
-              <p className="meta">任务：{currentJob.job_id}</p>
-              <p className="meta">状态：{currentJob.status}</p>
-              <p className="meta">来源：{currentJob.source}</p>
-              <p className="meta">文件：{currentJob.file_name || "-"}</p>
-              <p className="meta">告警数量（原始行）：{formatNumber(currentJob.total_rows)}</p>
-              <p className="meta">
-                映射统计：mapped={formatNumber(currentJob.mapped_rows)} / unmapped=
-                {formatNumber(currentJob.unmapped_rows)} / pending={formatNumber(currentJob.pending_rows)}
-              </p>
-            </>
-          ) : null}
-        </div>
-
-        <div className="card">
-          <h2>抽样映射预览（5 条）</h2>
-          {mapBootstrap ? (
-            <p className="meta">
-              Agent 映射建议：map_id={String(mapBootstrap.map_id || "-")}，字段=
-              {Array.isArray(mapBootstrap.field_map_keys) ? mapBootstrap.field_map_keys.join(", ") : "-"}
-            </p>
-          ) : (
-            <p className="meta">暂无映射建议。</p>
-          )}
-          {loadingSample ? <p className="meta">抽样加载中...</p> : null}
-          {sampleGroups.length === 0 ? <p className="meta">暂无抽样样本。</p> : null}
-          {sampleGroups.map((group) => {
-            const sample = group.samples?.[0];
-            const rowPayload =
-              sample?.payload && typeof sample.payload === "object" && "row" in sample.payload
-                ? (sample.payload as { row?: Record<string, unknown> }).row || {}
-                : {};
-            return (
-              <div className="subcard" key={`${group.group_key.source}-${group.group_key.rule_id}-${sample?.raw_event_id}`}>
-                <p className="meta">
-                  source={group.group_key.source || "-"} / vendor={group.group_key.vendor || "-"} / product=
-                  {group.group_key.product || "-"} / count={group.event_count}
-                </p>
-                <p className="meta">sample={sample?.raw_event_id || "-"}</p>
-                <pre className="alerts-pre">{JSON.stringify(rowPayload, null, 2)}</pre>
+        <Separator />
+        <Tabs defaultValue="file">
+          <TabsList>
+            <TabsTrigger value="file">文件上传</TabsTrigger>
+            <TabsTrigger value="integration">数据对接（预留）</TabsTrigger>
+          </TabsList>
+          <TabsContent value="file" className="pt-3">
+            <form onSubmit={onUpload} className="flex flex-col gap-4">
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="file">CSV 文件</FieldLabel>
+                  <Input id="file" type="file" name="file" accept=".csv,text/csv" required />
+                </Field>
+              </FieldGroup>
+              <FieldGroup className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <Field>
+                  <FieldLabel htmlFor="vendor">Vendor</FieldLabel>
+                  <FieldContent>
+                    <Input id="vendor" name="vendor" placeholder="可选" />
+                  </FieldContent>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="product">Product</FieldLabel>
+                  <FieldContent>
+                    <Input id="product" name="product" placeholder="可选" />
+                  </FieldContent>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="log_type">Log Type</FieldLabel>
+                  <FieldContent>
+                    <Input id="log_type" name="log_type" placeholder="可选" />
+                  </FieldContent>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="occurred_at_column">时间列名</FieldLabel>
+                  <FieldContent>
+                    <Input id="occurred_at_column" name="occurred_at_column" placeholder="可选" />
+                  </FieldContent>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="rule_id_column">规则列名</FieldLabel>
+                  <FieldContent>
+                    <Input id="rule_id_column" name="rule_id_column" placeholder="可选" />
+                  </FieldContent>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="job_id">Job ID</FieldLabel>
+                  <FieldContent>
+                    <Input id="job_id" name="job_id" placeholder="可选" />
+                  </FieldContent>
+                </Field>
+              </FieldGroup>
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" disabled={loadingUpload}>
+                  {loadingUpload ? "上传中..." : "上传并抽样映射"}
+                </Button>
+                <Button type="button" variant="outline" disabled={!canRunActions || loadingApply} onClick={onConfirmMapping}>
+                  {loadingApply ? "入库中..." : "确认映射并入库"}
+                </Button>
+                <Button type="button" variant="outline" disabled={!canRunActions || loadingAnalyze} onClick={onAnalyze}>
+                  {loadingAnalyze ? "触发中..." : "分析当前任务"}
+                </Button>
               </div>
-            );
-          })}
-        </div>
+            </form>
+          </TabsContent>
+          <TabsContent value="integration" className="pt-3">
+            <Alert>
+              <AlertTitle>数据对接模块预留</AlertTitle>
+              <AlertDescription>当前 MVP 仅开放文件上传入口，后续接入 API / Syslog 等实时源。</AlertDescription>
+            </Alert>
+          </TabsContent>
+        </Tabs>
+        {error ? (
+          <Alert variant="destructive">
+            <AlertTitle>操作失败</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+        {success ? (
+          <Alert>
+            <AlertTitle>操作成功</AlertTitle>
+            <AlertDescription>{success}</AlertDescription>
+          </Alert>
+        ) : null}
+      </section>
 
-        <div className="card">
-          <h2>入库与分析进展</h2>
-          {applyPayload?.apply_result ? (
-            <p className="meta">
-              入库结果：processed={formatNumber(applyPayload.apply_result.processed)}，mapped=
-              {formatNumber(applyPayload.apply_result.mapped)}，unmapped=
-              {formatNumber(applyPayload.apply_result.unmapped)}
-            </p>
-          ) : (
-            <p className="meta">尚未确认入库。</p>
-          )}
-          {analyzeResult ? (
-            <p className="meta">
-              最近触发：status={String(analyzeResult.status || "-")}，run_id={String(analyzeResult.run_id || "-")}
-            </p>
-          ) : null}
-          {polling ? <p className="meta">分析中：每 3 秒刷新一次...</p> : null}
-          {analysisStatus?.run ? (
-            <>
-              <p className="meta">
-                当前 run：{analysisStatus.run.run_id} · {analysisStatus.run.status}
-              </p>
-              <pre className="alerts-pre">{String(analysisStatus.run.summary || "")}</pre>
-            </>
-          ) : (
-            <p className="meta">暂无 run 结果。</p>
-          )}
-          {analysisStatus?.event_state_counts ? (
-            <p className="meta">事件状态：{JSON.stringify(analysisStatus.event_state_counts)}</p>
-          ) : null}
+      <section className="flex flex-col gap-4 rounded-xl border bg-background p-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-semibold">输出结果</h2>
+          <div className="flex flex-wrap gap-2">
+            {currentJob ? <Badge variant="outline">{currentJob.job_id}</Badge> : <Badge variant="outline">未选择任务</Badge>}
+            {polling ? <Badge>分析中</Badge> : null}
+            {analysisStatus?.run?.status ? (
+              <Badge variant={statusVariant(analysisStatus.run.status)}>{analysisStatus.run.status}</Badge>
+            ) : null}
+          </div>
         </div>
-
-        <div className="card">
-          <h2>成本（Token/Tools/耗时）</h2>
-          {analysisStatus?.cost ? (
-            <>
-              <p className="meta">model={String(analysisStatus.cost.model || "-")}</p>
-              <p className="meta">turns={formatNumber(analysisStatus.cost.turns)} / tools={formatNumber(analysisStatus.cost.tool_calls)}</p>
-              <p className="meta">
-                tokens: in={formatNumber(analysisStatus.cost.usage_input_tokens)} / out=
-                {formatNumber(analysisStatus.cost.usage_output_tokens)} / cached=
-                {formatNumber(analysisStatus.cost.usage_cached_input_tokens)} / total=
-                {formatNumber(analysisStatus.cost.usage_total_tokens)}
+        <Separator />
+        <Tabs defaultValue="overview">
+          <TabsList>
+            <TabsTrigger value="overview">任务概览</TabsTrigger>
+            <TabsTrigger value="mapping">映射样本</TabsTrigger>
+            <TabsTrigger value="analysis">分析进展</TabsTrigger>
+          </TabsList>
+          <TabsContent value="overview" className="pt-3">
+            {!currentJob ? (
+              <Alert>
+                <AlertTitle>暂无任务</AlertTitle>
+                <AlertDescription>请先在上方上传 CSV 并创建任务。</AlertDescription>
+              </Alert>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>字段</TableHead>
+                    <TableHead>值</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow>
+                    <TableCell>任务 ID</TableCell>
+                    <TableCell>{currentJob.job_id}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell>源标识</TableCell>
+                    <TableCell>{currentJob.source || "-"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell>告警总数</TableCell>
+                    <TableCell>{formatNumber(currentJob.total_rows)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell>映射统计</TableCell>
+                    <TableCell>
+                      mapped={formatNumber(currentJob.mapped_rows)} / unmapped={formatNumber(currentJob.unmapped_rows)} /
+                      pending={formatNumber(currentJob.pending_rows)}
+                    </TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell>入库结果</TableCell>
+                    <TableCell>
+                      {applyPayload?.apply_result
+                        ? `processed=${formatNumber(applyPayload.apply_result.processed)} mapped=${formatNumber(
+                            applyPayload.apply_result.mapped
+                          )} unmapped=${formatNumber(applyPayload.apply_result.unmapped)}`
+                        : "-"}
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            )}
+          </TabsContent>
+          <TabsContent value="mapping" className="pt-3">
+            <div className="flex flex-col gap-3">
+              <p className="text-sm text-muted-foreground">
+                映射建议：{mapBootstrap?.map_id ? String(mapBootstrap.map_id) : "暂无"}，字段：
+                {Array.isArray(mapBootstrap?.field_map_keys) ? ` ${mapBootstrap?.field_map_keys.join(", ")}` : " -"}
               </p>
-              <p className="meta">duration={formatNumber(analysisStatus.cost.duration_ms)} ms</p>
-            </>
-          ) : (
-            <p className="meta">暂无成本数据。</p>
-          )}
-          <h3>步骤（Tool 调用）</h3>
-          {!analysisStatus?.steps || analysisStatus.steps.length === 0 ? (
-            <p className="meta">暂无步骤数据。</p>
-          ) : (
-            analysisStatus.steps.map((item) => (
-              <p className="meta" key={item.tool_name}>
-                {item.tool_name} × {item.call_count}
-              </p>
-            ))
-          )}
-        </div>
-      </div>
-    </>
+              {loadingSample ? <p className="text-sm text-muted-foreground">样本加载中...</p> : null}
+              {sampleGroups.length === 0 ? <p className="text-sm text-muted-foreground">暂无样本。</p> : null}
+              {sampleGroups.map((group) => {
+                const sample = group.samples?.[0];
+                const rowPayload =
+                  sample?.payload && typeof sample.payload === "object" && "row" in sample.payload
+                    ? (sample.payload as { row?: Record<string, unknown> }).row || {}
+                    : {};
+                return (
+                  <div key={`${group.group_key.source}-${group.group_key.rule_id}-${sample?.raw_event_id}`} className="rounded-lg border p-3">
+                    <p className="text-sm">
+                      source={group.group_key.source || "-"} / vendor={group.group_key.vendor || "-"} / product=
+                      {group.group_key.product || "-"} / count={group.event_count}
+                    </p>
+                    <p className="text-sm text-muted-foreground">sample={sample?.raw_event_id || "-"}</p>
+                    <ScrollArea className="mt-2 h-28 rounded-md border p-2">
+                      <pre className="text-xs">{JSON.stringify(rowPayload, null, 2)}</pre>
+                    </ScrollArea>
+                  </div>
+                );
+              })}
+            </div>
+          </TabsContent>
+          <TabsContent value="analysis" className="pt-3">
+            <div className="flex flex-col gap-3">
+              {!analysisStatus?.run ? (
+                <p className="text-sm text-muted-foreground">暂无分析结果。</p>
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="outline">{analysisStatus.run.run_id}</Badge>
+                    <Badge variant={statusVariant(analysisStatus.run.status)}>{analysisStatus.run.status}</Badge>
+                  </div>
+                  <ScrollArea className="h-28 rounded-md border p-2">
+                    <pre className="text-xs whitespace-pre-wrap">{String(analysisStatus.run.summary || "")}</pre>
+                  </ScrollArea>
+                </>
+              )}
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>成本项</TableHead>
+                    <TableHead>值</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow>
+                    <TableCell>model</TableCell>
+                    <TableCell>{String(analysisStatus?.cost?.model || "-")}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell>tokens</TableCell>
+                    <TableCell>
+                      in={formatNumber(analysisStatus?.cost?.usage_input_tokens)} / out=
+                      {formatNumber(analysisStatus?.cost?.usage_output_tokens)} / cached=
+                      {formatNumber(analysisStatus?.cost?.usage_cached_input_tokens)} / total=
+                      {formatNumber(analysisStatus?.cost?.usage_total_tokens)}
+                    </TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell>tool/turn/duration</TableCell>
+                    <TableCell>
+                      tools={formatNumber(analysisStatus?.cost?.tool_calls)} / turns=
+                      {formatNumber(analysisStatus?.cost?.turns)} / duration=
+                      {formatNumber(analysisStatus?.cost?.duration_ms)} ms
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Tool</TableHead>
+                    <TableHead>调用次数</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(analysisStatus?.steps || []).length === 0 ? (
+                    <TableRow>
+                      <TableCell>暂无</TableCell>
+                      <TableCell>0</TableCell>
+                    </TableRow>
+                  ) : (
+                    (analysisStatus?.steps || []).map((step) => (
+                      <TableRow key={step.tool_name}>
+                        <TableCell>{step.tool_name}</TableCell>
+                        <TableCell>{step.call_count}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </TabsContent>
+        </Tabs>
+      </section>
+    </div>
   );
 }
