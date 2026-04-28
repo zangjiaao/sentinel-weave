@@ -1,12 +1,33 @@
 .superpowers
+
+# Local env / caches
+.env
 .venv
 .uv-cache
 __pycache__/
 *.pyc
 .pytest_cache
 .ruff_cache
+
+# OS / editor junk
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local runtime databases and sqlite sidecars
 spike.db
+memory-spike.db
 hermes-slow-verify.db
-.env
+openai-slow-verify.db
+runbook-verify.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Frontend build outputs
 web-ui/node_modules/
 web-ui/.next/
