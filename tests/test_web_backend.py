@@ -194,6 +194,58 @@ def test_web_backend_apply_job_with_trigger_dry_run(tmp_path) -> None:
     assert result["trigger_result"]["processed_events"] == 1
 
 
+def test_web_backend_apply_job_with_trigger_runs_until_stable(tmp_path) -> None:
+    db_path = tmp_path / "web-backend-apply-stable.db"
+    csv_path = tmp_path / "alerts-large.csv"
+    rows = [
+        {"event_time": "2026-04-20 09:00:00", "src_ip": "198.51.100.77", "signal": f"x-{index}"}
+        for index in range(1200)
+    ]
+    _write_csv(csv_path, rows)
+
+    imported = import_csv_job(
+        db_path=db_path,
+        csv_path=csv_path,
+        occurred_at_column="event_time",
+        job_id="job_apply_trigger_stable_001",
+    )
+    upsert_mapping_rules(
+        db_path=db_path,
+        maps=[
+            {
+                "map_id": "web_apply_trigger_stable_map",
+                "priority": 100,
+                "enabled": True,
+                "match": {"source_prefix": "import_job:"},
+                "mapping": {
+                    "field_map": {
+                        "occurred_at": "payload.row.event_time",
+                        "src_ip": "payload.row.src_ip",
+                    },
+                    "defaults": {
+                        "title": "mapped stable",
+                        "status": "new",
+                        "severity": "low",
+                        "attack_stage": "recon",
+                    },
+                },
+            }
+        ],
+    )
+
+    result = apply_job_with_trigger(
+        db_path=db_path,
+        job_id=str(imported["job"]["job_id"]),
+        limit=500,
+        trigger_after_apply=False,
+    )
+
+    assert result["job"]["status"] == "completed"
+    assert result["job"]["pending_rows"] == 0
+    assert result["job"]["mapped_rows"] == 1200
+    assert result["trigger_result"] is None
+
+
 def test_web_backend_job_analysis_status_returns_run_costs(tmp_path) -> None:
     db_path = tmp_path / "web-job-analysis.db"
     csv_path = tmp_path / "alerts.csv"

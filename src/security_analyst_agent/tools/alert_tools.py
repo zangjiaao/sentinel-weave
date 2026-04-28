@@ -385,6 +385,7 @@ def _build_cluster_guardrails_and_actions(
             "payload": {
                 "mode": "clusters",
                 "status": request.status,
+                "queue_only": request.queue_only,
                 "limit": request.limit,
                 "cluster_min_count": request.cluster_min_count,
                 "cursor": page_next_cursor,
@@ -461,6 +462,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
         analysis_cutoff_at=analysis_cutoff_at,
         top_n=request.hotspot_top_n,
     )
+    queue_only_applied = request.queue_only and bool(ingest_batch_summary.get("has_current_queue"))
     requested_mode = request.mode
     total_candidates: int | None = None
     if requested_mode in {"auto", "clusters"}:
@@ -469,6 +471,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             statuses=request.status,
             min_severity=request.min_severity,
             analysis_cutoff_at=analysis_cutoff_at,
+            queue_only=queue_only_applied,
         )
     effective_mode = requested_mode
     if requested_mode == "auto":
@@ -507,6 +510,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             statuses=request.status,
             min_severity=request.min_severity,
             analysis_cutoff_at=analysis_cutoff_at,
+            queue_only=queue_only_applied,
             cluster_min_count=request.cluster_min_count,
         )
         clusters = fetch_alert_clusters(
@@ -516,6 +520,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             statuses=request.status,
             min_severity=request.min_severity,
             analysis_cutoff_at=analysis_cutoff_at,
+            queue_only=queue_only_applied,
             cluster_min_count=request.cluster_min_count,
             sample_size=request.cluster_sample_size,
         )
@@ -539,6 +544,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             statuses=request.status,
             min_severity=request.min_severity,
             analysis_cutoff_at=analysis_cutoff_at,
+            queue_only=queue_only_applied,
             cluster_min_count=request.cluster_min_count,
         )
         omitted_alert_count = max((total_candidates or 0) - covered_alert_count, 0)
@@ -556,6 +562,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
                 statuses=request.status,
                 min_severity=request.min_severity,
                 analysis_cutoff_at=analysis_cutoff_at,
+                queue_only=queue_only_applied,
                 cluster_min_count=request.cluster_min_count,
                 sample_size=1,
             )
@@ -592,6 +599,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
                 request.status,
                 request.min_severity,
                 analysis_cutoff_at=analysis_cutoff_at,
+                queue_only=queue_only_applied,
             )
             if fallback_alerts:
                 alerts = fallback_alerts
@@ -619,6 +627,7 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
             request.status,
             request.min_severity,
             analysis_cutoff_at=analysis_cutoff_at,
+            queue_only=queue_only_applied,
         )
         refs_alert_ids = [item["alert_id"] for item in alerts]
         omitted_alert_count = 0
@@ -627,12 +636,16 @@ def alert_fetch(conn: sqlite3.Connection, payload: dict) -> dict:
         summary = f"返回 {len(alerts)} 条待研判告警摘要"
     if not bool(ingest_batch_summary.get("has_current_queue")):
         warnings.append("no_current_ingest_queue_snapshot")
+    if request.queue_only and not queue_only_applied:
+        warnings.append("queue_only_fallback_to_filtered_alerts")
 
     response = ToolResponse(
         ok=True,
         summary=summary,
         data={
             "mode": effective_mode,
+            "queue_only_requested": request.queue_only,
+            "queue_only_applied": queue_only_applied,
             "alerts": alerts,
             "clusters": clusters,
             "total_candidates": total_candidates,

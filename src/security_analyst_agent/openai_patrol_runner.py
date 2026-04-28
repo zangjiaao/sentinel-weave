@@ -755,6 +755,14 @@ _WRITE_TOOL_DISCOVERY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "alert.suspect-ip-topk",
         "alert.detail-batch",
     ),
+    "case.link-alert-batch": (
+        "alert.fetch",
+        "alert.detail-batch",
+    ),
+    "assessment.upsert-batch": (
+        "alert.fetch",
+        "alert.detail-batch",
+    ),
 }
 _MAX_CONSECUTIVE_BLOCKED_TOOL_TURNS = 5
 _MAX_TEXT_ONLY_NO_TOOL_RETRIES = 1

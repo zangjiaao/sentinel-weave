@@ -109,6 +109,9 @@ def test_import_apply_and_retry_problem_rows(tmp_path) -> None:
     assert first_apply["job"]["status"] == "needs_review"
     assert first_apply["job"]["mapped_rows"] == 1
     assert first_apply["job"]["unmapped_rows"] == 1
+    assert "asset_resolved_count" in first_apply["apply_result"]
+    assert "asset_auto_created_count" in first_apply["apply_result"]
+    assert "asset_unresolved_count" in first_apply["apply_result"]
 
     problems = list_import_job_problem_rows(db_path=db_path, job_id=job_id, limit=10)
     assert len(problems["items"]) == 1

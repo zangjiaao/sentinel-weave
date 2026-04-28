@@ -1,44 +1,95 @@
-import { getJson } from "../../../lib/api";
+import Link from "next/link"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { getJson } from "@/lib/api"
 
-export default async function AssetDetailPage({ params }: { params: { assetId: string } }) {
-  let data: any | null = null;
+export default async function AssetDetailPage({ params }: { params: Promise<{ assetId: string }> }) {
+  const { assetId } = await params
+
+  let detail: any | null = null
+  let cases: any[] = []
   try {
-    data = await getJson(`/api/assets/${params.assetId}`);
+    detail = await getJson(`/api/assets/${assetId}`)
   } catch {
-    data = null;
+    detail = null
+  }
+  try {
+    const casesResponse = await getJson(`/api/assets/${assetId}/cases`)
+    cases = casesResponse.items || []
+  } catch {
+    cases = []
   }
 
-  if (!data?.asset) {
+  if (!detail?.asset) {
     return (
-      <section>
-        <h1 className="title">资产详情</h1>
-        <p className="meta">资产不存在或 API 不可用</p>
+      <section className="flex flex-col gap-4">
+        <h1 className="text-2xl font-semibold">资产详情</h1>
+        <Alert>
+          <AlertTitle>无法加载资产</AlertTitle>
+          <AlertDescription>资产不存在或 API 不可用。</AlertDescription>
+        </Alert>
       </section>
-    );
+    )
   }
+
+  const asset = detail.asset
 
   return (
-    <section>
-      <h1 className="title">{data.asset.asset_name}</h1>
-      <div className="card">
-        <h2>身份归并</h2>
-        {(data.identities || []).length === 0 ? <p className="meta">暂无归并数据</p> : null}
-        {(data.identities || []).map((item: any) => (
-          <p key={item.identity_id} className="meta">
-            {item.identity_type}: {item.identity_value}
-          </p>
-        ))}
-      </div>
-      <div className="card">
-        <h2>关联案件</h2>
-        {(data.cases || []).length === 0 ? <p className="meta">暂无关联案件</p> : null}
-        {(data.cases || []).map((item: any) => (
-          <p key={item.case_id} className="meta">
-            {item.case_id} · {item.overall_severity} · {item.current_stage}
-          </p>
-        ))}
-      </div>
+    <section className="flex flex-col gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>{asset.asset_name || asset.asset_id}</CardTitle>
+          <CardDescription>{asset.asset_id}</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2">
+          <Badge variant="outline">{asset.public_ip || "-"}</Badge>
+          <Badge variant="outline">{asset.domain || "-"}</Badge>
+          <Badge variant="outline">{asset.hostname || "-"}</Badge>
+          <Badge variant="outline">{asset.business_criticality || "unknown"}</Badge>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>关联案件</CardTitle>
+          <CardDescription>该资产相关的案件列表。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {cases.length === 0 ? (
+            <Alert>
+              <AlertDescription>暂无关联案件。</AlertDescription>
+            </Alert>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>案件</TableHead>
+                  <TableHead>标题</TableHead>
+                  <TableHead>严重性</TableHead>
+                  <TableHead>阶段</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {cases.map((item) => (
+                  <TableRow key={item.case_id}>
+                    <TableCell>
+                      <Link href={`/cases/${item.case_id}`} className="underline-offset-4 hover:underline">
+                        {item.case_id}
+                      </Link>
+                    </TableCell>
+                    <TableCell>{item.title || "-"}</TableCell>
+                    <TableCell>{item.overall_severity || "-"}</TableCell>
+                    <TableCell>{item.current_stage || "-"}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </section>
-  );
+  )
 }
 

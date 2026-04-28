@@ -57,6 +57,7 @@ def _build_alert_filters(
     statuses: list[str],
     min_severity: str | None,
     analysis_cutoff_at: str | None,
+    queue_only: bool = False,
 ) -> tuple[list[str], list[object]]:
     conditions: list[str] = []
     params: list[object] = []
@@ -76,6 +77,17 @@ def _build_alert_filters(
         conditions.append("alerts.occurred_at <= ?")
         params.append(analysis_cutoff_at)
 
+    if queue_only:
+        conditions.append(
+            """
+            alerts.alert_id in (
+              select distinct alert_ingest_events.alert_id
+              from alert_ingest_events
+              where alert_ingest_events.trigger_state in ('pending', 'processing', 'failed')
+            )
+            """.strip()
+        )
+
     return conditions, params
 
 
@@ -90,11 +102,13 @@ def count_alerts(
     statuses: list[str],
     min_severity: str | None = None,
     analysis_cutoff_at: str | None = None,
+    queue_only: bool = False,
 ) -> int:
     conditions, params = _build_alert_filters(
         statuses=statuses,
         min_severity=min_severity,
         analysis_cutoff_at=analysis_cutoff_at,
+        queue_only=queue_only,
     )
     row = conn.execute(
         f"""
@@ -115,11 +129,13 @@ def fetch_alerts(
     statuses: list[str],
     min_severity: str | None = None,
     analysis_cutoff_at: str | None = None,
+    queue_only: bool = False,
 ) -> list[dict]:
     conditions, params = _build_alert_filters(
         statuses=statuses,
         min_severity=min_severity,
         analysis_cutoff_at=analysis_cutoff_at,
+        queue_only=queue_only,
     )
     params.append(limit)
     rows = conn.execute(
@@ -173,6 +189,7 @@ def fetch_alert_clusters(
     statuses: list[str],
     min_severity: str | None = None,
     analysis_cutoff_at: str | None = None,
+    queue_only: bool = False,
     cluster_min_count: int = 2,
     sample_size: int = 3,
 ) -> list[dict]:
@@ -180,6 +197,7 @@ def fetch_alert_clusters(
         statuses=statuses,
         min_severity=min_severity,
         analysis_cutoff_at=analysis_cutoff_at,
+        queue_only=queue_only,
     )
     where_clause = _build_where_clause(conditions)
 
@@ -268,12 +286,14 @@ def count_alert_clusters(
     statuses: list[str],
     min_severity: str | None = None,
     analysis_cutoff_at: str | None = None,
+    queue_only: bool = False,
     cluster_min_count: int = 2,
 ) -> int:
     conditions, params = _build_alert_filters(
         statuses=statuses,
         min_severity=min_severity,
         analysis_cutoff_at=analysis_cutoff_at,
+        queue_only=queue_only,
     )
     where_clause = _build_where_clause(conditions)
     row = conn.execute(
@@ -295,12 +315,14 @@ def count_alerts_covered_by_clusters(
     statuses: list[str],
     min_severity: str | None = None,
     analysis_cutoff_at: str | None = None,
+    queue_only: bool = False,
     cluster_min_count: int = 2,
 ) -> int:
     conditions, params = _build_alert_filters(
         statuses=statuses,
         min_severity=min_severity,
         analysis_cutoff_at=analysis_cutoff_at,
+        queue_only=queue_only,
     )
     where_clause = _build_where_clause(conditions)
     row = conn.execute(

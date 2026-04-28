@@ -22,6 +22,7 @@ class ApplyMapRequest(BaseModel):
     limit: int = 500
     include_unmapped: bool = False
     raw_event_ids: list[str] | None = None
+    template_mapping: dict[str, str] | None = None
     trigger_after_apply: bool = True
     trigger_dry_run: bool = False
 
@@ -96,6 +97,13 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
     def get_intake_upload(job_id: str) -> dict:
         try:
             return web_backend.get_job(db_path=_db_path(), job_id=job_id)
+        except ValueError as exc:
+            raise _translate_service_error(exc) from exc
+
+    @app.delete("/api/intake/uploads/{job_id}")
+    def delete_intake_upload(job_id: str) -> dict:
+        try:
+            return web_backend.delete_job(db_path=_db_path(), job_id=job_id)
         except ValueError as exc:
             raise _translate_service_error(exc) from exc
 
@@ -183,6 +191,32 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 
+    @app.post("/api/intake/uploads/preview")
+    async def preview_intake_upload(
+        file: UploadFile = File(...),
+        sample_limit: int = Form(5),
+    ) -> dict:
+        if not (file.filename or "").strip():
+            raise HTTPException(status_code=400, detail="file is required")
+
+        suffix = Path(file.filename or "upload.csv").suffix or ".csv"
+        temp_path: Path | None = None
+        try:
+            with NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+                temp_path = Path(handle.name)
+                shutil.copyfileobj(file.file, handle)
+            return web_backend.preview_csv_job(
+                csv_path=temp_path,
+                file_name=file.filename,
+                sample_limit=max(1, int(sample_limit)),
+            )
+        except ValueError as exc:
+            raise _translate_service_error(exc) from exc
+        finally:
+            await file.close()
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
     @app.post("/api/intake/uploads/{job_id}/preview-map")
     def preview_intake_upload_mapping(job_id: str, body: PreviewMapRequest) -> dict:
         try:
@@ -205,6 +239,7 @@ def create_app(*, db_path: Path | None = None) -> FastAPI:
                 limit=body.limit,
                 include_unmapped=body.include_unmapped,
                 raw_event_ids=body.raw_event_ids,
+                template_mapping=body.template_mapping,
                 trigger_after_apply=body.trigger_after_apply,
                 trigger_dry_run=body.trigger_dry_run,
             )

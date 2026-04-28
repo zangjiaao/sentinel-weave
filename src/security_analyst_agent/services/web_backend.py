@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -60,6 +61,238 @@ def _pick_first_existing_column(field_names: list[str], candidates: list[str]) -
     return None
 
 
+TARGET_SCHEMA_TEMPLATE: dict[str, Any] = {
+    "mapping_principles": [
+        "优先映射语义明确且稳定的源字段",
+        "同一源字段只映射一个目标字段",
+        "缺失字段使用系统默认值，不强行猜测",
+    ],
+    "fields": [
+        {
+            "name": "occurred_at",
+            "required": True,
+            "description": "告警发生时间，建议 ISO-8601 时间格式",
+            "example": "2026-04-22T09:30:00+08:00",
+            "source_aliases": ["occurred_at", "event_time", "timestamp", "time", "发生时间", "攻击时间"],
+        },
+        {
+            "name": "title",
+            "required": True,
+            "description": "告警标题或规则命中名称",
+            "example": "SQL 注入尝试命中规则",
+            "source_aliases": ["title", "alert_title", "name", "告警标题", "攻击类型", "威胁情报", "蜜罐名称"],
+        },
+        {
+            "name": "severity",
+            "required": True,
+            "description": "风险等级（critical/high/medium/low）",
+            "example": "high",
+            "source_aliases": ["severity", "level", "risk_level", "风险等级", "告警等级", "级别"],
+        },
+        {
+            "name": "attack_stage",
+            "required": True,
+            "description": "攻击阶段（recon/exploit/persistence/command_execution/lateral_prep）",
+            "example": "exploit",
+            "source_aliases": ["attack_stage", "stage", "phase", "攻击阶段", "威胁情报"],
+        },
+        {
+            "name": "src_ip",
+            "required": False,
+            "description": "攻击源 IP",
+            "example": "203.0.113.88",
+            "source_aliases": ["src_ip", "source_ip", "src", "attacker_ip", "remote_addr", "源IP", "攻击IP"],
+        },
+        {
+            "name": "dst_ip",
+            "required": False,
+            "description": "目标 IP",
+            "example": "10.0.2.15",
+            "source_aliases": ["dst_ip", "destination_ip", "dst", "target_ip", "目标IP", "目的IP", "host"],
+        },
+        {
+            "name": "asset_id",
+            "required": False,
+            "description": "目标资产标识",
+            "example": "asset_finance_api",
+            "source_aliases": ["asset_id", "asset", "target_asset", "hostname", "host", "资产", "目标资产"],
+        },
+        {
+            "name": "rule_id",
+            "required": False,
+            "description": "规则 ID 或签名 ID",
+            "example": "waf-sqli-001",
+            "source_aliases": ["rule_id", "signature_id", "sid", "规则ID", "规则编号"],
+        },
+        {
+            "name": "attack_description",
+            "required": False,
+            "description": "攻击描述或原始消息摘要",
+            "example": "请求中包含 union select 特征",
+            "source_aliases": ["description", "detail", "message", "msg", "攻击详情", "详情长度"],
+        },
+        {
+            "name": "status",
+            "required": False,
+            "description": "告警状态（默认 new）",
+            "example": "new",
+            "source_aliases": ["status", "state", "状态"],
+        },
+    ],
+}
+
+
+def _normalize_field_key(value: str) -> str:
+    return "".join(char for char in str(value).strip().lower() if char.isalnum())
+
+
+def _pick_first_by_aliases(field_names: list[str], aliases: list[str]) -> str | None:
+    if not field_names or not aliases:
+        return None
+    normalized_fields = {item: _normalize_field_key(item) for item in field_names if str(item).strip()}
+    for alias in aliases:
+        normalized_alias = _normalize_field_key(alias)
+        if not normalized_alias:
+            continue
+        for original, normalized in normalized_fields.items():
+            if normalized == normalized_alias:
+                return original
+        for original, normalized in normalized_fields.items():
+            if len(normalized_alias) >= 4 and normalized_alias in normalized:
+                return original
+    return None
+
+
+def _build_field_map_from_schema(field_names: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    field_map: dict[str, str] = {}
+    suggested_mapping: dict[str, str] = {}
+    template_fields = TARGET_SCHEMA_TEMPLATE.get("fields")
+    if not isinstance(template_fields, list):
+        return field_map, suggested_mapping
+    for item in template_fields:
+        if not isinstance(item, dict):
+            continue
+        target_field = _to_str(item.get("name"))
+        aliases = [str(alias) for alias in item.get("source_aliases", []) if str(alias).strip()]
+        if not target_field:
+            continue
+        matched_column = _pick_first_by_aliases(field_names, aliases)
+        if matched_column is None:
+            matched_column = _pick_first_existing_column(field_names, aliases)
+        if matched_column is None:
+            continue
+        field_map[target_field] = f"payload.row.{matched_column}"
+        suggested_mapping[matched_column] = target_field
+    return field_map, suggested_mapping
+
+
+def _default_mapping_payload(field_map: dict[str, str]) -> dict[str, Any]:
+    return {
+        "field_map": field_map,
+        "defaults": {
+            "title": "imported csv alert",
+            "status": "new",
+            "severity": "medium",
+            "attack_stage": "recon",
+        },
+        "value_maps": {
+            "severity": {
+                "严重": "critical",
+                "高": "high",
+                "中": "medium",
+                "低": "low",
+                "漏洞利用": "high",
+                "webshell": "critical",
+                "命令执行": "critical",
+                "cve": "high",
+                "critical": "critical",
+                "high": "high",
+                "medium": "medium",
+                "low": "low",
+            },
+            "attack_stage": {
+                "扫描": "recon",
+                "探测": "recon",
+                "漏洞利用": "exploit",
+                "webshell": "persistence",
+                "cve": "exploit",
+                "横向移动": "lateral_prep",
+                "命令执行": "command_execution",
+                "持久化": "persistence",
+                "recon": "recon",
+                "exploit": "exploit",
+                "persistence": "persistence",
+                "command_execution": "command_execution",
+                "lateral_prep": "lateral_prep",
+            },
+        },
+        "confidence": 0.55,
+        "reason": "auto_generated_upload_map",
+        "title_template": "{蜜罐名称} {威胁情报}",
+    }
+
+
+def preview_csv_job(
+    *,
+    csv_path: Path,
+    file_name: str | None = None,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    csv_real_path = Path(csv_path)
+    if not csv_real_path.exists():
+        raise ValueError(f"csv file not found: {csv_real_path}")
+
+    with csv_real_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        field_names = [str(item) for item in (reader.fieldnames or []) if str(item).strip()]
+        if not field_names:
+            raise ValueError("csv has no header")
+        rows: list[dict[str, Any]] = []
+        total_rows = 0
+        for idx, row in enumerate(reader, start=1):
+            total_rows += 1
+            if len(rows) < max(1, sample_limit):
+                normalized_row = {str(k).strip(): v for k, v in row.items() if k is not None}
+                rows.append(normalized_row)
+
+    groups: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        groups.append(
+            {
+                "group_key": {
+                    "source": "preview_upload",
+                    "vendor": "preview_vendor",
+                    "product": "preview_product",
+                },
+                "event_count": 1,
+                "samples": [
+                    {
+                        "raw_event_id": f"preview_{index:04d}",
+                        "payload": {"row": row},
+                    }
+                ],
+            }
+        )
+
+    field_map, suggested_mapping = _build_field_map_from_schema(field_names)
+    return {
+        "preview": {
+            "file_name": file_name or csv_real_path.name,
+            "total_rows": total_rows,
+            "field_names": field_names,
+            "groups": groups,
+        },
+        "map_bootstrap": {
+            "map_id": None,
+            "source": "preview_upload",
+            "field_map_keys": sorted(field_map.keys()),
+            "field_names": field_names,
+            "suggested_mapping": suggested_mapping,
+            "target_schema_template": TARGET_SCHEMA_TEMPLATE,
+        },
+    }
+
+
 def ensure_default_mapping_for_job(*, db_path: Path, job_id: str) -> dict[str, Any]:
     conn = connect_db(db_path)
     create_schema(conn)
@@ -97,89 +330,10 @@ def ensure_default_mapping_for_job(*, db_path: Path, job_id: str) -> dict[str, A
                 if isinstance(row_obj, dict):
                     parsed_field_names = [str(key) for key in row_obj.keys()]
 
-        occurred_at_column = _pick_first_existing_column(
-            parsed_field_names,
-            ["occurred_at", "event_time", "timestamp", "攻击时间", "时间", "发生时间"],
-        )
-        src_ip_column = _pick_first_existing_column(
-            parsed_field_names,
-            ["src_ip", "src", "source_ip", "攻击IP", "源IP", "remote_addr"],
-        )
-        dst_ip_column = _pick_first_existing_column(
-            parsed_field_names,
-            ["dst_ip", "dst", "destination_ip", "目标IP", "目的IP", "target_ip", "host"],
-        )
-        title_column = _pick_first_existing_column(
-            parsed_field_names,
-            ["title", "alert_title", "告警标题", "攻击类型", "威胁情报", "蜜罐名称"],
-        )
-        severity_column = _pick_first_existing_column(
-            parsed_field_names,
-            ["severity", "risk_level", "level", "风险等级", "告警等级", "级别", "威胁情报"],
-        )
-        attack_stage_column = _pick_first_existing_column(
-            parsed_field_names,
-            ["attack_stage", "stage", "攻击阶段", "威胁情报"],
-        )
-
-        field_map: dict[str, str] = {}
-        if occurred_at_column:
-            field_map["occurred_at"] = f"payload.row.{occurred_at_column}"
-        if src_ip_column:
-            field_map["src_ip"] = f"payload.row.{src_ip_column}"
-        if dst_ip_column:
-            field_map["dst_ip"] = f"payload.row.{dst_ip_column}"
-        if title_column:
-            field_map["title"] = f"payload.row.{title_column}"
-        if severity_column:
-            field_map["severity"] = f"payload.row.{severity_column}"
-        if attack_stage_column:
-            field_map["attack_stage"] = f"payload.row.{attack_stage_column}"
+        field_map, suggested_mapping = _build_field_map_from_schema(parsed_field_names)
 
         auto_map_id = f"map_auto_{job_id}"
-        mapping_payload: dict[str, Any] = {
-            "field_map": field_map,
-            "defaults": {
-                "title": "imported csv alert",
-                "status": "new",
-                "severity": "medium",
-                "attack_stage": "recon",
-            },
-            "value_maps": {
-                "severity": {
-                    "严重": "critical",
-                    "高": "high",
-                    "中": "medium",
-                    "低": "low",
-                    "漏洞利用": "high",
-                    "webshell": "critical",
-                    "命令执行": "critical",
-                    "cve": "high",
-                    "critical": "critical",
-                    "high": "high",
-                    "medium": "medium",
-                    "low": "low",
-                },
-                "attack_stage": {
-                    "扫描": "recon",
-                    "探测": "recon",
-                    "漏洞利用": "exploit",
-                    "webshell": "persistence",
-                    "cve": "exploit",
-                    "横向移动": "lateral_prep",
-                    "命令执行": "command_execution",
-                    "持久化": "persistence",
-                    "recon": "recon",
-                    "exploit": "exploit",
-                    "persistence": "persistence",
-                    "command_execution": "command_execution",
-                    "lateral_prep": "lateral_prep",
-                },
-            },
-            "confidence": 0.55,
-            "reason": "auto_generated_upload_map",
-            "title_template": "{蜜罐名称} {威胁情报}",
-        }
+        mapping_payload = _default_mapping_payload(field_map)
     finally:
         conn.close()
 
@@ -200,7 +354,31 @@ def ensure_default_mapping_for_job(*, db_path: Path, job_id: str) -> dict[str, A
             "source": source,
             "field_map_keys": sorted(field_map.keys()),
             "field_names": parsed_field_names,
+            "suggested_mapping": suggested_mapping,
+            "target_schema_template": TARGET_SCHEMA_TEMPLATE,
     }
+
+
+def delete_job(*, db_path: Path, job_id: str) -> dict[str, Any]:
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        row = conn.execute(
+            """
+            select job_id
+            from import_jobs
+            where job_id = ?
+            limit 1
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"import job not found: {job_id}")
+        conn.execute("delete from import_jobs where job_id = ?", (job_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"deleted": True, "job_id": job_id}
 
 
 def _is_high_signal_severity(value: str | None) -> bool:
@@ -467,6 +645,69 @@ def preview_job_apply(
     )
 
 
+def _normalize_template_mapping(template_mapping: dict[str, str] | None) -> dict[str, str]:
+    if not isinstance(template_mapping, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for source_field, target_field in template_mapping.items():
+        source = _to_str(source_field)
+        target = _to_str(target_field)
+        if source is None or target is None:
+            continue
+        normalized[source] = target
+    return normalized
+
+
+def _set_job_mapping_from_template(
+    *,
+    db_path: Path,
+    job_id: str,
+    template_mapping: dict[str, str],
+) -> str | None:
+    normalized_mapping = _normalize_template_mapping(template_mapping)
+    if not normalized_mapping:
+        return None
+    conn = connect_db(db_path)
+    create_schema(conn)
+    try:
+        job_row = conn.execute(
+            """
+            select source
+            from import_jobs
+            where job_id = ?
+            limit 1
+            """,
+            (job_id,),
+        ).fetchone()
+        if job_row is None:
+            raise ValueError(f"import job not found: {job_id}")
+        source = str(job_row["source"])
+    finally:
+        conn.close()
+
+    field_map: dict[str, str] = {}
+    for source_field, target_field in normalized_mapping.items():
+        field_map[target_field] = f"payload.row.{source_field}"
+    if not field_map:
+        return None
+
+    map_id = f"map_ui_{job_id}"
+    mapping_payload = _default_mapping_payload(field_map)
+    upsert_alert_normalization_maps(
+        db_path=db_path,
+        maps=[
+            {
+                "map_id": map_id,
+                "priority": 120,
+                "enabled": True,
+                "match": {"source": source},
+                "mapping": mapping_payload,
+            }
+        ],
+    )
+    return map_id
+
+
 def apply_job(
     *,
     db_path: Path,
@@ -492,10 +733,16 @@ def apply_job_with_trigger(
     limit: int = 500,
     include_unmapped: bool = False,
     raw_event_ids: list[str] | None = None,
+    template_mapping: dict[str, str] | None = None,
     trigger_after_apply: bool = True,
     trigger_dry_run: bool = False,
 ) -> dict[str, Any]:
-    apply_result = apply_job(
+    map_id = _set_job_mapping_from_template(
+        db_path=db_path,
+        job_id=job_id,
+        template_mapping=template_mapping or {},
+    )
+    apply_result = apply_job_until_stable(
         db_path=db_path,
         job_id=job_id,
         limit=limit,
@@ -511,6 +758,7 @@ def apply_job_with_trigger(
         )
     return {
         **apply_result,
+        "template_map_id": map_id,
         "trigger_result": trigger_result,
     }
 
@@ -681,6 +929,7 @@ def apply_job_until_stable(
     job_id: str,
     limit: int = 500,
     include_unmapped: bool = True,
+    raw_event_ids: list[str] | None = None,
     max_passes: int = 20,
 ) -> dict[str, Any]:
     last_result: dict[str, Any] = apply_job(
@@ -688,6 +937,7 @@ def apply_job_until_stable(
         job_id=job_id,
         limit=limit,
         include_unmapped=include_unmapped,
+        raw_event_ids=raw_event_ids,
     )
     last_signature = (
         int(last_result["job"]["mapped_rows"]),
@@ -704,6 +954,7 @@ def apply_job_until_stable(
             job_id=job_id,
             limit=limit,
             include_unmapped=include_unmapped,
+            raw_event_ids=raw_event_ids,
         )
         signature = (
             int(current["job"]["mapped_rows"]),

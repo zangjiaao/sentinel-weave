@@ -1,10 +1,11 @@
-import AlertsWorkbench from "../../components/alerts-workbench";
+import AlertsWorkbench from "@/components/alerts-workbench"
 
 export default function AlertsPage() {
   return (
-    <section className="alerts-layout">
-      <h1 className="title">告警（Alerts）</h1>
+    <section className="flex flex-col gap-4">
+      <h1 className="text-2xl font-semibold">告警（Alerts）</h1>
       <AlertsWorkbench />
     </section>
-  );
+  )
 }
+

@@ -592,14 +592,15 @@ def test_alert_fetch_clusters_returns_budget_guardrails_and_next_actions(db_conn
         {
             "tool_name": "alert.fetch",
             "reason": "继续消化聚类积压，按游标推进",
-            "payload": {
-                "mode": "clusters",
-                "status": ["new"],
-                "limit": 5,
-                "cluster_min_count": 2,
-                "cursor": None,
+                "payload": {
+                    "mode": "clusters",
+                    "status": ["new"],
+                    "queue_only": True,
+                    "limit": 5,
+                    "cluster_min_count": 2,
+                    "cursor": None,
+                },
             },
-        },
     ]
     assert "detail_fanout_guardrail_applied" in result["warnings"]
 

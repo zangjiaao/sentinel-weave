@@ -1,31 +1,45 @@
-import Link from "next/link";
-import { getJson } from "../../lib/api";
+import Link from "next/link"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { getJson } from "@/lib/api"
 
 export default async function AssetsPage() {
-  let items: any[] = [];
+  let items: any[] = []
   try {
-    const response = await getJson("/api/assets");
-    items = response.items || [];
+    const response = await getJson("/api/assets")
+    items = response.items || []
   } catch {
-    items = [];
+    items = []
   }
 
   return (
-    <section>
-      <h1 className="title">资产清单</h1>
-      {items.length === 0 ? <p className="meta">暂无资产</p> : null}
+    <section className="flex flex-col gap-4">
+      <h1 className="text-2xl font-semibold">资产</h1>
+      {items.length === 0 ? (
+        <Alert>
+          <AlertTitle>暂无资产</AlertTitle>
+          <AlertDescription>当前没有可展示的资产数据。</AlertDescription>
+        </Alert>
+      ) : null}
       {items.map((item) => (
-        <div className="card" key={item.asset_id}>
-          <p className="meta">
-            <Link href={`/assets/${item.asset_id}`}>{item.asset_id}</Link>
-          </p>
-          <p className="meta">{item.asset_name}</p>
-          <p className="meta">
-            {item.public_ip || "-"} · {item.domain || "-"}
-          </p>
-        </div>
+        <Card key={item.asset_id}>
+          <CardHeader>
+            <CardTitle className="text-base">
+              <Link href={`/assets/${item.asset_id}`} className="underline-offset-4 hover:underline">
+                {item.asset_id}
+              </Link>
+            </CardTitle>
+            <CardDescription>{item.asset_name || item.asset_id}</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Badge variant="outline">{item.public_ip || "-"}</Badge>
+            <Badge variant="outline">{item.domain || "-"}</Badge>
+            <Badge variant="outline">{item.business_criticality || "unknown"}</Badge>
+          </CardContent>
+        </Card>
       ))}
     </section>
-  );
+  )
 }
 

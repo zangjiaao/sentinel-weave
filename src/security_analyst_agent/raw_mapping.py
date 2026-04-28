@@ -4,14 +4,17 @@ from collections import defaultdict
 import csv
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from security_analyst_agent.db import connect_db, create_schema
-from security_analyst_agent.stages import normalize_stage
+from security_analyst_agent.stages import normalize_stage, stage_rank
 
 _ALERT_COLUMNS = [
     "alert_id",
@@ -25,6 +28,37 @@ _ALERT_COLUMNS = [
     "dst_ip",
     "asset_id",
 ]
+
+_ASSET_IDENTITY_LOOKUP_ORDER = ("asset_id", "ip", "domain", "hostname")
+_IP_IDENTITY_KEYS = {
+    "dst_ip",
+    "destination_ip",
+    "target_ip",
+    "server_ip",
+    "dip",
+    "dst",
+    "目标ip",
+    "目标_ip",
+}
+_DOMAIN_IDENTITY_KEYS = {
+    "domain",
+    "target_domain",
+    "dst_domain",
+    "request_host",
+    "host",
+    "目标域名",
+}
+_HOSTNAME_IDENTITY_KEYS = {
+    "hostname",
+    "host_name",
+    "target_hostname",
+    "dst_hostname",
+    "computer_name",
+    "server_name",
+    "主机名",
+}
+_URL_IDENTITY_KEYS = {"url", "request_url", "uri", "request_uri"}
+_EMBEDDED_DETAIL_KEYS = {"攻击详情", "attack_detail", "detail", "details", "detail_json"}
 
 
 def _now_iso() -> str:
@@ -49,6 +83,390 @@ def _to_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def _normalize_occurred_at(value: Any) -> str | None:
+    text = _to_str(value)
+    if text is None:
+        return None
+    parsed: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
+def _normalize_identity_value(identity_type: str, value: Any) -> str | None:
+    text = _to_str(value)
+    if text is None:
+        return None
+    normalized_type = str(identity_type).strip().lower()
+    if normalized_type == "ip":
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError:
+            return None
+    if normalized_type in {"domain", "hostname", "asset_id"}:
+        return text.lower()
+    return text
+
+
+def _build_temp_asset_id(identity_type: str, identity_value: str) -> str:
+    digest = hashlib.sha1(f"{identity_type}:{identity_value}".encode("utf-8")).hexdigest()[:12]
+    return f"asset_tmp_{digest}"
+
+
+def _upsert_asset_identity(
+    conn: sqlite3.Connection,
+    *,
+    asset_id: str,
+    identity_type: str,
+    identity_value: str,
+    is_primary: bool,
+    confidence: float,
+    created_at: str,
+) -> None:
+    normalized_type = str(identity_type).strip().lower()
+    normalized_value = _normalize_identity_value(normalized_type, identity_value)
+    if normalized_value is None:
+        return
+    identity_seed = f"{asset_id}:{normalized_type}:{normalized_value}"
+    identity_id = f"idn_{hashlib.sha1(identity_seed.encode('utf-8')).hexdigest()[:20]}"
+    conn.execute(
+        """
+        insert into asset_identities (
+          identity_id, asset_id, identity_type, identity_value, is_primary, confidence, created_at
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        on conflict(asset_id, identity_type, identity_value) do update set
+          is_primary = case
+            when excluded.is_primary > asset_identities.is_primary then excluded.is_primary
+            else asset_identities.is_primary
+          end,
+          confidence = case
+            when excluded.confidence > asset_identities.confidence then excluded.confidence
+            else asset_identities.confidence
+          end
+        """,
+        (
+            identity_id,
+            asset_id,
+            normalized_type,
+            normalized_value,
+            1 if is_primary else 0,
+            max(0.0, min(float(confidence), 1.0)),
+            created_at,
+        ),
+    )
+
+
+def _extract_identity_candidates(
+    normalized_alert: dict[str, Any],
+    payload: dict[str, Any],
+) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_candidate(identity_type: str, value: Any, source: str) -> None:
+        normalized_type = str(identity_type).strip().lower()
+        normalized_value = _normalize_identity_value(normalized_type, value)
+        if normalized_value is None:
+            return
+        key = (normalized_type, normalized_value)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(
+            {
+                "identity_type": normalized_type,
+                "identity_value": normalized_value,
+                "source": source,
+            }
+        )
+
+    add_candidate("asset_id", normalized_alert.get("asset_id"), "normalized.asset_id")
+    add_candidate("ip", normalized_alert.get("dst_ip"), "normalized.dst_ip")
+
+    scan_targets: list[tuple[str, dict[str, Any]]] = [("payload", payload)]
+    payload_row = payload.get("row")
+    if isinstance(payload_row, dict):
+        scan_targets.append(("payload.row", payload_row))
+
+    for prefix, source_dict in scan_targets:
+        for raw_key, raw_value in source_dict.items():
+            key = str(raw_key).strip().lower()
+            if isinstance(raw_value, (dict, list)):
+                continue
+            value_text = _to_str(raw_value)
+            if value_text is None:
+                continue
+
+            if key in _IP_IDENTITY_KEYS or key.endswith("_ip"):
+                add_candidate("ip", value_text, f"{prefix}.{raw_key}")
+                continue
+            if key in _DOMAIN_IDENTITY_KEYS or key.endswith("_domain"):
+                add_candidate("domain", value_text, f"{prefix}.{raw_key}")
+                continue
+            if key in _HOSTNAME_IDENTITY_KEYS or key.endswith("_hostname"):
+                add_candidate("hostname", value_text, f"{prefix}.{raw_key}")
+                continue
+            if key in _URL_IDENTITY_KEYS:
+                parsed = urlparse(value_text if "://" in value_text else f"http://{value_text}")
+                if parsed.hostname:
+                    add_candidate("domain", parsed.hostname, f"{prefix}.{raw_key}")
+                continue
+            if key == "host":
+                if _normalize_identity_value("ip", value_text):
+                    add_candidate("ip", value_text, f"{prefix}.{raw_key}")
+                else:
+                    add_candidate("domain", value_text, f"{prefix}.{raw_key}")
+                continue
+    return candidates
+
+
+def _find_asset_by_identity(
+    conn: sqlite3.Connection,
+    *,
+    identity_type: str,
+    identity_value: str,
+) -> str | None:
+    normalized_type = str(identity_type).strip().lower()
+    normalized_value = _normalize_identity_value(normalized_type, identity_value)
+    if normalized_value is None:
+        return None
+
+    identity_match = conn.execute(
+        """
+        select asset_id
+        from asset_identities
+        where lower(identity_type) = ?
+          and lower(identity_value) = ?
+        order by is_primary desc, confidence desc, created_at asc
+        limit 1
+        """,
+        (normalized_type, normalized_value),
+    ).fetchone()
+    if identity_match is not None:
+        return _to_str(identity_match["asset_id"])
+
+    if normalized_type == "asset_id":
+        row = conn.execute(
+            """
+            select asset_id
+            from assets
+            where lower(asset_id) = ?
+            limit 1
+            """,
+            (normalized_value,),
+        ).fetchone()
+    elif normalized_type == "ip":
+        row = conn.execute(
+            """
+            select asset_id
+            from assets
+            where public_ip = ?
+            limit 1
+            """,
+            (normalized_value,),
+        ).fetchone()
+    elif normalized_type == "domain":
+        row = conn.execute(
+            """
+            select asset_id
+            from assets
+            where lower(domain) = ?
+            limit 1
+            """,
+            (normalized_value,),
+        ).fetchone()
+    elif normalized_type == "hostname":
+        row = conn.execute(
+            """
+            select asset_id
+            from assets
+            where lower(system_name) = ? or lower(asset_name) = ?
+            limit 1
+            """,
+            (normalized_value, normalized_value),
+        ).fetchone()
+    else:
+        row = None
+    return _to_str(row["asset_id"]) if row is not None else None
+
+
+def _ensure_temp_asset(
+    conn: sqlite3.Connection,
+    *,
+    identity_candidates: list[dict[str, str]],
+    created_at: str,
+    preferred_asset_id: str | None = None,
+) -> tuple[str, bool]:
+    primary_identity = identity_candidates[0]
+    explicit_asset_id = _normalize_identity_value("asset_id", preferred_asset_id) if preferred_asset_id else None
+    asset_id = explicit_asset_id or _build_temp_asset_id(primary_identity["identity_type"], primary_identity["identity_value"])
+    existing_row = conn.execute(
+        """
+        select asset_id
+        from assets
+        where lower(asset_id) = lower(?)
+        limit 1
+        """,
+        (asset_id,),
+    ).fetchone()
+    existed = existing_row is not None
+    if existing_row is not None:
+        asset_id = str(existing_row["asset_id"])
+    if not existed:
+        primary_label = primary_identity["identity_value"]
+        ip_candidate = next((item["identity_value"] for item in identity_candidates if item["identity_type"] == "ip"), None)
+        domain_candidate = next(
+            (item["identity_value"] for item in identity_candidates if item["identity_type"] == "domain"),
+            None,
+        )
+        host_candidate = next(
+            (item["identity_value"] for item in identity_candidates if item["identity_type"] == "hostname"),
+            None,
+        )
+        conn.execute(
+            """
+            insert into assets (
+              asset_id, asset_name, system_name, owner_team, internet_exposed, public_ip, domain
+            ) values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                asset_id,
+                f"Temporary Asset {primary_label}",
+                host_candidate or primary_label,
+                None,
+                1,
+                ip_candidate,
+                domain_candidate,
+            ),
+        )
+
+    for idx, candidate in enumerate(identity_candidates):
+        _upsert_asset_identity(
+            conn,
+            asset_id=asset_id,
+            identity_type=candidate["identity_type"],
+            identity_value=candidate["identity_value"],
+            is_primary=(idx == 0),
+            confidence=0.95 if idx == 0 else 0.72,
+            created_at=created_at,
+        )
+    return asset_id, not existed
+
+
+def _resolve_alert_asset(
+    conn: sqlite3.Connection,
+    *,
+    normalized_alert: dict[str, Any],
+    payload: dict[str, Any],
+    dry_run: bool,
+    created_at: str,
+) -> dict[str, Any]:
+    candidates = _extract_identity_candidates(normalized_alert, payload)
+    explicit_asset_id = _normalize_identity_value("asset_id", normalized_alert.get("asset_id"))
+    by_type: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for item in candidates:
+        by_type[item["identity_type"]].append(item)
+
+    resolved_asset_id: str | None = None
+    resolved_candidate: dict[str, str] | None = None
+    for identity_type in _ASSET_IDENTITY_LOOKUP_ORDER:
+        for candidate in by_type.get(identity_type, []):
+            asset_id = _find_asset_by_identity(
+                conn,
+                identity_type=candidate["identity_type"],
+                identity_value=candidate["identity_value"],
+            )
+            if asset_id:
+                resolved_asset_id = asset_id
+                resolved_candidate = candidate
+                break
+        if resolved_asset_id:
+            break
+
+    if resolved_asset_id:
+        normalized_alert["asset_id"] = resolved_asset_id
+        if not dry_run:
+            for idx, candidate in enumerate(candidates):
+                _upsert_asset_identity(
+                    conn,
+                    asset_id=resolved_asset_id,
+                    identity_type=candidate["identity_type"],
+                    identity_value=candidate["identity_value"],
+                    is_primary=(idx == 0),
+                    confidence=0.9 if idx == 0 else 0.7,
+                    created_at=created_at,
+                )
+        return {
+            "status": "resolved",
+            "asset_id": resolved_asset_id,
+            "match": resolved_candidate,
+            "candidates": candidates,
+        }
+
+    if not candidates:
+        normalized_alert["asset_id"] = None
+        return {
+            "status": "unresolved",
+            "asset_id": None,
+            "match": None,
+            "candidates": [],
+        }
+
+    if explicit_asset_id:
+        if dry_run:
+            normalized_alert["asset_id"] = explicit_asset_id
+            return {
+                "status": "would_auto_create",
+                "asset_id": explicit_asset_id,
+                "match": candidates[0],
+                "candidates": candidates,
+            }
+        asset_id, created = _ensure_temp_asset(
+            conn,
+            identity_candidates=candidates,
+            created_at=created_at,
+            preferred_asset_id=explicit_asset_id,
+        )
+        normalized_alert["asset_id"] = asset_id
+        return {
+            "status": "auto_created" if created else "resolved",
+            "asset_id": asset_id,
+            "match": candidates[0],
+            "candidates": candidates,
+        }
+
+    if dry_run:
+        normalized_alert["asset_id"] = None
+        return {
+            "status": "would_auto_create",
+            "asset_id": None,
+            "match": candidates[0],
+            "candidates": candidates,
+        }
+
+    asset_id, created = _ensure_temp_asset(conn, identity_candidates=candidates, created_at=created_at)
+    normalized_alert["asset_id"] = asset_id
+    return {
+        "status": "auto_created" if created else "resolved",
+        "asset_id": asset_id,
+        "match": candidates[0],
+        "candidates": candidates,
+    }
 
 
 def _normalize_severity(value: Any) -> str:
@@ -145,13 +563,145 @@ def _apply_value_map(value: Any, mapper: dict[str, Any]) -> Any:
     if not mapper:
         return value
     if isinstance(value, str):
-        lookup = mapper.get(value)
+        value_text = value.strip()
+        lookup = mapper.get(value_text)
         if lookup is not None:
             return lookup
-        lookup = mapper.get(value.lower())
+        lookup = mapper.get(value_text.lower())
         if lookup is not None:
             return lookup
+        tokens = [item.strip() for item in re.split(r"[,\s，;；|/]+", value_text) if item.strip()]
+        for token in tokens:
+            token_lookup = mapper.get(token)
+            if token_lookup is not None:
+                return token_lookup
+            token_lookup = mapper.get(token.lower())
+            if token_lookup is not None:
+                return token_lookup
+
+        lowered = value_text.lower()
+        contains_matches: list[tuple[int, Any]] = []
+        for raw_key, mapped_value in mapper.items():
+            key_text = _to_str(raw_key)
+            if not key_text:
+                continue
+            if key_text.lower() in lowered:
+                contains_matches.append((len(key_text), mapped_value))
+        if contains_matches:
+            contains_matches.sort(key=lambda item: item[0], reverse=True)
+            return contains_matches[0][1]
     return mapper.get(value, value)
+
+
+def _extract_embedded_detail_dict(payload: dict[str, Any]) -> dict[str, Any] | None:
+    candidates: list[Any] = []
+    if isinstance(payload, dict):
+        for key in _EMBEDDED_DETAIL_KEYS:
+            candidates.append(payload.get(key))
+        payload_row = payload.get("row")
+        if isinstance(payload_row, dict):
+            for key in _EMBEDDED_DETAIL_KEYS:
+                candidates.append(payload_row.get(key))
+
+    for item in candidates:
+        if isinstance(item, dict):
+            return item
+        text = _to_str(item)
+        if text is None:
+            continue
+        stripped = text.strip()
+        if not stripped.startswith("{"):
+            continue
+        parsed = _safe_json_loads(stripped, default=None)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _extract_ip_candidate(value: Any) -> str | None:
+    text = _to_str(value)
+    if text is None:
+        return None
+    direct = _normalize_identity_value("ip", text)
+    if direct:
+        return direct
+    if text.startswith("[") and "]" in text:
+        host = text[1 : text.index("]")]
+        direct = _normalize_identity_value("ip", host)
+        if direct:
+            return direct
+    if ":" in text and text.count(":") == 1:
+        host = text.split(":", 1)[0].strip()
+        direct = _normalize_identity_value("ip", host)
+        if direct:
+            return direct
+    return None
+
+
+def _extract_dst_ip_from_payload(payload: dict[str, Any]) -> str | None:
+    detail = _extract_embedded_detail_dict(payload)
+    if detail is None:
+        return None
+    host = _to_str(detail.get("host"))
+    if host:
+        parsed = urlparse(host if "://" in host else f"http://{host}")
+        hostname = parsed.hostname or host
+        ip_candidate = _extract_ip_candidate(hostname)
+        if ip_candidate:
+            return ip_candidate
+    return None
+
+
+def _extract_src_ip_from_payload(payload: dict[str, Any]) -> str | None:
+    detail = _extract_embedded_detail_dict(payload)
+    if detail is None:
+        return None
+    return _extract_ip_candidate(detail.get("remote_addr"))
+
+
+def _infer_stage_and_severity_from_payload(
+    *,
+    payload: dict[str, Any],
+    title: str | None,
+    rule_id: Any,
+) -> tuple[str | None, str | None]:
+    row = payload.get("row") if isinstance(payload.get("row"), dict) else {}
+    intel_text = _to_str(row.get("威胁情报")) or _to_str(payload.get("threat_intel")) or ""
+    detail_text = _to_str(row.get("攻击详情")) or _to_str(payload.get("attack_detail")) or ""
+    rule_text = _to_str(rule_id) or ""
+    title_text = _to_str(title) or ""
+    normalized_text = " | ".join([intel_text, title_text, rule_text, detail_text[:1200]]).lower()
+
+    stage_hints = [
+        ("command_execution", ("命令执行", "shell", "exec", "cmd=")),
+        ("persistence", ("webshell", "持久化", "落地")),
+        ("lateral_prep", ("横向", "lateral")),
+        ("exploit", ("漏洞利用", "exploit", "cve-", "cve_")),
+        ("recon", ("扫描", "探测", "爬虫", "crawler", "scan")),
+    ]
+    severity_hints = [
+        ("critical", ("webshell", "命令执行", "rce", "0day")),
+        ("high", ("漏洞利用", "exploit", "cve-", "cve_")),
+        ("medium", ("扫描", "探测", "probe")),
+    ]
+
+    inferred_stage: str | None = None
+    for stage, keywords in stage_hints:
+        if any(keyword in normalized_text for keyword in keywords):
+            if inferred_stage is None or stage_rank(stage) > stage_rank(inferred_stage):
+                inferred_stage = stage
+
+    inferred_severity: str | None = None
+    severity_rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    for severity, keywords in severity_hints:
+        if any(keyword in normalized_text for keyword in keywords):
+            if (
+                inferred_severity is None
+                or severity_rank.get(severity, 1) > severity_rank.get(inferred_severity, 1)
+            ):
+                inferred_severity = severity
+
+    return inferred_stage, inferred_severity
 
 
 def ingest_raw_alert_bundle(
@@ -389,9 +939,9 @@ def _build_normalized_alert(
     title = title or _to_str(defaults.get("title")) or f"{raw_row['source']} mapped alert {raw_row['raw_event_id']}"
 
     occurred_at = (
-        _to_str(pick("occurred_at"))
-        or _to_str(defaults.get("occurred_at"))
-        or _to_str(raw_row["occurred_at"])
+        _normalize_occurred_at(pick("occurred_at"))
+        or _normalize_occurred_at(defaults.get("occurred_at"))
+        or _normalize_occurred_at(raw_row["occurred_at"])
         or _now_iso()
     )
     status = _normalize_status(pick("status") or defaults.get("status") or "new")
@@ -403,8 +953,26 @@ def _build_normalized_alert(
     raw_stage = pick("attack_stage")
     mapped_stage = _apply_value_map(raw_stage, value_maps.get("attack_stage", {}))
     stage_candidate = _to_str(mapped_stage or defaults.get("attack_stage") or "unknown")
-    attack_stage = normalize_stage(stage_candidate) or "unknown"
+    attack_stage = normalize_stage(stage_candidate)
+    if stage_rank(attack_stage) <= 0:
+        attack_stage = "unknown"
     raw_attack_stage = _to_str(raw_stage)
+
+    inferred_stage, inferred_severity = _infer_stage_and_severity_from_payload(
+        payload=payload,
+        title=title,
+        rule_id=raw_row["rule_id"],
+    )
+    if inferred_stage and stage_rank(inferred_stage) > stage_rank(attack_stage):
+        attack_stage = inferred_stage
+    if attack_stage == "unknown":
+        attack_stage = "recon"
+    severity_rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    if inferred_severity and severity_rank.get(inferred_severity, 1) > severity_rank.get(severity, 1):
+        severity = inferred_severity
+
+    src_ip = _to_str(pick("src_ip") or defaults.get("src_ip")) or _extract_src_ip_from_payload(payload)
+    dst_ip = _to_str(pick("dst_ip") or defaults.get("dst_ip")) or _extract_dst_ip_from_payload(payload)
 
     normalized = {
         "alert_id": f"alt_raw_{raw_row['raw_event_id'][-16:]}",
@@ -414,8 +982,8 @@ def _build_normalized_alert(
         "severity": severity,
         "attack_stage": attack_stage,
         "raw_attack_stage": raw_attack_stage,
-        "src_ip": _to_str(pick("src_ip") or defaults.get("src_ip")),
-        "dst_ip": _to_str(pick("dst_ip") or defaults.get("dst_ip")),
+        "src_ip": src_ip,
+        "dst_ip": dst_ip,
         "asset_id": _to_str(pick("asset_id") or defaults.get("asset_id")),
     }
     meta = {
@@ -506,6 +1074,10 @@ def apply_alert_normalization_maps(
     unmapped_count = 0
     processed_count = 0
     created_alert_ids: list[str] = []
+    asset_resolved_count = 0
+    asset_auto_created_count = 0
+    asset_unresolved_count = 0
+    asset_resolution_samples: list[dict[str, Any]] = []
     now = _now_iso()
 
     map_entries: list[tuple[sqlite3.Row, dict[str, Any]]] = []
@@ -601,6 +1173,31 @@ def apply_alert_normalization_maps(
                 )
             continue
 
+        asset_resolution = _resolve_alert_asset(
+            conn,
+            normalized_alert=normalized_alert,
+            payload=payload,
+            dry_run=dry_run,
+            created_at=now,
+        )
+        resolution_status = str(asset_resolution.get("status") or "").strip().lower()
+        if resolution_status == "resolved":
+            asset_resolved_count += 1
+        elif resolution_status in {"auto_created", "would_auto_create"}:
+            asset_auto_created_count += 1
+        else:
+            asset_unresolved_count += 1
+        if len(asset_resolution_samples) < 20:
+            asset_resolution_samples.append(
+                {
+                    "raw_event_id": raw_row["raw_event_id"],
+                    "alert_id": normalized_alert["alert_id"],
+                    "status": resolution_status or "unknown",
+                    "asset_id": asset_resolution.get("asset_id"),
+                    "match": asset_resolution.get("match"),
+                }
+            )
+
         mapped_count += 1
         created_alert_ids.append(normalized_alert["alert_id"])
         if dry_run:
@@ -674,6 +1271,10 @@ def apply_alert_normalization_maps(
         "unmapped": unmapped_count,
         "dry_run": dry_run,
         "created_alert_ids": created_alert_ids,
+        "asset_resolved_count": asset_resolved_count,
+        "asset_auto_created_count": asset_auto_created_count,
+        "asset_unresolved_count": asset_unresolved_count,
+        "asset_resolution_samples": asset_resolution_samples,
     }
 
 
