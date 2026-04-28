@@ -1,21 +1,33 @@
-# Next.js template
+# SentinelWeave Web UI
 
-This is a Next.js template with shadcn/ui.
+This is the Next.js frontend for SentinelWeave.
 
-## Adding components
-
-To add components to your app, run the following command:
+## Local Run
 
 ```bash
-npx shadcn@latest add button
+npm install
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:18080 npm run dev
 ```
 
-This will place the ui components in the `components` directory.
+Open `http://127.0.0.1:3000`.
 
-## Using components
+## Main Entry
 
-To use the components in your app, import them as follows:
+- `/alerts` (primary workflow page)
+- `/cases`
+- `/assets`
+- `/notifications`
+- `/reports`
 
-```tsx
-import { Button } from "@/components/ui/button";
+## Alerts Page Workflow
+
+1. Batch upload CSV files into queue.
+2. Per file, choose template or generate mapping.
+3. Batch ingest selected/ready files.
+4. Trigger patrol analysis and monitor progress.
+
+## Build Check
+
+```bash
+npm run build
 ```
