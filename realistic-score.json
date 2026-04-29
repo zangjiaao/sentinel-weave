@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "inputs": {
+    "db_path": "spike.db",
+    "answer_key_path": "fixtures/spike_memory_realistic/answer_key.json"
+  },
+  "counts": {
+    "answer_key_alert_count": 5000,
+    "attack_truth_alert_count": 150,
+    "noise_truth_alert_count": 4850,
+    "active_linked_alert_count": 121,
+    "cases_with_active_links": 2,
+    "cases_mapped_to_attack_chain": 2,
+    "active_link_contribution": {
+      "total_active_link_count": 121,
+      "auto_active_link_count": 49,
+      "manual_active_link_count": 72
+    }
+  },
+  "chains": {
+    "chain_a": {
+      "truth_alert_count": 75,
+      "truth_high_signal_alert_count": 60,
+      "predicted_alert_count": 56,
+      "true_positive_alert_count": 56,
+      "true_positive_high_signal_alert_count": 44,
+      "recall": 0.7466666666666667,
+      "precision": 1.0,
+      "high_signal_recall": 0.7333333333333333,
+      "expected_stages": [
+        "command_execution",
+        "exploit",
+        "lateral_prep",
+        "persistence",
+        "recon"
+      ],
+      "observed_correct_stages": [
+        "command_execution",
+        "exploit",
+        "lateral_prep",
+        "persistence",
+        "recon"
+      ],
+      "stage_coverage": 1.0,
+      "expected_latest_stage_rank": 5,
+      "observed_latest_stage_rank": 5,
+      "stage_progress_ratio": 1.0
+    },
+    "chain_b": {
+      "truth_alert_count": 75,
+      "truth_high_signal_alert_count": 60,
+      "predicted_alert_count": 65,
+      "true_positive_alert_count": 65,
+      "true_positive_high_signal_alert_count": 52,
+      "recall": 0.8666666666666667,
+      "precision": 1.0,
+      "high_signal_recall": 0.8666666666666667,
+      "expected_stages": [
+        "command_execution",
+        "exploit",
+        "persistence",
+        "reactivation",
+        "recon"
+      ],
+      "observed_correct_stages": [
+        "command_execution",
+        "exploit",
+        "persistence",
+        "reactivation",
+        "recon"
+      ],
+      "stage_coverage": 1.0,
+      "expected_latest_stage_rank": 4,
+      "observed_latest_stage_rank": 4,
+      "stage_progress_ratio": 1.0
+    }
+  },
+  "metrics": {
+    "cross_chain_mix_rate": 0.0,
+    "noise_leak_any_case_rate": 0.0,
+    "noise_leak_to_attack_case_rate": 0.0,
+    "primary_ip_attacker_recall": 1.0,
+    "primary_ip_attacker_hits": [
+      "198.51.100.23",
+      "203.0.113.88"
+    ],
+    "auto_link_ratio": 0.4049586776859504,
+    "manual_link_ratio": 0.5950413223140496
+  },
+  "cost": {
+    "run_count": 11,
+    "duration_ms_total": 1333345,
+    "turns_total": 138,
+    "tool_calls_total": 110,
+    "usage_input_tokens_total": 3205600,
+    "usage_output_tokens_total": 39540,
+    "usage_total_tokens_total": 3245140,
+    "runs": [
+      {
+        "run_id": "run_66cbb46dc706",
+        "status": "success",
+        "duration_ms": 106671,
+        "turns": 15,
+        "tool_calls": 13,
+        "usage_input_tokens": 243184,
+        "usage_output_tokens": 3527,
+        "usage_total_tokens": 246711
+      },
+      {
+        "run_id": "run_8a704f2b1fde",
+        "status": "success",
+        "duration_ms": 88778,
+        "turns": 14,
+        "tool_calls": 13,
+        "usage_input_tokens": 151310,
+        "usage_output_tokens": 2990,
+        "usage_total_tokens": 154300
+      },
+      {
+        "run_id": "run_7474aa5ea042",
+        "status": "success",
+        "duration_ms": 119106,
+        "turns": 17,
+        "tool_calls": 14,
+        "usage_input_tokens": 288745,
+        "usage_output_tokens": 3383,
+        "usage_total_tokens": 292128
+      },
+      {
+        "run_id": "run_16e3f659bbec",
+        "status": "success",
+        "duration_ms": 20956,
+        "turns": 7,
+        "tool_calls": 6,
+        "usage_input_tokens": 50371,
+        "usage_output_tokens": 341,
+        "usage_total_tokens": 50712
+      },
+      {
+        "run_id": "run_0824dd2d208d",
+        "status": "success",
+        "duration_ms": 31066,
+        "turns": 5,
+        "tool_calls": 4,
+        "usage_input_tokens": 63398,
+        "usage_output_tokens": 735,
+        "usage_total_tokens": 64133
+      },
+      {
+        "run_id": "run_be8c0721c1c4",
+        "status": "success",
+        "duration_ms": 64288,
+        "turns": 14,
+        "tool_calls": 13,
+        "usage_input_tokens": 128798,
+        "usage_output_tokens": 1391,
+        "usage_total_tokens": 130189
+      },
+      {
+        "run_id": "run_7ab72f1aa487",
+        "status": "success",
+        "duration_ms": 247321,
+        "turns": 13,
+        "tool_calls": 10,
+        "usage_input_tokens": 431763,
+        "usage_output_tokens": 6678,
+        "usage_total_tokens": 438441
+      },
+      {
+        "run_id": "run_605a85ebc36a",
+        "status": "success",
+        "duration_ms": 85456,
+        "turns": 11,
+        "tool_calls": 7,
+        "usage_input_tokens": 311267,
+        "usage_output_tokens": 2161,
+        "usage_total_tokens": 313428
+      },
+      {
+        "run_id": "run_ed883cb0e575",
+        "status": "success",
+        "duration_ms": 157448,
+        "turns": 14,
+        "tool_calls": 10,
+        "usage_input_tokens": 458104,
+        "usage_output_tokens": 4758,
+        "usage_total_tokens": 462862
+      },
+      {
+        "run_id": "run_7b0cdc1e75c5",
+        "status": "success",
+        "duration_ms": 213877,
+        "turns": 16,
+        "tool_calls": 10,
+        "usage_input_tokens": 606241,
+        "usage_output_tokens": 6671,
+        "usage_total_tokens": 612912
+      },
+      {
+        "run_id": "run_a74c0906991d",
+        "status": "success",
+        "duration_ms": 198378,
+        "turns": 12,
+        "tool_calls": 10,
+        "usage_input_tokens": 472419,
+        "usage_output_tokens": 6905,
+        "usage_total_tokens": 479324
+      }
+    ]
+  },
+  "score": {
+    "overall": 92.0,
+    "components": {
+      "mean_chain_high_signal_recall": 80.0,
+      "mean_chain_stage_coverage": 100.0,
+      "noise_control": 100.0,
+      "cross_chain_control": 100.0,
+      "primary_ip_attacker_recall": 100.0
+    },
+    "pass_thresholds": {
+      "min_chain_high_signal_recall": 0.7,
+      "max_cross_chain_mix_rate": 0.15,
+      "max_noise_leak_to_attack_case_rate": 0.25,
+      "min_chain_stage_coverage": 0.8,
+      "min_primary_ip_attacker_recall": 1.0
+    },
+    "pass": true,
+    "fail_reasons": []
+  }
+}
